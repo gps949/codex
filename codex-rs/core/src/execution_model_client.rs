@@ -111,10 +111,11 @@ struct AccountBoundModelClient {
 ///
 /// The logical Codex session stays stable while only account-bound model/provider/transport state
 /// is replaced after a scheduler transition.
+#[derive(Clone)]
 pub(crate) struct ExecutionModelClient {
     execution_auth: Arc<ExecutionAuth>,
     blueprint: ModelClientBlueprint,
-    cached: Mutex<Option<AccountBoundModelClient>>,
+    cached: Arc<Mutex<Option<AccountBoundModelClient>>>,
 }
 
 impl ExecutionModelClient {
@@ -122,12 +123,31 @@ impl ExecutionModelClient {
         Self {
             execution_auth,
             blueprint,
-            cached: Mutex::new(None),
+            cached: Arc::new(Mutex::new(None)),
         }
     }
 
     pub(crate) fn execution_auth(&self) -> &Arc<ExecutionAuth> {
         &self.execution_auth
+    }
+
+    /// Pins the currently selected execution identity into a concrete stock ModelClient. Long-lived
+    /// protocols such as Realtime must keep this returned client for their full lifetime so a
+    /// later pool transition cannot mix call-create and sideband authentication.
+    pub(crate) fn bind_active_client(
+        &self,
+    ) -> std::io::Result<(ExecutionAuthLease, ModelClient)> {
+        let lease = self.execution_auth.active_lease().ok_or_else(|| {
+            std::io::Error::other("no schedulable Codex execution account is available")
+        })?;
+        let client = self.client_for_lease(&lease)?;
+        Ok((lease, client))
+    }
+
+    pub(crate) fn auth_manager(&self) -> Option<Arc<codex_login::AuthManager>> {
+        self.execution_auth
+            .active_lease()
+            .map(|lease| lease.auth_manager())
     }
 
     pub(crate) fn responses_websocket_enabled(&self) -> bool {
