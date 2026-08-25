@@ -92,6 +92,16 @@ pub(crate) struct AccountRequestProcessor {
     config: Arc<Config>,
     config_manager: ConfigManager,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
+    /// Aborts the accountPool/updated push task when the last processor clone drops.
+    _pool_updates_task: Arc<AbortOnDrop>,
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl AccountRequestProcessor {
@@ -103,6 +113,8 @@ impl AccountRequestProcessor {
         config_manager: ConfigManager,
     ) -> Self {
         let execution_account_pool = ExecutionAccountPoolHandle::shared(Arc::clone(&auth_manager));
+        let pool_updates_task =
+            spawn_account_pool_updates_task(execution_account_pool.clone(), Arc::clone(&outgoing));
         Self {
             auth_manager,
             execution_account_pool,
@@ -111,6 +123,7 @@ impl AccountRequestProcessor {
             config,
             config_manager,
             active_login: Arc::new(Mutex::new(None)),
+            _pool_updates_task: Arc::new(AbortOnDrop(pool_updates_task)),
         }
     }
 
@@ -1553,6 +1566,49 @@ impl AccountRequestProcessor {
             AddCreditsNudgeCreditType::UsageLimit => BackendAddCreditsNudgeCreditType::UsageLimit,
         }
     }
+}
+
+/// Pushes `accountPool/updated` to this connection whenever the pool's scheduling state changes
+/// (activation, exhaustion, recovery, rate-limit observations), so clients never need to poll.
+/// Identity fields (plan/email) are intentionally omitted; they require per-profile credential
+/// reads and are served by `accountPool/read` on demand.
+fn spawn_account_pool_updates_task(
+    pool: ExecutionAccountPoolHandle,
+    outgoing: Arc<OutgoingMessageSender>,
+) -> tokio::task::JoinHandle<()> {
+    let mut changes = pool.change_receiver();
+    tokio::spawn(async move {
+        while changes.changed().await.is_ok() {
+            let snapshots = pool.snapshots();
+            if snapshots.is_empty() {
+                continue;
+            }
+            let active = pool.active_identity();
+            let accounts = snapshots
+                .into_iter()
+                .map(|snapshot| codex_app_server_protocol::AccountPoolAccount {
+                    profile_id: snapshot.profile.id.to_string(),
+                    label: snapshot.profile.label.clone(),
+                    priority: snapshot.profile.priority,
+                    is_active: snapshot.is_active,
+                    availability: account_pool_availability(snapshot.availability),
+                    plan_type: None,
+                    email: None,
+                    rate_limits: account_pool_rate_limits(snapshot.rate_limits),
+                })
+                .collect();
+            let notification = codex_app_server_protocol::AccountPoolUpdatedNotification {
+                active_profile_id: active
+                    .as_ref()
+                    .map(|identity| identity.profile_id.to_string()),
+                active_generation: active.map(|identity| identity.generation),
+                accounts,
+            };
+            outgoing
+                .send_server_notification(ServerNotification::AccountPoolUpdated(notification))
+                .await;
+        }
+    })
 }
 
 fn account_pool_availability(

@@ -5283,6 +5283,26 @@
           "properties": {
             "method": {
               "enum": [
+                "accountPool/updated"
+              ],
+              "title": "AccountPool/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AccountPoolUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "AccountPool/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "app/list/updated"
               ],
               "title": "App/list/updatedNotificationMethod",
@@ -6638,6 +6658,37 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "AccountPoolUpdatedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Pushed whenever the account pool's scheduling state changes (active account, availability, or observed rate limits). Unlike `accountPool/read`, the per-account `planType`/`email` identity fields are omitted (`null`) to keep the notification cheap; fetch them on demand.",
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/definitions/v2/AccountPoolAccount"
+            },
+            "type": "array"
+          },
+          "activeGeneration": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "activeProfileId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "accounts"
+        ],
+        "title": "AccountPoolUpdatedNotification",
         "type": "object"
       },
       "AccountRateLimitsUpdatedNotification": {

@@ -33,6 +33,19 @@ pub struct AccountPoolUseResponse {
     pub generation: u64,
 }
 
+/// Pushed whenever the account pool's scheduling state changes (active account, availability,
+/// or observed rate limits). Unlike `accountPool/read`, the per-account `planType`/`email`
+/// identity fields are omitted (`null`) to keep the notification cheap; fetch them on demand.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountPoolUpdatedNotification {
+    pub active_profile_id: Option<String>,
+    #[ts(type = "number | null")]
+    pub active_generation: Option<u64>,
+    pub accounts: Vec<AccountPoolAccount>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

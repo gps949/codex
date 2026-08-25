@@ -91,10 +91,8 @@ platforms.
 
 ## Fork feature roadmap (not yet implemented)
 
-- `accountPool/updated` app-server notification (push instead of polling; the
-  pool already exposes `change_receiver()`).
-- TUI surface: active-account indicator and an `/account` picker.
+- TUI surface: active-account indicator and an `/account` picker. (Automatic
+  switches are already visible in every client through warning events.)
 - Automatic rate-limit reset-credit consumption before rotating accounts.
 - Remote-control enrollment continuity across account switches (enrollment is
   per ChatGPT account id; a rotation currently requires reconnect/re-pair).
-- Integration tests for the failover path under `core/tests/suite`.
