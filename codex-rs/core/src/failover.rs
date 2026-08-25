@@ -24,7 +24,7 @@ pub(crate) enum FailoverCause {
 }
 
 /// Result of handling an inference error through the native execution-account pool.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum FailoverOutcome {
     /// The error is unrelated to execution-account availability and keeps normal Codex handling.
     NotApplicable,
@@ -64,22 +64,22 @@ impl FailoverCoordinator {
                 let reset_at = quota_reset_or_reprobe(limit.resets_at.as_ref());
                 let next = execution_auth
                     .failover_after_quota_exhausted(failed_lease, Some(reset_at))?;
-                Self::finish_rotation(
+                Ok(Self::finish_rotation(
                     failed_lease,
                     next,
                     FailoverCause::UsageLimitReached,
-                )
+                ))
             }
             CodexErrorDetails::RefreshTokenFailed(refresh_error) => {
                 let next = execution_auth.failover_after_auth_unavailable(
                     failed_lease,
                     refresh_error.to_string(),
                 )?;
-                Self::finish_rotation(
+                Ok(Self::finish_rotation(
                     failed_lease,
                     next,
                     FailoverCause::AuthenticationUnavailable,
-                )
+                ))
             }
             _ => Ok(FailoverOutcome::NotApplicable),
         }
@@ -89,9 +89,9 @@ impl FailoverCoordinator {
         failed_lease: &ExecutionAuthLease,
         next: Option<ExecutionAuthLease>,
         cause: FailoverCause,
-    ) -> std::io::Result<FailoverOutcome> {
+    ) -> FailoverOutcome {
         let Some(next_lease) = next else {
-            return Ok(FailoverOutcome::PoolExhausted { cause });
+            return FailoverOutcome::PoolExhausted { cause };
         };
 
         let from_profile = failed_lease.profile_id().cloned();
@@ -99,14 +99,14 @@ impl FailoverCoordinator {
         let to_profile = next_lease.profile_id().cloned();
         let to_generation = next_lease.generation();
 
-        Ok(FailoverOutcome::Rebound {
+        FailoverOutcome::Rebound {
             cause,
             from_profile,
             from_generation,
             to_profile,
             to_generation,
             next_lease,
-        })
+        }
     }
 }
 
