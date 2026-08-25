@@ -77,7 +77,11 @@ impl AccountRuntimeStateStore {
                 .profiles
                 .into_iter()
                 .map(|mut profile| {
-                    if profile.exhausted_until.is_some_and(|reset| reset <= now) {
+                    if profile
+                        .exhausted_until
+                        .as_ref()
+                        .is_some_and(|reset| reset <= &now)
+                    {
                         profile.exhausted_until = None;
                     }
                     profile
@@ -134,6 +138,7 @@ impl AccountRuntimeStateStore {
 }
 
 fn runtime_state_from_snapshots(snapshots: &[AccountPoolSnapshot]) -> AccountRuntimeState {
+    let now = Utc::now();
     AccountRuntimeState {
         active_profile_id: snapshots
             .iter()
@@ -146,7 +151,7 @@ fn runtime_state_from_snapshots(snapshots: &[AccountPoolSnapshot]) -> AccountRun
                 exhausted_until: match &snapshot.availability {
                     AccountAvailability::Exhausted {
                         resets_at: Some(reset),
-                    } if *reset > Utc::now() => Some(*reset),
+                    } if reset > &now => Some(reset.clone()),
                     _ => None,
                 },
                 rate_limits: snapshot.rate_limits.clone(),
