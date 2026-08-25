@@ -1,3 +1,4 @@
+pub mod account_login;
 pub mod account_pool;
 pub mod account_store;
 pub mod auth;
@@ -12,6 +13,11 @@ mod pkce;
 mod server;
 mod success_page;
 
+pub use account_login::AccountLoginFlowError;
+pub use account_login::PendingAccountBrowserLogin;
+pub use account_login::PendingAccountDeviceLogin;
+pub use account_login::begin_account_browser_login;
+pub use account_login::begin_account_device_login;
 pub use account_pool::AccountAvailability;
 pub use account_pool::AccountLease;
 pub use account_pool::AccountPool;
@@ -21,6 +27,8 @@ pub use account_pool::AccountProfile;
 pub use account_pool::AccountProfileId;
 pub use account_pool::AccountRateLimitWindow;
 pub use account_pool::AccountRateLimits;
+pub use account_store::AccountProfileRecord;
+pub use account_store::AccountProfileState;
 pub use account_store::AccountProfileStore;
 pub use account_store::AccountProfileStoreError;
 pub use callback_params::LoginCallbackResult;
