@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use codex_features::FEATURES;
+use codex_features::Feature;
 use codex_http_client::HttpClientFactory;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider_info::ModelProviderInfo;
@@ -14,6 +16,8 @@ use crate::client::ModelClient;
 use crate::client::ModelClientSession;
 use crate::execution_auth::ExecutionAuth;
 use crate::execution_auth::ExecutionAuthLease;
+use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
 
 /// Stable, account-independent constructor state for a session-scoped ModelClient.
 ///
@@ -127,6 +131,51 @@ impl ExecutionModelClient {
         }
     }
 
+    /// Builds the native execution client for an already resolved Codex turn without changing
+    /// SessionServices or ThreadManager ownership. All fields mirror the stock Session::new
+    /// ModelClient construction exactly; the only semantic difference is that auth comes from an
+    /// immutable execution lease.
+    pub(crate) async fn for_turn(
+        sess: &Session,
+        turn_context: &TurnContext,
+    ) -> CodexResult<Self> {
+        let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
+        execution_auth
+            .ensure_runtime_from_config(turn_context.config.as_ref())
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+
+        let config = turn_context.config.as_ref();
+        let blueprint = ModelClientBlueprint::new(
+            if config.features.enabled(Feature::UseAgentIdentity) {
+                AgentIdentityAuthPolicy::ChatGptAuth
+            } else {
+                AgentIdentityAuthPolicy::JwtOnly
+            },
+            sess.thread_id,
+            turn_context.provider.info().clone(),
+            turn_context.session_source.clone(),
+            turn_context.originator.clone(),
+            config.model_verbosity,
+            config.features.enabled(Feature::ContentItemKinds),
+            config.features.enabled(Feature::EnableRequestCompression),
+            config.features.enabled(Feature::RuntimeMetrics),
+            model_client_beta_features_header(config),
+            config
+                .features
+                .enabled(Feature::ConcurrentReasoningSummaries),
+            sess.services.attestation_provider.clone(),
+            config.http_client_factory(),
+        )
+        .with_prompt_cache_key_override(
+            crate::guardian::prompt_cache_key_override_for_review_session(
+                &turn_context.session_source,
+                turn_context.parent_thread_id,
+            ),
+        );
+        Ok(Self::new(execution_auth, blueprint))
+    }
+
     pub(crate) fn execution_auth(&self) -> &Arc<ExecutionAuth> {
         &self.execution_auth
     }
@@ -171,6 +220,25 @@ impl ExecutionModelClient {
             std::io::Error::other("no schedulable Codex execution account is available")
         })?;
         self.new_session_for_lease(lease)
+    }
+
+    /// Preserves the stock prewarmed session for ordinary single-account Codex. Once a native pool
+    /// is active, the outer-auth prewarm is intentionally discarded because it is not bound to an
+    /// immutable AccountLease.
+    pub(crate) fn adopt_legacy_prewarmed_session(
+        &self,
+        session: ModelClientSession,
+    ) -> std::io::Result<Option<ExecutionModelClientSession>> {
+        if self.execution_auth.multi_account_enabled() {
+            return Ok(None);
+        }
+        let lease = self.execution_auth.active_lease().ok_or_else(|| {
+            std::io::Error::other("no schedulable Codex execution account is available")
+        })?;
+        Ok(Some(ExecutionModelClientSession {
+            lease,
+            inner: session,
+        }))
     }
 
     pub(crate) fn new_session_for_lease(
@@ -336,4 +404,17 @@ impl std::ops::DerefMut for ExecutionModelClientSession {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
+}
+
+fn model_client_beta_features_header(config: &crate::config::Config) -> Option<String> {
+    let beta_features_header = FEATURES
+        .iter()
+        .filter_map(|spec| {
+            let advertise = spec.stage.experimental_menu_description().is_some()
+                || spec.id == Feature::RemoteCompactionV2;
+            (advertise && config.features.enabled(spec.id)).then_some(spec.key)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    (!beta_features_header.is_empty()).then_some(beta_features_header)
 }
