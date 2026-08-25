@@ -1,3 +1,4 @@
+pub mod account_pool;
 pub mod auth;
 pub mod auth_env_telemetry;
 pub mod test_support;
@@ -10,6 +11,15 @@ mod pkce;
 mod server;
 mod success_page;
 
+pub use account_pool::AccountAvailability;
+pub use account_pool::AccountLease;
+pub use account_pool::AccountPool;
+pub use account_pool::AccountPoolError;
+pub use account_pool::AccountPoolSnapshot;
+pub use account_pool::AccountProfile;
+pub use account_pool::AccountProfileId;
+pub use account_pool::AccountRateLimitWindow;
+pub use account_pool::AccountRateLimits;
 pub use callback_params::LoginCallbackResult;
 pub use callback_params::LoginOnboardingEntrypoint;
 pub use codex_config::types::AuthCredentialsStoreMode;
