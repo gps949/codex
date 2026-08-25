@@ -12,7 +12,6 @@ on:
 jobs:
   native-multi-account-live:
     name: Native multi-account live wiring
-    if: ${{ github.event_name == 'push' && github.ref_name == 'feature/native-multi-account' && !contains(github.event.head_commit.message, 'feat(core): wire native multi-account failover') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -76,43 +75,36 @@ jobs:
   # version-controlled list that the main-branch ruleset should require.
   bazel:
     name: Bazel
-    if: ${{ github.event_name != 'push' || github.ref_name == 'main' }}
     uses: ./.github/workflows/bazel.yml
     secrets: inherit
 
   blob-size-policy:
     name: Blob size policy
-    if: ${{ github.event_name != 'push' || github.ref_name == 'main' }}
     uses: ./.github/workflows/blob-size-policy.yml
     secrets: inherit
 
   cargo-deny:
     name: cargo-deny
-    if: ${{ github.event_name != 'push' || github.ref_name == 'main' }}
     uses: ./.github/workflows/cargo-deny.yml
     secrets: inherit
 
   codespell:
     name: Codespell
-    if: ${{ github.event_name != 'push' || github.ref_name == 'main' }}
     uses: ./.github/workflows/codespell.yml
     secrets: inherit
 
   repo-checks:
     name: repo-checks
-    if: ${{ github.event_name != 'push' || github.ref_name == 'main' }}
     uses: ./.github/workflows/repo-checks.yml
     secrets: inherit
 
   rust-ci:
     name: rust-ci
-    if: ${{ github.event_name != 'push' || github.ref_name == 'main' }}
     uses: ./.github/workflows/rust-ci.yml
     secrets: inherit
 
   sdk:
     name: sdk
-    if: ${{ github.event_name != 'push' || github.ref_name == 'main' }}
     uses: ./.github/workflows/sdk.yml
     secrets: inherit
 
@@ -120,7 +112,7 @@ jobs:
     name: CI required
     # Without `always()`, GitHub skips this job after a failed dependency and a
     # required check can appear successful instead of reporting the failure.
-    if: ${{ always() && (github.event_name != 'push' || github.ref_name == 'main') }}
+    if: ${{ always() }}
     needs:
       - bazel
       - blob-size-policy
