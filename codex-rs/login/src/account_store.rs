@@ -8,15 +8,37 @@ use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::account_pool::AccountPoolError;
 use crate::account_pool::AccountProfile;
 use crate::account_pool::AccountProfileId;
-use crate::account_pool::AccountPoolError;
 
 const ACCOUNT_PROFILES_VERSION: u32 = 1;
 const ACCOUNT_PROFILES_MANIFEST: &str = "account-profiles.json";
 const ACCOUNT_CREDENTIALS_DIR: &str = "auth-profiles";
 const LEGACY_ROOT_PROFILE_ID: &str = "legacy-root";
 const PROFILE_ALLOCATION_ATTEMPTS: usize = 8;
+
+/// Persistent login lifecycle for an account profile.
+///
+/// A profile is allocated before OAuth begins so credentials are written directly to their final
+/// storage location, but it is not eligible for scheduling until login has completed successfully.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountProfileState {
+    PendingLogin,
+    Ready,
+}
+
+fn default_profile_state() -> AccountProfileState {
+    // Profiles written before the lifecycle field existed represented completed profiles.
+    AccountProfileState::Ready
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountProfileRecord {
+    pub profile: AccountProfile,
+    pub state: AccountProfileState,
+}
 
 /// Owns the persistent account-profile layout inside one shared `CODEX_HOME`.
 ///
@@ -44,22 +66,33 @@ impl AccountProfileStore {
         self.codex_home.join(ACCOUNT_CREDENTIALS_DIR)
     }
 
-    /// Loads all persisted profiles and resolves their credential homes against the current
-    /// `CODEX_HOME`, so moving the entire Codex home does not bake stale absolute paths into the
-    /// manifest.
+    /// Loads profiles that completed login and are eligible to be materialized into the account
+    /// pool. Pending profiles remain visible through [`Self::load_profile_records`].
     pub fn load_profiles(&self) -> Result<Vec<AccountProfile>, AccountProfileStoreError> {
+        Ok(self
+            .load_profile_records()?
+            .into_iter()
+            .filter(|record| record.state == AccountProfileState::Ready)
+            .map(|record| record.profile)
+            .collect())
+    }
+
+    /// Loads every persisted profile, including interrupted/pending login attempts.
+    pub fn load_profile_records(
+        &self,
+    ) -> Result<Vec<AccountProfileRecord>, AccountProfileStoreError> {
         let manifest = self.load_manifest()?;
         manifest
             .profiles
             .into_iter()
-            .map(|stored| self.resolve_profile(stored))
+            .map(|stored| self.resolve_record(stored))
             .collect()
     }
 
     /// Allocates a permanent profile id and credential directory before OAuth starts.
     ///
-    /// This guarantees file and keyring storage derive from the final credential home for the
-    /// complete login and refresh lifecycle.
+    /// The manifest entry starts as `pending_login`; callers must invoke [`Self::complete_profile`]
+    /// only after the official login flow has persisted usable credentials.
     pub fn allocate_profile(
         &self,
         label: Option<String>,
@@ -82,6 +115,7 @@ impl AccountProfileStore {
                         label: label.clone(),
                         priority,
                         credential_location: CredentialLocation::ManagedProfile,
+                        state: AccountProfileState::PendingLogin,
                     };
                     manifest.profiles.push(stored);
                     if let Err(error) = self.save_manifest(&manifest) {
@@ -96,6 +130,52 @@ impl AccountProfileStore {
         }
 
         Err(AccountProfileStoreError::ProfileIdAllocationExhausted)
+    }
+
+    /// Marks a profile eligible for scheduling after its OAuth flow has completed.
+    pub fn complete_profile(
+        &self,
+        id: &AccountProfileId,
+    ) -> Result<AccountProfile, AccountProfileStoreError> {
+        let mut manifest = self.load_manifest()?;
+        let stored = manifest
+            .profiles
+            .iter_mut()
+            .find(|profile| &profile.id == id)
+            .ok_or_else(|| AccountProfileStoreError::UnknownProfile(id.clone()))?;
+        stored.state = AccountProfileState::Ready;
+        let resolved = stored.clone();
+        self.save_manifest(&manifest)?;
+        self.resolve_profile(resolved)
+    }
+
+    /// Removes an unfinished managed profile and its credential directory. Ready profiles require
+    /// the explicit metadata-removal and credential-purge operations so a normal logout/remove UI
+    /// can control destructive behavior deliberately.
+    pub fn abandon_pending_profile(
+        &self,
+        id: &AccountProfileId,
+    ) -> Result<bool, AccountProfileStoreError> {
+        let mut manifest = self.load_manifest()?;
+        let Some(index) = manifest.profiles.iter().position(|profile| &profile.id == id) else {
+            return Ok(false);
+        };
+        let profile = &manifest.profiles[index];
+        if profile.state != AccountProfileState::PendingLogin {
+            return Err(AccountProfileStoreError::ProfileNotPending(id.clone()));
+        }
+        if profile.credential_location == CredentialLocation::LegacyRoot {
+            return Err(AccountProfileStoreError::CannotPurgeLegacyRoot);
+        }
+
+        manifest.profiles.remove(index);
+        self.save_manifest(&manifest)?;
+        let path = self.credential_home_for(id);
+        match fs::remove_dir_all(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Adds the existing root credentials as a compatibility profile without moving or copying
@@ -127,6 +207,7 @@ impl AccountProfileStore {
             label: label.clone(),
             priority,
             credential_location: CredentialLocation::LegacyRoot,
+            state: AccountProfileState::Ready,
         });
         self.save_manifest(&manifest)?;
         Ok(AccountProfile::new(
@@ -172,6 +253,17 @@ impl AccountProfileStore {
 
     pub fn credential_home_for(&self, id: &AccountProfileId) -> PathBuf {
         self.managed_credentials_root().join(id.as_str())
+    }
+
+    fn resolve_record(
+        &self,
+        stored: StoredAccountProfile,
+    ) -> Result<AccountProfileRecord, AccountProfileStoreError> {
+        let state = stored.state;
+        Ok(AccountProfileRecord {
+            profile: self.resolve_profile(stored)?,
+            state,
+        })
     }
 
     fn resolve_profile(
@@ -257,6 +349,8 @@ struct StoredAccountProfile {
     label: Option<String>,
     priority: u32,
     credential_location: CredentialLocation,
+    #[serde(default = "default_profile_state")]
+    state: AccountProfileState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -281,6 +375,11 @@ fn validate_manifest(manifest: &AccountProfilesManifest) -> Result<(), AccountPr
                 profile.id.clone(),
             ));
         }
+        if profile.credential_location == CredentialLocation::LegacyRoot
+            && profile.state != AccountProfileState::Ready
+        {
+            return Err(AccountProfileStoreError::LegacyProfileMustBeReady);
+        }
     }
     Ok(())
 }
@@ -297,8 +396,14 @@ pub enum AccountProfileStoreError {
     UnsupportedManifestVersion(u32),
     #[error("duplicate account profile in manifest: {0}")]
     DuplicateProfile(AccountProfileId),
+    #[error("unknown account profile: {0}")]
+    UnknownProfile(AccountProfileId),
+    #[error("account profile is not pending login: {0}")]
+    ProfileNotPending(AccountProfileId),
     #[error("legacy root credential location requires profile id {LEGACY_ROOT_PROFILE_ID}, found {0}")]
     InvalidLegacyProfileId(AccountProfileId),
+    #[error("legacy root account profile must always be ready")]
+    LegacyProfileMustBeReady,
     #[error("the legacy root profile id is already used by a managed credential profile")]
     LegacyProfileConflict,
     #[error("could not allocate a unique account profile id")]
@@ -314,7 +419,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_profile_round_trips_without_persisting_absolute_home() {
+    fn managed_profile_is_pending_until_login_completes() {
         let temp = TempDir::new().expect("temp dir");
         let store = AccountProfileStore::new(temp.path().join("codex"));
         let profile = store
@@ -324,13 +429,45 @@ mod tests {
         assert!(profile.credential_home.is_dir());
         let manifest = fs::read_to_string(store.manifest_path()).expect("read manifest");
         assert!(!manifest.contains(profile.credential_home.to_string_lossy().as_ref()));
+        assert!(store.load_profiles().expect("ready profiles").is_empty());
+        assert_eq!(
+            store.load_profile_records().expect("all profiles"),
+            vec![AccountProfileRecord {
+                profile: profile.clone(),
+                state: AccountProfileState::PendingLogin,
+            }]
+        );
 
-        let loaded = store.load_profiles().expect("load profiles");
-        assert_eq!(loaded, vec![profile]);
+        let completed = store
+            .complete_profile(&profile.id)
+            .expect("complete profile");
+        assert_eq!(completed, profile);
+        assert_eq!(store.load_profiles().expect("ready profiles"), vec![profile]);
     }
 
     #[test]
-    fn legacy_profile_keeps_root_credential_home() {
+    fn abandoned_pending_profile_removes_metadata_and_directory() {
+        let temp = TempDir::new().expect("temp dir");
+        let store = AccountProfileStore::new(temp.path().join("codex"));
+        let profile = store.allocate_profile(None, 10).expect("allocate profile");
+        assert!(profile.credential_home.exists());
+
+        assert!(
+            store
+                .abandon_pending_profile(&profile.id)
+                .expect("abandon profile")
+        );
+        assert!(!profile.credential_home.exists());
+        assert!(
+            store
+                .load_profile_records()
+                .expect("all profiles")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn legacy_profile_keeps_root_credential_home_and_is_ready() {
         let temp = TempDir::new().expect("temp dir");
         let root = temp.path().join("codex");
         let store = AccountProfileStore::new(root.clone());
@@ -340,10 +477,7 @@ mod tests {
 
         assert_eq!(profile.id.as_str(), LEGACY_ROOT_PROFILE_ID);
         assert_eq!(profile.credential_home, root);
-        assert_eq!(
-            store.load_profiles().expect("load profiles"),
-            vec![profile]
-        );
+        assert_eq!(store.load_profiles().expect("load profiles"), vec![profile]);
     }
 
     #[test]
@@ -358,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_profile_ids_in_manifest() {
+    fn rejects_duplicate_profile_ids_in_legacy_manifest_shape() {
         let temp = TempDir::new().expect("temp dir");
         let root = temp.path().join("codex");
         fs::create_dir_all(&root).expect("create root");
