@@ -24,4 +24,10 @@ replace_once(
     "                    let mut checkpoint = attempt_state\n                        .as_ref()\n                        .map(crate::sampling_attempt::SamplingAttemptState::snapshot)\n                        .unwrap_or_default();",
 )
 
+replace_once(
+    "codex-rs/login/src/account_pool.rs",
+    "            } if resets_at <= now\n        ) {",
+    "            } if &*resets_at <= now\n        ) {",
+)
+
 print("native multi-account live patch fixups applied successfully")
