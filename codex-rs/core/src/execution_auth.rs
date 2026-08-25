@@ -1,16 +1,20 @@
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use chrono::DateTime;
 use chrono::Utc;
 use codex_login::AccountLease;
 use codex_login::AccountPool;
 use codex_login::AccountPoolRuntime;
+use codex_login::AccountPoolRuntimeError;
 use codex_login::AccountProfileId;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AuthManager;
+use codex_login::AuthManagerConfig;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
+use tokio::sync::Mutex;
 use tokio::sync::watch;
 
 /// Process/session-facing authentication facade for inference execution.
@@ -18,9 +22,15 @@ use tokio::sync::watch;
 /// The logical Codex thread, app-server and local state stay account-independent. Every concrete
 /// model client/request instead captures an immutable [`ExecutionAuthLease`]. Switching accounts
 /// never mutates the AuthManager underneath an already account-bound ModelClient.
+///
+/// Construction is synchronous so existing ThreadManager creation sites do not need to become
+/// async. Native account pooling is installed lazily from the resolved Config when the first
+/// session starts. The same `ExecutionAuth` is shared by root threads and subagents.
 pub(crate) struct ExecutionAuth {
     legacy_manager: Arc<AuthManager>,
-    runtime: Option<AccountPoolRuntime>,
+    runtime: RwLock<Option<Arc<AccountPoolRuntime>>>,
+    runtime_init_lock: Mutex<()>,
+    change_tx: watch::Sender<u64>,
 }
 
 /// Immutable execution identity captured by one account-bound model client/request path.
@@ -42,9 +52,12 @@ impl std::fmt::Debug for ExecutionAuthLease {
 
 impl ExecutionAuth {
     pub(crate) fn legacy(legacy_manager: Arc<AuthManager>) -> Self {
+        let (change_tx, _change_rx) = watch::channel(0);
         Self {
             legacy_manager,
-            runtime: None,
+            runtime: RwLock::new(None),
+            runtime_init_lock: Mutex::new(()),
+            change_tx,
         }
     }
 
@@ -52,18 +65,64 @@ impl ExecutionAuth {
         legacy_manager: Arc<AuthManager>,
         runtime: AccountPoolRuntime,
     ) -> Self {
+        let (change_tx, _change_rx) = watch::channel(0);
         Self {
             legacy_manager,
-            runtime: Some(runtime),
+            runtime: RwLock::new(Some(Arc::new(runtime))),
+            runtime_init_lock: Mutex::new(()),
+            change_tx,
         }
     }
 
-    pub(crate) fn runtime(&self) -> Option<&AccountPoolRuntime> {
-        self.runtime.as_ref()
+    /// Installs native account pooling once a profile manifest exists. Repeated calls are cheap and
+    /// safe, and a process that started in stock single-account mode can enable pooling later after
+    /// `account add` creates the manifest without requiring a restart.
+    pub(crate) async fn ensure_runtime_from_config(
+        &self,
+        config: &impl AuthManagerConfig,
+    ) -> Result<bool, AccountPoolRuntimeError> {
+        if self.runtime().is_some() {
+            return Ok(true);
+        }
+
+        let _init_guard = self.runtime_init_lock.lock().await;
+        if self.runtime().is_some() {
+            return Ok(true);
+        }
+
+        let Some(runtime) = AccountPoolRuntime::try_install_from_config(
+            Arc::clone(&self.legacy_manager),
+            config,
+            /*include_existing_root_login*/ true,
+        )
+        .await?
+        else {
+            return Ok(false);
+        };
+
+        let runtime = Arc::new(runtime);
+        let pool = runtime.pool();
+        {
+            let mut guard = self
+                .runtime
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = Some(Arc::clone(&runtime));
+        }
+        self.notify_change();
+        self.spawn_pool_change_bridge(pool);
+        Ok(true)
+    }
+
+    pub(crate) fn runtime(&self) -> Option<Arc<AccountPoolRuntime>> {
+        self.runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn account_pool(&self) -> Option<Arc<AccountPool>> {
-        self.runtime.as_ref().map(AccountPoolRuntime::pool)
+        self.runtime().map(|runtime| runtime.pool())
     }
 
     /// Whether this logical session can move between more than one configured execution identity.
@@ -96,19 +155,15 @@ impl ExecutionAuth {
     /// In pooled mode the AccountPoolRuntime keeps this outer manager synchronized with the active
     /// account; inference itself must use [`Self::active_lease`] instead.
     pub(crate) fn compatibility_auth_manager(&self) -> Arc<AuthManager> {
-        self.runtime
-            .as_ref()
-            .map(AccountPoolRuntime::auth_manager)
+        self.runtime()
+            .map(|runtime| runtime.auth_manager())
             .unwrap_or_else(|| Arc::clone(&self.legacy_manager))
     }
 
-    /// Unified change stream for MCP/plugins/models/UI surfaces that should refresh after an
-    /// account switch, cooldown/reset, or active credential refresh.
+    /// Unified change stream for future app-server/TUI status surfaces. It remains valid across the
+    /// transition from legacy auth to pooled auth because `ExecutionAuth` owns the channel itself.
     pub(crate) fn active_auth_change_receiver(&self) -> watch::Receiver<u64> {
-        match self.account_pool() {
-            Some(pool) => pool.change_receiver(),
-            None => self.legacy_manager.auth_change_receiver(),
-        }
+        self.change_tx.subscribe()
     }
 
     /// Associates a backend rate-limit snapshot with the exact lease that observed it. Cached
@@ -160,6 +215,21 @@ impl ExecutionAuth {
         pool.mark_authentication_unavailable(account_lease, message)
             .map(|next| next.map(ExecutionAuthLease::from_account_lease))
             .map_err(std::io::Error::other)
+    }
+
+    fn spawn_pool_change_bridge(&self, pool: Arc<AccountPool>) {
+        let mut changes = pool.change_receiver();
+        let change_tx = self.change_tx.clone();
+        tokio::spawn(async move {
+            while changes.changed().await.is_ok() {
+                change_tx.send_modify(|revision| *revision = revision.wrapping_add(1));
+            }
+        });
+    }
+
+    fn notify_change(&self) {
+        self.change_tx
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 }
 
