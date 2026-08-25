@@ -48,4 +48,30 @@ replace_once(
     "                envelope.into_item(),\n                source_profile_id.as_deref(),\n                self.target_profile_id.as_deref(),",
 )
 
+# `cargo check` does not compile cfg(test), so metadata literals in unit-test modules must also use
+# the forward-compatible default tail after execution provenance fields were added.
+replace_once(
+    "codex-rs/core/src/session/input_queue.rs",
+    "            metadata: Some(CodexHarnessMetadata {\n                client_authored: true,\n            }),",
+    "            metadata: Some(CodexHarnessMetadata {\n                client_authored: true,\n                ..CodexHarnessMetadata::default()\n            }),",
+)
+
+replace_once(
+    "codex-rs/core/src/compact_remote_v2_image_budget_tests.rs",
+    "        metadata: Some(CodexHarnessMetadata {\n            client_authored: true,\n        }),",
+    "        metadata: Some(CodexHarnessMetadata {\n            client_authored: true,\n            ..CodexHarnessMetadata::default()\n        }),",
+)
+
+replace_once(
+    "codex-rs/core/src/compact_remote_v2.rs",
+    "                    Some(CodexHarnessMetadata {\n                        client_authored: true,\n                    }),\n                    Some(CodexHarnessMetadata::default()),",
+    "                    Some(CodexHarnessMetadata {\n                        client_authored: true,\n                        ..CodexHarnessMetadata::default()\n                    }),\n                    Some(CodexHarnessMetadata::default()),",
+)
+
+replace_once(
+    "codex-rs/core/src/compact_remote_v2.rs",
+    "                        metadata: Some(CodexHarnessMetadata {\n                            client_authored: true,\n                        }),",
+    "                        metadata: Some(CodexHarnessMetadata {\n                            client_authored: true,\n                            ..CodexHarnessMetadata::default()\n                        }),",
+)
+
 print("native multi-account live patch fixups applied successfully")
