@@ -62,8 +62,8 @@ impl FailoverCoordinator {
                     execution_auth.observe_rate_limits(failed_lease, rate_limits)?;
                 }
                 let reset_at = quota_reset_or_reprobe(limit.resets_at.as_ref());
-                let next = execution_auth
-                    .failover_after_quota_exhausted(failed_lease, Some(reset_at))?;
+                let next =
+                    execution_auth.failover_after_quota_exhausted(failed_lease, Some(reset_at))?;
                 Ok(Self::finish_rotation(
                     failed_lease,
                     next,
@@ -71,10 +71,8 @@ impl FailoverCoordinator {
                 ))
             }
             CodexErrorDetails::RefreshTokenFailed(refresh_error) => {
-                let next = execution_auth.failover_after_auth_unavailable(
-                    failed_lease,
-                    refresh_error.to_string(),
-                )?;
+                let next = execution_auth
+                    .failover_after_auth_unavailable(failed_lease, refresh_error.to_string())?;
                 Ok(Self::finish_rotation(
                     failed_lease,
                     next,

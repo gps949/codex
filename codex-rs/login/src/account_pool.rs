@@ -107,12 +107,8 @@ pub struct AccountRateLimits {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum AccountAvailability {
     Available,
-    Exhausted {
-        resets_at: Option<DateTime<Utc>>,
-    },
-    AuthenticationUnavailable {
-        reason: String,
-    },
+    Exhausted { resets_at: Option<DateTime<Utc>> },
+    AuthenticationUnavailable { reason: String },
     Disabled,
 }
 
@@ -134,7 +130,7 @@ impl AccountAvailability {
             self,
             Self::Exhausted {
                 resets_at: Some(resets_at)
-            } if resets_at <= now
+            } if &*resets_at <= now
         ) {
             *self = Self::Available;
             return true;
@@ -275,7 +271,8 @@ impl AccountPool {
             return Ok(lease);
         }
 
-        let selected_id = select_fill_first(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
+        let selected_id =
+            select_fill_first(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
         let active_changed = set_active_profile(&mut state, &selected_id);
         let account = state
             .accounts
@@ -291,7 +288,10 @@ impl AccountPool {
 
     /// Explicitly selects a profile. This is primarily for user-directed account selection and
     /// does not bypass disabled/auth-unavailable state.
-    pub fn activate(&self, profile_id: &AccountProfileId) -> Result<AccountLease, AccountPoolError> {
+    pub fn activate(
+        &self,
+        profile_id: &AccountProfileId,
+    ) -> Result<AccountLease, AccountPoolError> {
         let mut state = self.lock_state();
         let refreshed = refresh_expired_exhaustion(&mut state);
         let now = Utc::now();
@@ -323,10 +323,7 @@ impl AccountPool {
         lease: &AccountLease,
         resets_at: Option<DateTime<Utc>>,
     ) -> Result<Option<AccountLease>, AccountPoolError> {
-        self.mark_unavailable_from_lease(
-            lease,
-            AccountAvailability::Exhausted { resets_at },
-        )
+        self.mark_unavailable_from_lease(lease, AccountAvailability::Exhausted { resets_at })
     }
 
     /// Marks a permanently failed authentication profile unavailable after its own normal token
@@ -470,7 +467,9 @@ impl AccountPool {
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, AccountPoolState> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn notify_change(&self) {
@@ -497,10 +496,7 @@ fn refresh_expired_exhaustion(state: &mut AccountPoolState) -> bool {
     changed
 }
 
-fn select_fill_first(
-    state: &AccountPoolState,
-    now: &DateTime<Utc>,
-) -> Option<AccountProfileId> {
+fn select_fill_first(state: &AccountPoolState, now: &DateTime<Utc>) -> Option<AccountProfileId> {
     state
         .accounts
         .values()

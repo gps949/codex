@@ -54,7 +54,10 @@ impl AccountPoolExternalAuth {
                 continue;
             };
 
-            if !matches!(auth, CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_)) {
+            if !matches!(
+                auth,
+                CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_)
+            ) {
                 last_reason = format!(
                     "account profile {} is not authenticated with ChatGPT",
                     lease.profile().id

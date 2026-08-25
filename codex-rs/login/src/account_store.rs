@@ -157,7 +157,11 @@ impl AccountProfileStore {
         id: &AccountProfileId,
     ) -> Result<bool, AccountProfileStoreError> {
         let mut manifest = self.load_manifest()?;
-        let Some(index) = manifest.profiles.iter().position(|profile| &profile.id == id) else {
+        let Some(index) = manifest
+            .profiles
+            .iter()
+            .position(|profile| &profile.id == id)
+        else {
             return Ok(false);
         };
         let profile = &manifest.profiles[index];
@@ -309,9 +313,10 @@ impl AccountProfileStore {
         validate_manifest(manifest)?;
         fs::create_dir_all(&self.codex_home)?;
         let final_path = self.manifest_path();
-        let temporary_path = self
-            .codex_home
-            .join(format!(".{ACCOUNT_PROFILES_MANIFEST}.tmp-{}", std::process::id()));
+        let temporary_path = self.codex_home.join(format!(
+            ".{ACCOUNT_PROFILES_MANIFEST}.tmp-{}",
+            std::process::id()
+        ));
         let bytes = serde_json::to_vec_pretty(manifest)?;
         fs::write(&temporary_path, bytes)?;
 
@@ -366,7 +371,9 @@ fn validate_manifest(manifest: &AccountProfilesManifest) -> Result<(), AccountPr
         AccountProfileId::new(profile.id.as_str().to_string())
             .map_err(AccountProfileStoreError::Pool)?;
         if !seen.insert(profile.id.clone()) {
-            return Err(AccountProfileStoreError::DuplicateProfile(profile.id.clone()));
+            return Err(AccountProfileStoreError::DuplicateProfile(
+                profile.id.clone(),
+            ));
         }
         if profile.credential_location == CredentialLocation::LegacyRoot
             && profile.id.as_str() != LEGACY_ROOT_PROFILE_ID
@@ -400,7 +407,9 @@ pub enum AccountProfileStoreError {
     UnknownProfile(AccountProfileId),
     #[error("account profile is not pending login: {0}")]
     ProfileNotPending(AccountProfileId),
-    #[error("legacy root credential location requires profile id {LEGACY_ROOT_PROFILE_ID}, found {0}")]
+    #[error(
+        "legacy root credential location requires profile id {LEGACY_ROOT_PROFILE_ID}, found {0}"
+    )]
     InvalidLegacyProfileId(AccountProfileId),
     #[error("legacy root account profile must always be ready")]
     LegacyProfileMustBeReady,
@@ -408,7 +417,9 @@ pub enum AccountProfileStoreError {
     LegacyProfileConflict,
     #[error("could not allocate a unique account profile id")]
     ProfileIdAllocationExhausted,
-    #[error("legacy root credentials cannot be recursively purged through the account profile store")]
+    #[error(
+        "legacy root credentials cannot be recursively purged through the account profile store"
+    )]
     CannotPurgeLegacyRoot,
 }
 
@@ -442,7 +453,10 @@ mod tests {
             .complete_profile(&profile.id)
             .expect("complete profile");
         assert_eq!(completed, profile);
-        assert_eq!(store.load_profiles().expect("ready profiles"), vec![profile]);
+        assert_eq!(
+            store.load_profiles().expect("ready profiles"),
+            vec![profile]
+        );
     }
 
     #[test]

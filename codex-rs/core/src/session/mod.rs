@@ -3151,6 +3151,23 @@ impl Session {
             .await;
     }
 
+    pub(crate) async fn record_conversation_items_for_execution(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItem],
+        lease: &crate::execution_auth::ExecutionAuthLease,
+    ) {
+        let (items, image_preparations) =
+            self.prepare_conversation_items_for_history(turn_context, items);
+        let items = items
+            .into_owned()
+            .into_iter()
+            .map(|item| crate::account_transition::envelope_from_execution(item, lease))
+            .collect();
+        self.record_prepared_conversation_items(turn_context, items, image_preparations)
+            .await;
+    }
+
     async fn record_prepared_conversation_items(
         &self,
         turn_context: &TurnContext,

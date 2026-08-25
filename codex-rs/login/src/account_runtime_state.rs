@@ -132,7 +132,9 @@ impl AccountRuntimeStateStore {
         if state.active_profile_id.as_ref() == Some(profile_id) {
             state.active_profile_id = None;
         }
-        state.profiles.retain(|profile| &profile.profile_id != profile_id);
+        state
+            .profiles
+            .retain(|profile| &profile.profile_id != profile_id);
         self.save(&state)
     }
 }
@@ -190,7 +192,10 @@ mod tests {
     fn missing_runtime_state_is_empty_without_creating_a_file() {
         let temp = TempDir::new().expect("temp dir");
         let store = AccountRuntimeStateStore::new(temp.path().join("codex"));
-        assert_eq!(store.load().expect("load missing state"), AccountRuntimeState::default());
+        assert_eq!(
+            store.load().expect("load missing state"),
+            AccountRuntimeState::default()
+        );
         assert!(!store.path().exists());
     }
 

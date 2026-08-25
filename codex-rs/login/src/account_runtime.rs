@@ -65,13 +65,9 @@ impl AccountPoolRuntime {
             auth_route_config: config.auth_route_config(),
         };
 
-        Self::install(
-            outer_auth_manager,
-            auth_config,
-            include_existing_root_login,
-        )
-        .await
-        .map(Some)
+        Self::install(outer_auth_manager, auth_config, include_existing_root_login)
+            .await
+            .map(Some)
     }
 
     /// Builds the account pool from the profile manifest and installs it into the existing root
@@ -231,10 +227,7 @@ fn restore_runtime_state(
         if !known_profiles.contains(&profile_state.profile_id) {
             continue;
         }
-        pool.update_rate_limits(
-            &profile_state.profile_id,
-            profile_state.rate_limits.clone(),
-        )?;
+        pool.update_rate_limits(&profile_state.profile_id, profile_state.rate_limits.clone())?;
     }
 
     // Recreate known future cooldowns before selecting the persisted active account. We use the

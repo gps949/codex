@@ -177,7 +177,8 @@ impl SamplingAttemptCheckpoint {
         if self.tool_reconciliation_failed {
             return FailoverRetryMode::ReconcileCurrentAttempt;
         }
-        if self.tool_call_persisted || self.tool_result_committed || self.completed_output_persisted {
+        if self.tool_call_persisted || self.tool_result_committed || self.completed_output_persisted
+        {
             return FailoverRetryMode::ContinueFromDurableHistory;
         }
         if self.visible_output_emitted {

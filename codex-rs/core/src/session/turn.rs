@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::account_transition::AccountHistoryTransition;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -13,6 +14,12 @@ use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_
 use crate::connectors;
 use crate::context::ContextualUserFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::execution_auth::ExecutionAuth;
+use crate::execution_provenance::record_conversation_items_with_execution_provenance;
+use crate::execution_provenance::set_sampling_execution_provenance;
+use crate::failover_checkpoint::SamplingHistoryCursor;
+use crate::failover_turn::SamplingFailoverDirective;
+use crate::failover_turn::handle_sampling_failover;
 use crate::feedback_tags;
 use crate::hook_runtime::drain_async_hook_results;
 use crate::hook_runtime::inspect_pending_input;
@@ -32,6 +39,9 @@ use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::ResponsesStreamRetryState;
 use crate::responses_retry::handle_retryable_response_stream_error;
+use crate::sampling_attempt::install_sampling_attempt;
+use crate::sampling_attempt::mark_sampling_response_started;
+use crate::sampling_attempt::mark_sampling_visible_output;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
@@ -160,8 +170,22 @@ pub(crate) async fn run_turn(
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
+    let multi_account_enabled = match execution_auth
+        .ensure_runtime_from_config(turn_context.config.as_ref())
+        .await
+    {
+        Ok(_) => execution_auth.multi_account_enabled(),
+        Err(err) => {
+            warn!(%err, "failed to initialize native multi-account execution; using stock auth");
+            false
+        }
+    };
+    let mut client_session = if multi_account_enabled {
+        sess.services.model_client.new_session()
+    } else {
+        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session())
+    };
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -383,6 +407,7 @@ pub(crate) async fn run_turn(
                 Arc::clone(&step_context),
                 Arc::clone(&turn_context.extension_data),
                 Arc::clone(&turn_diff_tracker),
+                Arc::clone(&execution_auth),
                 &mut client_session,
                 &responses_metadata,
                 sampling_request_input,
@@ -1199,6 +1224,24 @@ async fn run_auto_compact(
         return Ok(());
     }
 
+    let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
+    if crate::portable_compaction::requires_portable_compaction(execution_auth.as_ref()) {
+        emit_compact_metric(
+            &sess.services.session_telemetry,
+            "local_multi_account",
+            /*manual*/ false,
+        );
+        run_inline_auto_compact_task(
+            Arc::clone(sess),
+            Arc::clone(turn_context),
+            initial_context_injection,
+            reason,
+            phase,
+        )
+        .await?;
+        return Ok(());
+    }
+
     match turn_context.provider.capabilities().remote_compaction {
         RemoteCompactionSupport::V2
             if turn_context
@@ -1343,19 +1386,16 @@ async fn run_sampling_request(
     step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
     turn_diff_tracker: SharedTurnDiffTracker,
+    execution_auth: Arc<ExecutionAuth>,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
+    let mut step_context = step_context;
     let turn_context = Arc::clone(&step_context.turn);
     let base_instructions = sess.get_base_instructions().await;
-
-    let tool_runtime = ToolCallRuntime::new(
-        Arc::clone(&sess),
-        Arc::clone(&step_context),
-        Arc::clone(&turn_diff_tracker),
-    );
+    let pooled_execution = execution_auth.multi_account_enabled();
     let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
         &sess,
         Arc::clone(&step_context),
@@ -1363,16 +1403,44 @@ async fn run_sampling_request(
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
-    let mut initial_input = Some(input);
+    let mut initial_input = if pooled_execution { None } else { Some(input) };
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
+        let execution_lease = execution_auth.active_lease().ok_or_else(|| {
+            CodexErr::UnsupportedOperation(
+                "no schedulable Codex execution account is available".to_string(),
+            )
+        })?;
+        set_sampling_execution_provenance(&turn_context, execution_lease.clone());
+
+        let history_before = sess.clone_history().await;
+        let history_cursor = pooled_execution.then(|| {
+            SamplingHistoryCursor::from_history(
+                history_before.history_version(),
+                history_before.annotated_items(),
+            )
+        });
+        let attempt_state = pooled_execution.then(|| install_sampling_attempt(&turn_context));
+
         let prompt_input = if let Some(input) = initial_input.take() {
             input
+        } else if pooled_execution {
+            let transition = AccountHistoryTransition::pooled(
+                &execution_lease,
+                execution_auth
+                    .legacy_unattributed_profile_id()
+                    .map(|id| id.as_str().to_string()),
+            );
+            let annotated = history_before
+                .clone()
+                .for_prompt_annotated(&step_context.model_info.input_modalities);
+            transition
+                .prepare_for_request(annotated)
+                .map(|(items, _stats)| items)
+                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
         } else {
-            sess.clone_history()
-                .await
-                .for_prompt(&step_context.model_info.input_modalities)
+            history_before.for_prompt(&step_context.model_info.input_modalities)
         };
         let mut prompt_input = prompt_input;
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
@@ -1386,8 +1454,13 @@ async fn run_sampling_request(
             step_context.as_ref(),
             base_instructions.clone(),
         );
+        let tool_runtime = ToolCallRuntime::new(
+            Arc::clone(&sess),
+            Arc::clone(&step_context),
+            Arc::clone(&turn_diff_tracker),
+        );
         let err = match try_run_sampling_request(
-            tool_runtime.clone(),
+            tool_runtime,
             Arc::clone(&sess),
             Arc::clone(&step_context),
             Arc::clone(&turn_store),
@@ -1402,20 +1475,70 @@ async fn run_sampling_request(
             Ok(output) => {
                 return Ok((output, original_input.unwrap_or(prompt.input)));
             }
-            Err(err) => match err.details() {
-                CodexErrorDetails::ContextWindowExceeded => {
+            Err(err) => {
+                if matches!(err.details(), CodexErrorDetails::ContextWindowExceeded) {
                     sess.set_total_tokens_full(&turn_context).await;
                     return Err(err);
                 }
-                CodexErrorDetails::UsageLimitReached(e) => {
-                    let rate_limits = e.rate_limits.clone();
-                    if let Some(rate_limits) = rate_limits {
-                        sess.update_rate_limits(&turn_context, *rate_limits).await;
-                    }
-                    return Err(err);
+                if let CodexErrorDetails::UsageLimitReached(limit) = err.details()
+                    && let Some(rate_limits) = limit.rate_limits.clone()
+                {
+                    sess.update_rate_limits(&turn_context, *rate_limits).await;
                 }
-                _ => err,
-            },
+
+                let account_failure = matches!(
+                    err.details(),
+                    CodexErrorDetails::UsageLimitReached(_)
+                        | CodexErrorDetails::RefreshTokenFailed(_)
+                );
+                if pooled_execution && account_failure {
+                    let history_after = sess.clone_history().await;
+                    let mut checkpoint = attempt_state
+                        .as_ref()
+                        .map(crate::sampling_attempt::SamplingAttemptState::snapshot)
+                        .unwrap_or_default();
+                    if let Some(cursor) = history_cursor.as_ref() {
+                        checkpoint.merge(cursor.checkpoint(
+                            history_after.history_version(),
+                            history_after.annotated_items(),
+                        ));
+                    }
+
+                    match handle_sampling_failover(
+                        execution_auth.as_ref(),
+                        &execution_lease,
+                        &checkpoint,
+                        &err,
+                    )
+                    .map_err(CodexErr::from)?
+                    {
+                        SamplingFailoverDirective::ReplayCurrentSamplingRequest { .. }
+                        | SamplingFailoverDirective::ContinueFromDurableHistory { .. } => {
+                            // Make the outer provider observe the selected pool identity now rather
+                            // than racing the background auth-sync task.
+                            execution_auth.compatibility_auth_manager().reload().await;
+                            // A new turn-scoped session drops the old WebSocket, previous-response
+                            // state and x-codex-turn-state before the next account sends anything.
+                            *client_session = sess.services.model_client.new_session();
+                            retry_state = ResponsesStreamRetryState::default();
+                            initial_input = None;
+                            sess.refresh_mcp_if_dirty().await;
+                            step_context = sess
+                                .capture_step_context(
+                                    Arc::clone(&turn_context),
+                                    &cancellation_token,
+                                )
+                                .await?;
+                            turn_context.turn_timing_state.record_sampling_retry();
+                            continue;
+                        }
+                        SamplingFailoverDirective::PoolExhausted
+                        | SamplingFailoverDirective::ReconcileCurrentAttempt
+                        | SamplingFailoverDirective::NotHandled => return Err(err),
+                    }
+                }
+                err
+            }
         };
 
         if original_input.is_none() {
@@ -2137,8 +2260,12 @@ async fn drain_in_flight(
         match res {
             Ok(response_input) => {
                 let response_item = response_input.into();
-                sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
-                    .await;
+                record_conversation_items_with_execution_provenance(
+                    sess.as_ref(),
+                    turn_context.as_ref(),
+                    std::slice::from_ref(&response_item),
+                )
+                .await;
                 mark_thread_memory_mode_polluted_if_external_context(
                     sess.as_ref(),
                     turn_context.as_ref(),
@@ -2292,7 +2419,7 @@ async fn try_run_sampling_request(
         record_turn_ttft_metric(&turn_context, &event).await;
 
         match event {
-            ResponseEvent::Created => {}
+            ResponseEvent::Created => mark_sampling_response_started(&turn_context),
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
@@ -2453,6 +2580,7 @@ async fn try_run_sampling_request(
                         seeded_item_id = Some(item_id);
                     }
                     if stream_item_to_client {
+                        mark_sampling_visible_output(&turn_context);
                         if let Some(state) = plan_mode_state.as_mut()
                             && matches!(turn_item, TurnItem::AgentMessage(_))
                         {

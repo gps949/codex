@@ -107,6 +107,15 @@ impl AccountHistoryTransition {
         }
     }
 
+    pub(crate) fn pooled(
+        lease: &ExecutionAuthLease,
+        legacy_unattributed_profile_id: Option<String>,
+    ) -> Self {
+        let mut transition = Self::initial(lease, legacy_unattributed_profile_id);
+        transition.cross_account = true;
+        transition
+    }
+
     pub(crate) fn is_cross_account(&self) -> bool {
         self.cross_account
     }
@@ -160,14 +169,14 @@ impl AccountHistoryTransition {
             let source_profile_id = envelope
                 .metadata
                 .as_ref()
-                .and_then(|metadata| metadata.execution_profile_id.as_deref())
-                .or(self.legacy_unattributed_profile_id.as_deref());
+                .and_then(|metadata| metadata.execution_profile_id.clone())
+                .or_else(|| self.legacy_unattributed_profile_id.clone());
             let source_generation = envelope
                 .metadata
                 .as_ref()
                 .and_then(|metadata| metadata.execution_generation);
 
-            let same_profile = source_profile_id == self.target_profile_id.as_deref();
+            let same_profile = source_profile_id.as_deref() == self.target_profile_id.as_deref();
             if same_profile {
                 let mut item = envelope.into_item();
                 // A switch away from and later back to the same account may leave response ids and
@@ -184,7 +193,7 @@ impl AccountHistoryTransition {
 
             if let Some(item) = sanitize_foreign_item(
                 envelope.into_item(),
-                source_profile_id,
+                source_profile_id.as_deref(),
                 self.target_profile_id.as_deref(),
                 &mut stats,
             )? {
@@ -348,14 +357,10 @@ mod tests {
             encrypted_content: Some("opaque-a".to_string()),
             internal_chat_message_metadata_passthrough: None,
         };
-        let sanitized = sanitize_foreign_item(
-            item,
-            Some("account-a"),
-            Some("account-b"),
-            &mut stats,
-        )
-        .expect("foreign reasoning should be sanitizable")
-        .expect("summary should keep the reasoning item");
+        let sanitized =
+            sanitize_foreign_item(item, Some("account-a"), Some("account-b"), &mut stats)
+                .expect("foreign reasoning should be sanitizable")
+                .expect("summary should keep the reasoning item");
         let ResponseItem::Reasoning {
             encrypted_content, ..
         } = sanitized
@@ -381,14 +386,10 @@ mod tests {
             ]),
             internal_chat_message_metadata_passthrough: None,
         };
-        let sanitized = sanitize_foreign_item(
-            item,
-            Some("account-a"),
-            Some("account-b"),
-            &mut stats,
-        )
-        .expect("tool output should be sanitizable")
-        .expect("tool output must remain paired");
+        let sanitized =
+            sanitize_foreign_item(item, Some("account-a"), Some("account-b"), &mut stats)
+                .expect("tool output should be sanitizable")
+                .expect("tool output must remain paired");
         let ResponseItem::FunctionCallOutput { output, .. } = sanitized else {
             panic!("expected tool output");
         };

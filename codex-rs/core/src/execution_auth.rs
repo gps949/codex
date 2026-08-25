@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
-use std::sync::Weak;
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -25,9 +24,10 @@ use tokio::sync::watch;
 ///
 /// This deliberately keys by Arc allocation identity rather than account id: before pooled auth is
 /// installed an AuthManager may not have a resolved ChatGPT account yet, and callers that supply a
-/// distinct AuthManager must keep their auth lifecycle isolated. Stale weak entries are removed on
-/// lookup, so allocator address reuse cannot attach a new manager to an old coordinator.
-static EXECUTION_AUTH_REGISTRY: OnceLock<StdMutex<HashMap<usize, Weak<ExecutionAuth>>>> =
+/// distinct AuthManager must keep their auth lifecycle isolated. The registry intentionally owns
+/// a strong process-lifetime reference: the coordinator in turn owns the AuthManager, so pointer
+/// identity cannot be recycled while the process is alive and scheduler state survives between turns.
+static EXECUTION_AUTH_REGISTRY: OnceLock<StdMutex<HashMap<usize, Arc<ExecutionAuth>>>> =
     OnceLock::new();
 
 /// Process/session-facing authentication facade for inference execution.
@@ -79,13 +79,12 @@ impl ExecutionAuth {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        registry.retain(|_, coordinator| coordinator.strong_count() > 0);
-        if let Some(existing) = registry.get(&key).and_then(Weak::upgrade) {
-            return existing;
+        if let Some(existing) = registry.get(&key) {
+            return Arc::clone(existing);
         }
 
         let coordinator = Arc::new(Self::legacy(legacy_manager));
-        registry.insert(key, Arc::downgrade(&coordinator));
+        registry.insert(key, Arc::clone(&coordinator));
         coordinator
     }
 
@@ -172,9 +171,12 @@ impl ExecutionAuth {
     /// Stable profile that owns rollout items created by stock Codex before execution provenance
     /// existed. The root profile remains meaningful even after another profile becomes active.
     pub(crate) fn legacy_unattributed_profile_id(&self) -> Option<AccountProfileId> {
-        self.account_pool()?.snapshots().into_iter().find_map(|snapshot| {
-            (snapshot.profile.id.as_str() == "legacy-root").then_some(snapshot.profile.id)
-        })
+        self.account_pool()?
+            .snapshots()
+            .into_iter()
+            .find_map(|snapshot| {
+                (snapshot.profile.id.as_str() == "legacy-root").then_some(snapshot.profile.id)
+            })
     }
 
     /// Captures the identity for a new account-bound model client/request.
@@ -184,7 +186,10 @@ impl ExecutionAuth {
     /// profile currently cooling down.
     pub(crate) fn active_lease(&self) -> Option<ExecutionAuthLease> {
         match self.account_pool() {
-            Some(pool) => pool.lease().ok().map(ExecutionAuthLease::from_account_lease),
+            Some(pool) => pool
+                .lease()
+                .ok()
+                .map(ExecutionAuthLease::from_account_lease),
             None => Some(ExecutionAuthLease::legacy(Arc::clone(&self.legacy_manager))),
         }
     }
@@ -211,7 +216,8 @@ impl ExecutionAuth {
         lease: &ExecutionAuthLease,
         snapshot: &RateLimitSnapshot,
     ) -> std::io::Result<()> {
-        let (Some(pool), Some(account_lease)) = (self.account_pool(), lease.account.as_ref()) else {
+        let (Some(pool), Some(account_lease)) = (self.account_pool(), lease.account.as_ref())
+        else {
             return Ok(());
         };
         pool.update_rate_limits(
@@ -232,7 +238,8 @@ impl ExecutionAuth {
         failed_lease: &ExecutionAuthLease,
         resets_at: Option<DateTime<Utc>>,
     ) -> std::io::Result<Option<ExecutionAuthLease>> {
-        let (Some(pool), Some(account_lease)) = (self.account_pool(), failed_lease.account.as_ref())
+        let (Some(pool), Some(account_lease)) =
+            (self.account_pool(), failed_lease.account.as_ref())
         else {
             return Ok(None);
         };
@@ -246,7 +253,8 @@ impl ExecutionAuth {
         failed_lease: &ExecutionAuthLease,
         message: impl Into<String>,
     ) -> std::io::Result<Option<ExecutionAuthLease>> {
-        let (Some(pool), Some(account_lease)) = (self.account_pool(), failed_lease.account.as_ref())
+        let (Some(pool), Some(account_lease)) =
+            (self.account_pool(), failed_lease.account.as_ref())
         else {
             return Ok(None);
         };
