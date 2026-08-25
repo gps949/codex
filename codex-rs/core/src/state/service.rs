@@ -4,14 +4,13 @@ use std::sync::Arc;
 use crate::agent::AgentControl;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::attestation::AttestationProvider;
+use crate::client::ModelClient;
 use crate::config::NetworkProxyAuditMetadata;
 use crate::config::StartedNetworkProxy;
 use crate::current_time::TimeProvider;
 use crate::elicitation::ElicitationService;
 use crate::environment_selection::ThreadEnvironments;
 use crate::exec_policy::ExecPolicyManager;
-use crate::execution_auth::ExecutionAuth;
-use crate::execution_model_client::ExecutionModelClient;
 use crate::guardian::GuardianRejectionCircuitBreaker;
 use crate::mcp::McpManager;
 use crate::mcp_tool_exposure::McpHandlerCache;
@@ -61,13 +60,7 @@ pub(crate) struct SessionServices {
     pub(crate) user_shell: Arc<crate::shell::Shell>,
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
-    /// Compatibility auth facade consumed by existing non-inference surfaces while they migrate to
-    /// account leases. In pooled mode AccountPoolRuntime keeps this facade synchronized with the
-    /// selected execution profile.
     pub(crate) auth_manager: Arc<AuthManager>,
-    /// Account-independent owner of native execution identities. Model inference must capture an
-    /// immutable lease from this service rather than reading `auth_manager` repeatedly mid-request.
-    pub(crate) execution_auth: Arc<ExecutionAuth>,
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
     pub(crate) models_manager: SharedModelsManager,
@@ -98,9 +91,8 @@ pub(crate) struct SessionServices {
     pub(crate) thread_store: Arc<dyn ThreadStore>,
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) time_provider: Arc<dyn TimeProvider>,
-    /// Session-scoped account-bound model client owner. The logical session is stable; this owner
-    /// rebuilds only the ModelClient/transport state when execution identity changes.
-    pub(crate) model_client: ExecutionModelClient,
+    /// Session-scoped model client shared across turns.
+    pub(crate) model_client: ModelClient,
     pub(crate) executed_tool_calls: Option<Arc<ExecutedToolCallRecorder>>,
     pub(crate) code_mode_service: CodeModeService,
     pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,
