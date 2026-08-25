@@ -48,6 +48,15 @@ pub struct CodexHarnessMetadata {
     /// Whether a developer message was supplied by an app-server client.
     #[serde(default)]
     pub client_authored: bool,
+    /// Stable local execution profile that produced account-scoped model state for this item.
+    /// This is deliberately a local profile identifier, never an OAuth token or account secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_profile_id: Option<String>,
+    /// Account-pool generation active when this item was produced. A different generation of the
+    /// same profile may still reuse account-compatible encrypted content while transport-affine
+    /// response IDs and routing metadata are discarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_generation: Option<u64>,
 }
 
 impl ResponseItemEnvelope {
