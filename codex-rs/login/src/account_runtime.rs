@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 
@@ -9,6 +10,8 @@ use crate::AccountPoolExternalAuth;
 use crate::AccountProfile;
 use crate::AccountProfileStore;
 use crate::AccountProfileStoreError;
+use crate::AccountRuntimeState;
+use crate::AccountRuntimeStateStore;
 use crate::AuthConfig;
 use crate::AuthManager;
 use crate::AuthManagerConfig;
@@ -30,8 +33,10 @@ pub struct AccountPoolRuntimeProfileIssue {
 pub struct AccountPoolRuntime {
     pool: Arc<AccountPool>,
     store: AccountProfileStore,
+    runtime_state_store: AccountRuntimeStateStore,
     outer_auth_manager: Arc<AuthManager>,
     profile_issues: Vec<AccountPoolRuntimeProfileIssue>,
+    runtime_state_issue: Option<String>,
     auth_sync_task: JoinHandle<()>,
 }
 
@@ -88,6 +93,15 @@ impl AccountPoolRuntime {
         }
 
         let store = AccountProfileStore::new(auth_config.codex_home.clone());
+        let runtime_state_store = AccountRuntimeStateStore::new(auth_config.codex_home.clone());
+        let (runtime_state, runtime_state_issue) = match runtime_state_store.load() {
+            Ok(state) => (state, None),
+            Err(error) => {
+                tracing::warn!("ignoring invalid account runtime state: {error}");
+                (AccountRuntimeState::default(), Some(error.to_string()))
+            }
+        };
+
         if include_existing_root_login
             && outer_auth_manager
                 .auth()
@@ -139,6 +153,8 @@ impl AccountPoolRuntime {
             return Err(AccountPoolRuntimeError::NoUsableProfiles(profile_issues));
         }
 
+        restore_runtime_state(&pool, &runtime_state)?;
+
         // Resolve and validate an initial pooled identity through the existing AuthManager policy
         // before returning the runtime. This preserves forced login/workspace policy enforcement.
         outer_auth_manager
@@ -149,17 +165,23 @@ impl AccountPoolRuntime {
             .lease()
             .map(|lease| lease.generation())
             .unwrap_or_default();
+        if let Err(error) = runtime_state_store.save_pool(&pool) {
+            tracing::warn!("failed to persist initial account runtime state: {error}");
+        }
         let auth_sync_task = spawn_auth_sync_task(
             Arc::clone(&pool),
             Arc::clone(&outer_auth_manager),
+            runtime_state_store.clone(),
             initial_generation,
         );
 
         Ok(Self {
             pool,
             store,
+            runtime_state_store,
             outer_auth_manager,
             profile_issues,
+            runtime_state_issue,
             auth_sync_task,
         })
     }
@@ -172,12 +194,20 @@ impl AccountPoolRuntime {
         &self.store
     }
 
+    pub fn runtime_state_store(&self) -> &AccountRuntimeStateStore {
+        &self.runtime_state_store
+    }
+
     pub fn auth_manager(&self) -> Arc<AuthManager> {
         Arc::clone(&self.outer_auth_manager)
     }
 
     pub fn profile_issues(&self) -> &[AccountPoolRuntimeProfileIssue] {
         &self.profile_issues
+    }
+
+    pub fn runtime_state_issue(&self) -> Option<&str> {
+        self.runtime_state_issue.as_deref()
     }
 }
 
@@ -187,14 +217,66 @@ impl Drop for AccountPoolRuntime {
     }
 }
 
+fn restore_runtime_state(
+    pool: &AccountPool,
+    runtime_state: &AccountRuntimeState,
+) -> Result<(), AccountPoolError> {
+    let known_profiles = pool
+        .snapshots()
+        .into_iter()
+        .map(|snapshot| snapshot.profile.id)
+        .collect::<std::collections::HashSet<_>>();
+
+    for profile_state in &runtime_state.profiles {
+        if !known_profiles.contains(&profile_state.profile_id) {
+            continue;
+        }
+        pool.update_rate_limits(
+            &profile_state.profile_id,
+            profile_state.rate_limits.clone(),
+        )?;
+    }
+
+    // Recreate known future cooldowns before selecting the persisted active account. We use the
+    // normal lease/generation path so restored state obeys exactly the same invariants as live
+    // quota failures and does not require a second private mutation API on AccountPool.
+    for profile_state in &runtime_state.profiles {
+        let Some(reset_at) = profile_state.exhausted_until else {
+            continue;
+        };
+        if reset_at <= Utc::now() || !known_profiles.contains(&profile_state.profile_id) {
+            continue;
+        }
+        if let Ok(lease) = pool.activate(&profile_state.profile_id) {
+            let _ = pool.mark_exhausted(&lease, Some(reset_at))?;
+        }
+    }
+
+    if let Some(active_profile_id) = runtime_state.active_profile_id.as_ref()
+        && known_profiles.contains(active_profile_id)
+        && pool.activate(active_profile_id).is_ok()
+    {
+        return Ok(());
+    }
+
+    // Establish a deterministic fill-first active account if the saved account is unavailable.
+    let _ = pool.lease()?;
+    Ok(())
+}
+
 fn spawn_auth_sync_task(
     pool: Arc<AccountPool>,
     auth_manager: Arc<AuthManager>,
+    runtime_state_store: AccountRuntimeStateStore,
     mut observed_generation: u64,
 ) -> JoinHandle<()> {
     let mut changes = pool.change_receiver();
     tokio::spawn(async move {
         while changes.changed().await.is_ok() {
+            if let Err(error) = runtime_state_store.save_pool(&pool) {
+                tracing::warn!("failed to persist account runtime state: {error}");
+            }
+
             let current_generation = pool
                 .lease()
                 .map(|lease| lease.generation())
