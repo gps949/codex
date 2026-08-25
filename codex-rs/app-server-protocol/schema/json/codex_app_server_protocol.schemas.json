@@ -6459,6 +6459,187 @@
         "title": "AccountLoginCompletedNotification",
         "type": "object"
       },
+      "AccountPoolAccount": {
+        "properties": {
+          "availability": {
+            "$ref": "#/definitions/v2/AccountPoolAvailability"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "planType": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/PlanType"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "priority": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "profileId": {
+            "type": "string"
+          },
+          "rateLimits": {
+            "$ref": "#/definitions/v2/AccountPoolRateLimits"
+          }
+        },
+        "required": [
+          "availability",
+          "isActive",
+          "priority",
+          "profileId",
+          "rateLimits"
+        ],
+        "type": "object"
+      },
+      "AccountPoolAvailability": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "available"
+                ],
+                "title": "AvailableAccountPoolAvailabilityType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "AvailableAccountPoolAvailability",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "resets_at": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "exhausted"
+                ],
+                "title": "ExhaustedAccountPoolAvailabilityType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ExhaustedAccountPoolAvailability",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "authenticationUnavailable"
+                ],
+                "title": "AuthenticationUnavailableAccountPoolAvailabilityType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "type"
+            ],
+            "title": "AuthenticationUnavailableAccountPoolAvailability",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "disabled"
+                ],
+                "title": "DisabledAccountPoolAvailabilityType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "DisabledAccountPoolAvailability",
+            "type": "object"
+          }
+        ]
+      },
+      "AccountPoolRateLimitWindow": {
+        "properties": {
+          "resetsAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "usedPercent": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "usedPercent"
+        ],
+        "type": "object"
+      },
+      "AccountPoolRateLimits": {
+        "properties": {
+          "observedAt": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "primary": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AccountPoolRateLimitWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "secondary": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AccountPoolRateLimitWindow"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "AccountRateLimitsUpdatedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does not clear a previously observed value.",

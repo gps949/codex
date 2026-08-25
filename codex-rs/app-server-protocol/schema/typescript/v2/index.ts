@@ -2,6 +2,10 @@
 
 export type { Account } from "./Account";
 export type { AccountLoginCompletedNotification } from "./AccountLoginCompletedNotification";
+export type { AccountPoolAccount } from "./AccountPoolAccount";
+export type { AccountPoolAvailability } from "./AccountPoolAvailability";
+export type { AccountPoolRateLimitWindow } from "./AccountPoolRateLimitWindow";
+export type { AccountPoolRateLimits } from "./AccountPoolRateLimits";
 export type { AccountRateLimitsUpdatedNotification } from "./AccountRateLimitsUpdatedNotification";
 export type { AccountTokenUsageDailyBucket } from "./AccountTokenUsageDailyBucket";
 export type { AccountTokenUsageSummary } from "./AccountTokenUsageSummary";

@@ -306,6 +306,10 @@ impl ExecutionAuthLease {
         Arc::clone(&self.auth_manager)
     }
 
+    pub(crate) fn account_lease(&self) -> Option<&AccountLease> {
+        self.account.as_ref()
+    }
+
     pub(crate) fn is_same_execution_identity(&self, other: &Self) -> bool {
         match (&self.account, &other.account) {
             (Some(left), Some(right)) => {

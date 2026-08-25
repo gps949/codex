@@ -316,6 +316,66 @@ impl AccountPool {
         Ok(lease)
     }
 
+    /// Explicitly re-enters fill-first scheduling, selecting the lowest-priority eligible
+    /// profile even if another profile is currently active.
+    pub fn activate_fill_first(&self) -> Result<AccountLease, AccountPoolError> {
+        let mut state = self.lock_state();
+        let refreshed = refresh_expired_exhaustion(&mut state);
+        let now = Utc::now();
+        let selected_id =
+            select_fill_first(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
+        let active_changed = set_active_profile(&mut state, &selected_id);
+        let account = state
+            .accounts
+            .get(&selected_id)
+            .expect("selected account must exist");
+        let lease = make_lease(account, state.generation);
+        drop(state);
+        if refreshed || active_changed {
+            self.notify_change();
+        }
+        Ok(lease)
+    }
+
+    /// Explicitly selects a profile while allowing a user to probe a profile that is only in
+    /// quota cooldown. Disabled and authentication-unavailable profiles remain unavailable.
+    pub fn force_activate(
+        &self,
+        profile_id: &AccountProfileId,
+    ) -> Result<AccountLease, AccountPoolError> {
+        let mut state = self.lock_state();
+        let refreshed = refresh_expired_exhaustion(&mut state);
+        let forced = {
+            let account = state
+                .accounts
+                .get_mut(profile_id)
+                .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+            let forced = match &account.availability {
+                AccountAvailability::Available => false,
+                AccountAvailability::Exhausted { .. } => true,
+                AccountAvailability::AuthenticationUnavailable { .. }
+                | AccountAvailability::Disabled => {
+                    return Err(AccountPoolError::ProfileUnavailable(profile_id.clone()));
+                }
+            };
+            if forced {
+                account.availability = AccountAvailability::Available;
+            }
+            forced
+        };
+        let active_changed = set_active_profile(&mut state, profile_id);
+        let account = state
+            .accounts
+            .get(profile_id)
+            .expect("activated account must exist");
+        let lease = make_lease(account, state.generation);
+        drop(state);
+        if refreshed || forced || active_changed {
+            self.notify_change();
+        }
+        Ok(lease)
+    }
+
     /// Marks a lease exhausted and rotates only when that exact lease is still the active
     /// generation. Late failures from stale workers cannot rotate a newer account.
     pub fn mark_exhausted(
@@ -608,6 +668,43 @@ mod tests {
             .expect("fallback account");
         assert_eq!(next.profile().id, second.id);
         assert!(next.generation() > lease.generation());
+    }
+
+    #[tokio::test]
+    async fn activate_fill_first_returns_to_preferred_available_profile() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        pool.activate(&second.id).expect("activate second");
+        let lease = pool.activate_fill_first().expect("activate fill-first");
+        assert_eq!(lease.profile().id, first.id);
+    }
+
+    #[tokio::test]
+    async fn force_activate_only_bypasses_quota_cooldown() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        pool.register(
+            first.clone(),
+            test_auth_manager(&first.credential_home).await,
+        )
+        .expect("register first");
+        let lease = pool.lease().expect("initial lease");
+        pool.mark_exhausted(&lease, None)
+            .expect("mark exhausted");
+        assert!(matches!(
+            pool.activate(&first.id),
+            Err(AccountPoolError::ProfileUnavailable(_))
+        ));
+        let forced = pool.force_activate(&first.id).expect("force activate");
+        assert_eq!(forced.profile().id, first.id);
     }
 
     #[tokio::test]
