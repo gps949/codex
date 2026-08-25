@@ -11,6 +11,7 @@ use crate::AccountProfileStore;
 use crate::AccountProfileStoreError;
 use crate::AuthConfig;
 use crate::AuthManager;
+use crate::AuthManagerConfig;
 use crate::AuthManagerInitializationError;
 use crate::CodexAuth;
 use crate::RefreshTokenError;
@@ -35,6 +36,39 @@ pub struct AccountPoolRuntime {
 }
 
 impl AccountPoolRuntime {
+    /// Installs native account pooling only when the user has already configured the account
+    /// profile manifest. Stock/single-account Codex therefore keeps its original auth behavior and
+    /// this probe does not create any files as a side effect.
+    pub async fn try_install_from_config(
+        outer_auth_manager: Arc<AuthManager>,
+        config: &impl AuthManagerConfig,
+        include_existing_root_login: bool,
+    ) -> Result<Option<Self>, AccountPoolRuntimeError> {
+        let store = AccountProfileStore::new(config.codex_home());
+        if !store.manifest_path().is_file() {
+            return Ok(None);
+        }
+
+        let auth_config = AuthConfig {
+            codex_home: config.codex_home(),
+            auth_credentials_store_mode: config.cli_auth_credentials_store_mode(),
+            keyring_backend_kind: config.auth_keyring_backend_kind(),
+            forced_login_method: config.forced_login_method(),
+            chatgpt_base_url: Some(config.chatgpt_base_url()),
+            forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id(),
+            managed_auth_policy: config.managed_auth_policy(),
+            auth_route_config: config.auth_route_config(),
+        };
+
+        Self::install(
+            outer_auth_manager,
+            auth_config,
+            include_existing_root_login,
+        )
+        .await
+        .map(Some)
+    }
+
     /// Builds the account pool from the profile manifest and installs it into the existing root
     /// AuthManager using Codex's native `ExternalAuth` extension point.
     ///
