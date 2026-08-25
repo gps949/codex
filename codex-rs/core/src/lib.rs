@@ -11,7 +11,6 @@ mod apps;
 mod client;
 mod client_common;
 mod execution_auth;
-mod execution_model_client;
 mod failover;
 mod failover_checkpoint;
 mod failover_turn;
