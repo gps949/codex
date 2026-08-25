@@ -1,6 +1,7 @@
 pub mod account_external_auth;
 pub mod account_login;
 pub mod account_pool;
+pub mod account_runtime;
 pub mod account_store;
 pub mod auth;
 pub mod auth_env_telemetry;
@@ -29,6 +30,9 @@ pub use account_pool::AccountProfile;
 pub use account_pool::AccountProfileId;
 pub use account_pool::AccountRateLimitWindow;
 pub use account_pool::AccountRateLimits;
+pub use account_runtime::AccountPoolRuntime;
+pub use account_runtime::AccountPoolRuntimeError;
+pub use account_runtime::AccountPoolRuntimeProfileIssue;
 pub use account_store::AccountProfileRecord;
 pub use account_store::AccountProfileState;
 pub use account_store::AccountProfileStore;
