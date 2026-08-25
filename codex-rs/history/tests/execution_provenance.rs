@@ -17,7 +17,7 @@ fn legacy_harness_metadata_deserializes_without_execution_provenance() {
 fn execution_provenance_round_trips_through_rollout_wire() {
     let item = RolloutItem::ResponseItem(ResponseItemEnvelope {
         item: ResponseItem::Message {
-            id: Some("resp-account-a".to_string()),
+            id: None,
             role: "assistant".to_string(),
             content: Vec::new(),
             phase: None,
