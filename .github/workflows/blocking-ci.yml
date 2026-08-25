@@ -5,9 +5,104 @@ name: blocking-ci
 on:
   pull_request: {}
   push:
-    branches: [main]
+    branches:
+      - main
+      - feature/native-multi-account
 
 jobs:
+  native-multi-account-live:
+    name: Native multi-account live wiring
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+
+      - name: Apply guarded source patch
+        run: |
+          set -euo pipefail
+          python3 scripts/apply_native_multi_account_live.py
+          python3 scripts/fix_native_multi_account_live.py
+
+      - name: Format Rust sources
+        working-directory: codex-rs
+        run: cargo fmt --all
+
+      - name: Reject whitespace errors
+        run: git diff --check
+
+      - name: Check affected crates
+        id: cargo-check
+        continue-on-error: true
+        working-directory: codex-rs
+        run: |
+          set -o pipefail
+          cargo check -p codex-login -p codex-history -p codex-core 2>&1 | tee "$GITHUB_WORKSPACE/cargo-check.log"
+
+      - name: Upload cargo diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-multi-account-cargo-check
+          path: cargo-check.log
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Enforce cargo check result
+        if: ${{ steps.cargo-check.outcome != 'success' }}
+        run: exit 1
+
+      - name: Test account pool and persistence
+        working-directory: codex-rs
+        run: |
+          cargo test -p codex-login account_pool --lib
+          cargo test -p codex-login account_runtime_state --lib
+          cargo test -p codex-history --test execution_provenance
+
+      - name: Test failover and history transition
+        id: core-tests
+        continue-on-error: true
+        working-directory: codex-rs
+        run: |
+          set -o pipefail
+          (set -e; cargo test -p codex-core failover --lib; cargo test -p codex-core account_transition --lib) 2>&1 | tee "$GITHUB_WORKSPACE/core-tests.log"
+
+      - name: Upload core test diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-multi-account-core-tests
+          path: core-tests.log
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Enforce core test result
+        if: ${{ steps.core-tests.outcome != 'success' }}
+        run: exit 1
+
+      - name: Commit validated wiring
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add codex-rs/core codex-rs/login codex-rs/history
+          if git diff --cached --quiet; then
+            echo "No source changes to commit"
+            exit 0
+          fi
+          git commit -m "feat(core): wire native multi-account failover"
+          git push origin HEAD:feature/native-multi-account
+
   # Keep reusable workflow calls alphabetized. The `required` job below is the
   # version-controlled list that the main-branch ruleset should require.
   bazel:

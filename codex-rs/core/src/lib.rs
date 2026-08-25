@@ -5,10 +5,17 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod account_transition;
 mod apply_patch;
 mod apps;
 mod client;
 mod client_common;
+mod execution_auth;
+mod failover;
+mod failover_checkpoint;
+mod failover_turn;
+mod portable_compaction;
+mod portable_history;
 mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;
