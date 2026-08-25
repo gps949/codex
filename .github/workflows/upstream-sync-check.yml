@@ -1,0 +1,103 @@
+# Fork maintenance: weekly upstream release radar.
+#
+# This job is deliberately metadata-only (no Rust build) so a run costs about a
+# minute. It looks for a new upstream stable release tag, checks whether the
+# fork's contact-surface files changed in that release, and opens a tracking
+# issue with the findings. The actual rebase + test work is done by an agent or
+# a human following FORK_MAINTENANCE.md, not by CI.
+name: upstream-sync-check
+
+on:
+  schedule:
+    # Mondays 03:17 UTC. Note: scheduled workflows only run from the repo's
+    # default branch, so this file must exist there.
+    - cron: "17 3 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout (blobless)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Fetch upstream tags
+        run: |
+          git remote add upstream https://github.com/openai/codex.git
+          git fetch --quiet --filter=blob:none upstream 'refs/tags/rust-v*:refs/tags/rust-v*'
+
+      - name: Compare with baseline and report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          baseline="$(cat .github/upstream-baseline.txt)"
+          latest="$(git tag -l 'rust-v*' | grep -vE 'alpha|beta|rc' | sort -V | tail -1)"
+          echo "baseline=$baseline latest=$latest"
+          if [ "$latest" = "$baseline" ]; then
+            echo "No new upstream stable release."
+            exit 0
+          fi
+
+          title="Upstream sync: $latest"
+          if gh issue list --state open --search "in:title \"$title\"" --json title --jq '.[].title' | grep -qF "$title"; then
+            echo "Issue already exists."
+            exit 0
+          fi
+
+          # Files this fork modifies on top of upstream. Upstream changes to any
+          # of them mean the sync rebase needs real attention.
+          contact_paths=(
+            "codex-rs/core/src/session/turn.rs"
+            "codex-rs/core/src/session/mod.rs"
+            "codex-rs/core/src/stream_events_utils.rs"
+            "codex-rs/core/src/lib.rs"
+            "codex-rs/core/src/compact_remote_v2.rs"
+            "codex-rs/core/src/config/mod.rs"
+            "codex-rs/config/src/config_toml.rs"
+            "codex-rs/config/src/lib.rs"
+            "codex-rs/history/src/lib.rs"
+            "codex-rs/login/src"
+            "codex-rs/app-server-protocol/src/protocol/common.rs"
+            "codex-rs/app-server-protocol/src/protocol/v2/mod.rs"
+            "codex-rs/app-server/src/message_processor.rs"
+            "codex-rs/app-server/src/request_processors/account_processor.rs"
+            "codex-rs/cli/src/main.rs"
+            "codex-rs/cli/src/doctor/updates.rs"
+            "codex-rs/tui/src/updates.rs"
+            "codex-rs/tui/src/update_prompt.rs"
+          )
+          touched="$(git diff --name-only "$baseline".."$latest" -- "${contact_paths[@]}" || true)"
+          commit_count="$(git rev-list --count "$baseline".."$latest")"
+
+          # Auth/credential-format changes need a special compatibility check
+          # because pool profiles keep their own auth.json copies.
+          auth_touched="$(git diff --name-only "$baseline".."$latest" -- codex-rs/login/src || true)"
+
+          {
+            echo "Upstream published \`$latest\` (baseline: \`$baseline\`, $commit_count commits)."
+            echo
+            if [ -n "$touched" ]; then
+              echo "### Contact-surface files changed upstream (manual adaptation likely)"
+              echo '```'
+              echo "$touched"
+              echo '```'
+            else
+              echo "### No contact-surface files changed — sync should be a clean rebase"
+            fi
+            echo
+            if [ -n "$auth_touched" ]; then
+              echo "> Upstream touched \`codex-rs/login/\`. Check per-profile credential (auth.json) compatibility before releasing."
+              echo
+            fi
+            echo "Follow the sync procedure in \`FORK_MAINTENANCE.md\`. After the sync branch is merged, update \`.github/upstream-baseline.txt\` to \`$latest\`."
+          } > /tmp/issue-body.md
+
+          gh issue create --title "$title" --body-file /tmp/issue-body.md

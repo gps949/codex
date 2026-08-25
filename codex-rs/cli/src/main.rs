@@ -999,22 +999,11 @@ fn resolve_windows_update_command_from_path(
 }
 
 fn run_update_command() -> anyhow::Result<()> {
-    #[cfg(debug_assertions)]
-    {
-        anyhow::bail!(
-            "`codex update` is not available in debug builds. Install a release build of Codex to use this command."
-        );
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        let Some(action) = codex_tui::get_update_action() else {
-            anyhow::bail!(
-                "Could not detect the Codex installation method. Please update manually: https://developers.openai.com/codex/cli/"
-            );
-        };
-        run_update_action(action)
-    }
+    // Fork: every built-in update action reinstalls the official openai/codex build, which would
+    // silently remove the multi-account fork. Point users at the fork's own releases instead.
+    anyhow::bail!(
+        "This build is the multi-account Codex fork; automatic self-update would replace it with the official binary. Download updates from https://github.com/gps949/codex/releases or rebuild from source."
+    );
 }
 
 fn run_execpolicycheck(cmd: ExecPolicyCheckCommand) -> anyhow::Result<()> {
