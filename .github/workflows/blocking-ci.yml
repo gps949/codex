@@ -11,7 +11,7 @@ on:
 
 jobs:
   native-multi-account-live:
-    name: Native multi-account live wiring
+    name: Native multi-account app-server wiring
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -28,11 +28,10 @@ jobs:
           toolchain: "1.95.0"
           components: rustfmt, clippy
 
-      - name: Apply guarded source patch
+      - name: Apply guarded app-server patch
         run: |
           set -euo pipefail
-          python3 scripts/apply_native_multi_account_live.py
-          python3 scripts/fix_native_multi_account_live.py
+          python3 scripts/apply_native_multi_account_app_server.py
 
       - name: Format Rust sources
         working-directory: codex-rs
@@ -47,7 +46,13 @@ jobs:
         working-directory: codex-rs
         run: |
           set -o pipefail
-          cargo check -p codex-login -p codex-history -p codex-core 2>&1 | tee "$GITHUB_WORKSPACE/cargo-check.log"
+          cargo check \
+            -p codex-login \
+            -p codex-history \
+            -p codex-core \
+            -p codex-app-server-protocol \
+            -p codex-app-server \
+            2>&1 | tee "$GITHUB_WORKSPACE/cargo-check.log"
 
       - name: Upload cargo diagnostics
         if: ${{ always() }}
@@ -90,17 +95,22 @@ jobs:
         if: ${{ steps.core-tests.outcome != 'success' }}
         run: exit 1
 
-      - name: Commit validated wiring
+      - name: Test app-server protocol
+        working-directory: codex-rs
+        run: cargo test -p codex-app-server-protocol --lib
+
+      - name: Commit validated app-server wiring
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/feature/native-multi-account' }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add codex-rs/core codex-rs/login codex-rs/history
+          git add codex-rs/core codex-rs/login codex-rs/app-server-protocol codex-rs/app-server
           if git diff --cached --quiet; then
             echo "No source changes to commit"
             exit 0
           fi
-          git commit -m "feat(core): wire native multi-account failover"
+          git commit -m "feat(app-server): expose native account pool"
           git push origin HEAD:feature/native-multi-account
 
   # Keep reusable workflow calls alphabetized. The `required` job below is the
@@ -150,6 +160,7 @@ jobs:
       - blob-size-policy
       - cargo-deny
       - codespell
+      - native-multi-account-live
       - repo-checks
       - rust-ci
       - sdk
