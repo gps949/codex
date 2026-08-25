@@ -70,6 +70,9 @@ pub struct AccountProfile {
     pub credential_home: PathBuf,
     /// Lower values are preferred by fill-first selection.
     pub priority: u32,
+    /// A disabled profile keeps its credentials but is never scheduled.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 impl AccountProfile {
@@ -84,6 +87,7 @@ impl AccountProfile {
             label,
             credential_home,
             priority,
+            disabled: false,
         }
     }
 }
@@ -183,6 +187,9 @@ struct AccountPoolState {
     accounts: HashMap<AccountProfileId, ManagedAccount>,
     active_profile: Option<AccountProfileId>,
     generation: u64,
+    /// When true, the pool returns to the most preferred profile at the moment
+    /// a quota cooldown expires instead of staying on the current account.
+    return_to_preferred: bool,
 }
 
 impl Default for AccountPoolState {
@@ -191,6 +198,7 @@ impl Default for AccountPoolState {
             accounts: HashMap::new(),
             active_profile: None,
             generation: 1,
+            return_to_preferred: true,
         }
     }
 }
@@ -238,18 +246,30 @@ impl AccountPool {
             return Err(AccountPoolError::DuplicateProfile(profile.id));
         }
 
+        let availability = if profile.disabled {
+            AccountAvailability::Disabled
+        } else {
+            AccountAvailability::Available
+        };
         state.accounts.insert(
             profile.id.clone(),
             ManagedAccount {
                 profile,
                 auth_manager,
-                availability: AccountAvailability::Available,
+                availability,
                 rate_limits: AccountRateLimits::default(),
             },
         );
         drop(state);
         self.notify_change();
         Ok(())
+    }
+
+    /// Configures whether an expired quota cooldown moves scheduling back to the most preferred
+    /// eligible profile instead of staying sticky on the current account.
+    pub fn set_return_to_preferred(&self, return_to_preferred: bool) {
+        let mut state = self.lock_state();
+        state.return_to_preferred = return_to_preferred;
     }
 
     /// Returns a lease for the currently active eligible account. If there is no eligible active
@@ -259,13 +279,35 @@ impl AccountPool {
         let refreshed = refresh_expired_exhaustion(&mut state);
         let now = Utc::now();
 
-        if let Some(active_id) = state.active_profile.clone()
-            && let Some(account) = state.accounts.get(&active_id)
-            && account.availability.is_eligible(&now)
-        {
+        let active = state.active_profile.clone().and_then(|active_id| {
+            state
+                .accounts
+                .get(&active_id)
+                .filter(|account| account.availability.is_eligible(&now))
+                .map(|account| (active_id, account.profile.priority))
+        });
+        if let Some((active_id, active_priority)) = active {
+            // Return to a more preferred profile only at the exact moment a cooldown expired;
+            // otherwise stay sticky so transport reuse and prompt caching are preserved.
+            let preferred = (refreshed && state.return_to_preferred)
+                .then(|| select_fill_first(&state, &now))
+                .flatten()
+                .filter(|preferred_id| {
+                    preferred_id != &active_id
+                        && state
+                            .accounts
+                            .get(preferred_id)
+                            .is_some_and(|account| account.profile.priority < active_priority)
+                });
+            let selected_id = preferred.unwrap_or(active_id);
+            let switched = set_active_profile(&mut state, &selected_id);
+            let account = state
+                .accounts
+                .get(&selected_id)
+                .ok_or_else(|| AccountPoolError::UnknownProfile(selected_id.clone()))?;
             let lease = make_lease(account, state.generation);
             drop(state);
-            if refreshed {
+            if refreshed || switched {
                 self.notify_change();
             }
             return Ok(lease);
@@ -374,6 +416,73 @@ impl AccountPool {
             self.notify_change();
         }
         Ok(lease)
+    }
+
+    /// Rotates away from a still-working lease whose observed usage is close to its limit.
+    ///
+    /// Unlike [`Self::mark_exhausted`], this never leaves the pool without an active account: the
+    /// rotation only happens when another eligible profile exists to take over, so a pre-emptive
+    /// switch can never make things worse than staying on the nearly exhausted account.
+    pub fn rotate_preemptively(
+        &self,
+        lease: &AccountLease,
+        resets_at: DateTime<Utc>,
+    ) -> Option<AccountLease> {
+        let mut state = self.lock_state();
+        let refreshed = refresh_expired_exhaustion(&mut state);
+        let now = Utc::now();
+
+        let rotated = 'rotation: {
+            if state.active_profile.as_ref() != Some(&lease.profile.id)
+                || state.generation != lease.generation
+            {
+                break 'rotation None;
+            }
+            let has_alternative = state.accounts.values().any(|account| {
+                account.profile.id != lease.profile.id && account.availability.is_eligible(&now)
+            });
+            if !has_alternative {
+                break 'rotation None;
+            }
+
+            let Some(account) = state.accounts.get_mut(&lease.profile.id) else {
+                break 'rotation None;
+            };
+            account.availability = AccountAvailability::Exhausted {
+                resets_at: Some(resets_at),
+            };
+            state.active_profile = None;
+            let Some(selected_id) = select_fill_first(&state, &now) else {
+                break 'rotation None;
+            };
+            set_active_profile(&mut state, &selected_id);
+            state
+                .accounts
+                .get(&selected_id)
+                .map(|account| make_lease(account, state.generation))
+        };
+
+        drop(state);
+        if refreshed || rotated.is_some() {
+            self.notify_change();
+        }
+        rotated
+    }
+
+    /// Lists per-profile auth managers so background maintenance (for example token keep-alive)
+    /// can run without holding the pool lock across awaits.
+    pub fn auth_managers(&self) -> Vec<(AccountProfileId, Arc<AuthManager>)> {
+        let state = self.lock_state();
+        state
+            .accounts
+            .values()
+            .map(|account| {
+                (
+                    account.profile.id.clone(),
+                    Arc::clone(&account.auth_manager),
+                )
+            })
+            .collect()
     }
 
     /// Marks a lease exhausted and rotates only when that exact lease is still the active
@@ -668,6 +777,123 @@ mod tests {
             .expect("fallback account");
         assert_eq!(next.profile().id, second.id);
         assert!(next.generation() > lease.generation());
+    }
+
+    #[tokio::test]
+    async fn preemptive_rotation_switches_to_backup_and_cools_down_active() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let lease = pool.lease().expect("initial lease");
+        assert_eq!(lease.profile().id, first.id);
+
+        let resets_at = Utc::now() + chrono::Duration::hours(1);
+        let next = pool
+            .rotate_preemptively(&lease, resets_at)
+            .expect("rotation must pick the backup");
+        assert_eq!(next.profile().id, second.id);
+
+        let first_snapshot = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == first.id)
+            .expect("first profile snapshot");
+        assert_eq!(
+            first_snapshot.availability,
+            AccountAvailability::Exhausted {
+                resets_at: Some(resets_at)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn preemptive_rotation_refuses_to_drain_the_last_account() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        pool.register(
+            first.clone(),
+            test_auth_manager(&first.credential_home).await,
+        )
+        .expect("register first");
+        let lease = pool.lease().expect("initial lease");
+
+        let resets_at = Utc::now() + chrono::Duration::hours(1);
+        assert!(pool.rotate_preemptively(&lease, resets_at).is_none());
+        assert_eq!(
+            pool.lease().expect("lease keeps working").profile().id,
+            first.id
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_cooldown_returns_scheduling_to_preferred_profile() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let lease = pool.lease().expect("initial lease");
+        let resets_at = Utc::now() + chrono::Duration::milliseconds(50);
+        pool.mark_exhausted(&lease, Some(resets_at))
+            .expect("mark exhausted");
+        assert_eq!(pool.lease().expect("backup lease").profile().id, second.id);
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(
+            pool.lease().expect("preferred lease").profile().id,
+            first.id
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_cooldown_stays_sticky_when_return_to_preferred_is_off() {
+        let pool = AccountPool::new();
+        pool.set_return_to_preferred(false);
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let lease = pool.lease().expect("initial lease");
+        let resets_at = Utc::now() + chrono::Duration::milliseconds(50);
+        pool.mark_exhausted(&lease, Some(resets_at))
+            .expect("mark exhausted");
+        assert_eq!(pool.lease().expect("backup lease").profile().id, second.id);
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(pool.lease().expect("sticky lease").profile().id, second.id);
+    }
+
+    #[tokio::test]
+    async fn disabled_profile_registers_as_unschedulable() {
+        let pool = AccountPool::new();
+        let mut first = profile("first", 10);
+        first.disabled = true;
+        pool.register(
+            first.clone(),
+            test_auth_manager(&first.credential_home).await,
+        )
+        .expect("register first");
+        assert!(matches!(
+            pool.lease(),
+            Err(AccountPoolError::NoEligibleAccount)
+        ));
     }
 
     #[tokio::test]

@@ -116,6 +116,7 @@ impl AccountProfileStore {
                         priority,
                         credential_location: CredentialLocation::ManagedProfile,
                         state: AccountProfileState::PendingLogin,
+                        disabled: false,
                     };
                     manifest.profiles.push(stored);
                     if let Err(error) = self.save_manifest(&manifest) {
@@ -212,6 +213,7 @@ impl AccountProfileStore {
             priority,
             credential_location: CredentialLocation::LegacyRoot,
             state: AccountProfileState::Ready,
+            disabled: false,
         });
         self.save_manifest(&manifest)?;
         Ok(AccountProfile::new(
@@ -220,6 +222,35 @@ impl AccountProfileStore {
             priority,
             label,
         ))
+    }
+
+    /// Applies user-editable scheduling metadata to an existing profile and returns the updated
+    /// resolved profile. Unset fields keep their current values.
+    pub fn update_profile_metadata(
+        &self,
+        id: &AccountProfileId,
+        update: AccountProfileMetadataUpdate,
+    ) -> Result<AccountProfile, AccountProfileStoreError> {
+        let mut manifest = self.load_manifest()?;
+        let stored = manifest
+            .profiles
+            .iter_mut()
+            .find(|profile| &profile.id == id)
+            .ok_or_else(|| AccountProfileStoreError::UnknownProfile(id.clone()))?;
+        if let Some(priority) = update.priority {
+            stored.priority = priority;
+        }
+        match update.label {
+            Some(AccountLabelUpdate::Set(label)) => stored.label = Some(label),
+            Some(AccountLabelUpdate::Clear) => stored.label = None,
+            None => {}
+        }
+        if let Some(disabled) = update.disabled {
+            stored.disabled = disabled;
+        }
+        let updated = stored.clone();
+        self.save_manifest(&manifest)?;
+        self.resolve_profile(updated)
     }
 
     /// Removes only profile metadata. Credential deletion is intentionally separate so a profile
@@ -278,12 +309,10 @@ impl AccountProfileStore {
             CredentialLocation::LegacyRoot => self.codex_home.clone(),
             CredentialLocation::ManagedProfile => self.credential_home_for(&stored.id),
         };
-        Ok(AccountProfile::new(
-            stored.id,
-            credential_home,
-            stored.priority,
-            stored.label,
-        ))
+        let mut profile =
+            AccountProfile::new(stored.id, credential_home, stored.priority, stored.label);
+        profile.disabled = stored.disabled;
+        Ok(profile)
     }
 
     fn load_manifest(&self) -> Result<AccountProfilesManifest, AccountProfileStoreError> {
@@ -333,6 +362,22 @@ impl AccountProfileStore {
     }
 }
 
+/// User-editable metadata changes applied through `update_profile_metadata`. Unset fields keep
+/// their current manifest values.
+#[derive(Debug, Default)]
+pub struct AccountProfileMetadataUpdate {
+    pub priority: Option<u32>,
+    pub label: Option<AccountLabelUpdate>,
+    pub disabled: Option<bool>,
+}
+
+/// Distinguishes "set a new label" from "remove the label" without nesting options.
+#[derive(Debug)]
+pub enum AccountLabelUpdate {
+    Set(String),
+    Clear,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct AccountProfilesManifest {
     version: u32,
@@ -356,6 +401,8 @@ struct StoredAccountProfile {
     credential_location: CredentialLocation,
     #[serde(default = "default_profile_state")]
     state: AccountProfileState,
+    #[serde(default)]
+    disabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

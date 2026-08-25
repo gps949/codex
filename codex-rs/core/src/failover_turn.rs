@@ -81,6 +81,62 @@ pub(crate) fn handle_sampling_failover(
     }
 }
 
+/// How the turn proceeds after an automatic account switch, for user-facing messaging.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum AccountSwitchContinuation {
+    /// The turn continues automatically on the newly selected account.
+    Automatic,
+    /// Visible partial output blocked automatic replay; the user must re-send their message.
+    ResendRequired,
+}
+
+/// Builds the user-facing message for a completed account rotation, naming the account that took
+/// over. Returns `None` when no account is schedulable; the pool-exhausted message covers that.
+pub(crate) fn account_switch_message(
+    execution_auth: &ExecutionAuth,
+    failed_lease: &ExecutionAuthLease,
+    continuation: AccountSwitchContinuation,
+) -> Option<String> {
+    let active = execution_auth.active_lease()?;
+    let to_profile = active.profile_id()?.clone();
+    let from = failed_lease
+        .profile_id()
+        .map(|id| format!("`{id}`"))
+        .unwrap_or_else(|| "the previous account".to_string());
+    let suffix = match continuation {
+        AccountSwitchContinuation::Automatic => "The turn continues automatically.",
+        AccountSwitchContinuation::ResendRequired => {
+            "Partial output could not be replayed safely; re-send your message to continue on the new account."
+        }
+    };
+    Some(format!(
+        "Codex account {from} became unavailable; switched to `{to_profile}`. {suffix}"
+    ))
+}
+
+/// Builds the user-facing message shown when every configured account is unavailable.
+pub(crate) fn pool_exhausted_message(execution_auth: &ExecutionAuth) -> String {
+    let earliest_reset = execution_auth
+        .account_pool()
+        .map(|pool| pool.snapshots())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|snapshot| match snapshot.availability {
+            codex_login::AccountAvailability::Exhausted { resets_at } => resets_at,
+            codex_login::AccountAvailability::Available
+            | codex_login::AccountAvailability::AuthenticationUnavailable { .. }
+            | codex_login::AccountAvailability::Disabled => None,
+        })
+        .min();
+    match earliest_reset {
+        Some(resets_at) => format!(
+            "All configured Codex accounts have hit their usage limits. The earliest cooldown ends at {}.",
+            resets_at.format("%Y-%m-%d %H:%M UTC")
+        ),
+        None => "All configured Codex accounts are currently unavailable. Run `codex account list` for details.".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

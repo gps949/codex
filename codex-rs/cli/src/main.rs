@@ -576,6 +576,46 @@ enum AccountSubcommand {
     /// List configured account profiles and their scheduler state.
     List,
 
+    /// Re-run ChatGPT login for an existing account profile in place.
+    Login {
+        /// Account profile id to re-authenticate.
+        profile_id: String,
+
+        /// Use device-code auth instead of the local browser flow.
+        #[arg(long = "device-auth")]
+        device_auth: bool,
+    },
+
+    /// Update priority or label of an account profile.
+    Set {
+        /// Account profile id to update.
+        profile_id: String,
+
+        /// New scheduling priority (lower is preferred).
+        #[arg(long)]
+        priority: Option<u32>,
+
+        /// New human-readable label.
+        #[arg(long, conflicts_with = "clear_label")]
+        label: Option<String>,
+
+        /// Remove the current label.
+        #[arg(long)]
+        clear_label: bool,
+    },
+
+    /// Re-enable a disabled account profile for scheduling.
+    Enable {
+        /// Account profile id to enable.
+        profile_id: String,
+    },
+
+    /// Park an account profile: keep its credentials but never schedule it.
+    Disable {
+        /// Account profile id to disable.
+        profile_id: String,
+    },
+
     /// Select the active account profile.
     Use {
         /// Account profile id to activate.
@@ -1674,6 +1714,55 @@ async fn cli_main(
                 }
                 AccountSubcommand::List => {
                     account_cmd::run_account_list(account_cli.config_overrides).await;
+                }
+                AccountSubcommand::Login {
+                    profile_id,
+                    device_auth,
+                } => {
+                    account_cmd::run_account_relogin(
+                        account_cli.config_overrides,
+                        profile_id,
+                        device_auth,
+                    )
+                    .await;
+                }
+                AccountSubcommand::Set {
+                    profile_id,
+                    priority,
+                    label,
+                    clear_label,
+                } => {
+                    account_cmd::run_account_set(
+                        account_cli.config_overrides,
+                        profile_id,
+                        priority,
+                        label,
+                        clear_label,
+                        /*disabled*/ None,
+                    )
+                    .await;
+                }
+                AccountSubcommand::Enable { profile_id } => {
+                    account_cmd::run_account_set(
+                        account_cli.config_overrides,
+                        profile_id,
+                        /*priority*/ None,
+                        /*label*/ None,
+                        /*clear_label*/ false,
+                        Some(false),
+                    )
+                    .await;
+                }
+                AccountSubcommand::Disable { profile_id } => {
+                    account_cmd::run_account_set(
+                        account_cli.config_overrides,
+                        profile_id,
+                        /*priority*/ None,
+                        /*label*/ None,
+                        /*clear_label*/ false,
+                        Some(true),
+                    )
+                    .await;
                 }
                 AccountSubcommand::Use { profile_id, force } => {
                     account_cmd::run_account_use(account_cli.config_overrides, profile_id, force)

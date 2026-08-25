@@ -14,6 +14,11 @@ use crate::execution_auth::ExecutionAuthLease;
 /// the exhausted account on every request.
 const UNKNOWN_QUOTA_RESET_REPROBE_DELAY: Duration = Duration::minutes(10);
 
+/// A backend reset timestamp at or before "now" would make the exhausted account immediately
+/// eligible again, letting the sampling loop thrash on the same failing account. Every cooldown
+/// therefore lasts at least this long.
+const MINIMUM_QUOTA_COOLDOWN: Duration = Duration::seconds(60);
+
 /// Why native execution-account failover was attempted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailoverCause {
@@ -69,6 +74,18 @@ impl FailoverCoordinator {
                     FailoverCause::UsageLimitReached,
                 ))
             }
+            CodexErrorDetails::QuotaExceeded => {
+                // SSE/API quota rejections carry no reset timestamp; park the account on the
+                // conservative reprobe delay so recovery stays automatic.
+                let reset_at = quota_reset_or_reprobe(/*resets_at*/ None);
+                let next =
+                    execution_auth.failover_after_quota_exhausted(failed_lease, Some(reset_at))?;
+                Ok(Self::finish_rotation(
+                    failed_lease,
+                    next,
+                    FailoverCause::UsageLimitReached,
+                ))
+            }
             CodexErrorDetails::RefreshTokenFailed(refresh_error) => {
                 let next = execution_auth
                     .failover_after_auth_unavailable(failed_lease, refresh_error.to_string())?;
@@ -102,9 +119,11 @@ impl FailoverCoordinator {
 }
 
 fn quota_reset_or_reprobe(resets_at: Option<&DateTime<Utc>>) -> DateTime<Utc> {
+    let now = Utc::now();
     resets_at
         .cloned()
-        .unwrap_or_else(|| Utc::now() + UNKNOWN_QUOTA_RESET_REPROBE_DELAY)
+        .unwrap_or_else(|| now + UNKNOWN_QUOTA_RESET_REPROBE_DELAY)
+        .max(now + MINIMUM_QUOTA_COOLDOWN)
 }
 
 #[cfg(test)]
@@ -115,6 +134,13 @@ mod tests {
     fn backend_reset_timestamp_wins_over_client_reprobe() {
         let reset = Utc::now() + Duration::hours(2);
         assert_eq!(quota_reset_or_reprobe(Some(&reset)), reset);
+    }
+
+    #[test]
+    fn past_reset_timestamp_is_clamped_to_a_minimum_cooldown() {
+        let stale_reset = Utc::now() - Duration::hours(1);
+        let clamped = quota_reset_or_reprobe(Some(&stale_reset));
+        assert!(clamped > Utc::now());
     }
 
     #[test]

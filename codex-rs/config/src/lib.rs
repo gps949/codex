@@ -1,3 +1,4 @@
+mod account_pool;
 mod auth_policy;
 mod browser_computer_use_requirements;
 mod browser_use;
@@ -39,6 +40,7 @@ pub mod types;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
+pub use account_pool::AccountPoolConfigToml;
 pub use auth_policy::ManagedAuthPolicy;
 pub use browser_computer_use_requirements::AllowDenyRequirementToml;
 pub use browser_computer_use_requirements::BrowserUseAccessApprovalLifetimeToml;

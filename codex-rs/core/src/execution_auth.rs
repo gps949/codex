@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use crate::config::Config;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_login::AccountLease;
@@ -15,7 +16,6 @@ use codex_login::AccountProfileId;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AuthManager;
-use codex_login::AuthManagerConfig;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use tokio::sync::OnceCell;
@@ -59,6 +59,19 @@ enum RuntimeInitError {
 #[derive(Clone)]
 pub(crate) struct ExecutionAuthLease {
     account: Option<AccountLease>,
+}
+
+/// A pre-emptive rotation lacking an authoritative reset timestamp re-probes the parked account
+/// after this delay, mirroring the hard-failure reprobe policy in the failover coordinator.
+const PREEMPTIVE_UNKNOWN_RESET_REPROBE_DELAY: chrono::Duration = chrono::Duration::minutes(10);
+
+/// Describes one completed pre-emptive account rotation for logging and user notification.
+#[derive(Clone, Debug)]
+pub(crate) struct PreemptiveSwitch {
+    pub(crate) from_profile: AccountProfileId,
+    pub(crate) to_profile: AccountProfileId,
+    pub(crate) used_percent: f64,
+    pub(crate) resets_at: DateTime<Utc>,
 }
 
 impl std::fmt::Debug for ExecutionAuthLease {
@@ -108,9 +121,12 @@ impl ExecutionAuth {
     /// `account add` creates the manifest without requiring a restart.
     pub(crate) async fn ensure_runtime_from_config(
         &self,
-        config: &impl AuthManagerConfig,
+        config: &Config,
     ) -> Result<bool, AccountPoolRuntimeError> {
-        if self.runtime().is_some() {
+        if let Some(runtime) = self.runtime() {
+            runtime
+                .pool()
+                .set_return_to_preferred(config.account_pool.effective_return_to_preferred());
             return Ok(true);
         }
 
@@ -138,8 +154,9 @@ impl ExecutionAuth {
 
         match result {
             Ok(runtime) => {
+                let pool = runtime.pool();
+                pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
                 if newly_installed.load(Ordering::Acquire) {
-                    let pool = runtime.pool();
                     self.notify_change();
                     self.spawn_pool_change_bridge(pool);
                 }
@@ -207,6 +224,53 @@ impl ExecutionAuth {
 
     /// Associates a backend rate-limit snapshot with the exact lease that observed it. Cached
     /// snapshots are advisory; a real UsageLimitReached response remains authoritative.
+    /// Rotates away from the active account before it hits a hard usage limit.
+    ///
+    /// The decision uses the pool's cached per-account rate-limit windows, which are refreshed on
+    /// every successful response. The rotation is skipped when no window has crossed `threshold`,
+    /// when the data is stale or already reset, or when no other account could take over.
+    pub(crate) fn preemptive_rotation(&self, threshold: f64) -> Option<PreemptiveSwitch> {
+        const STALE_OBSERVATION_CUTOFF: chrono::Duration = chrono::Duration::minutes(30);
+
+        let pool = self.account_pool()?;
+        let lease = pool.lease().ok()?;
+        let snapshot = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == lease.profile().id)?;
+
+        let now = Utc::now();
+        let observed_recently = snapshot
+            .rate_limits
+            .observed_at
+            .is_some_and(|observed_at| now - observed_at < STALE_OBSERVATION_CUTOFF);
+        let depleted_window = [
+            snapshot.rate_limits.primary.as_ref(),
+            snapshot.rate_limits.secondary.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|window| window.used_percent >= threshold)
+        .filter(|window| match window.resets_at {
+            // A window whose reset already passed no longer constrains the account.
+            Some(resets_at) => resets_at > now,
+            None => observed_recently,
+        })
+        .max_by(|left, right| left.used_percent.total_cmp(&right.used_percent))?;
+
+        let used_percent = depleted_window.used_percent;
+        let resets_at = depleted_window
+            .resets_at
+            .unwrap_or_else(|| now + PREEMPTIVE_UNKNOWN_RESET_REPROBE_DELAY);
+        let next = pool.rotate_preemptively(&lease, resets_at)?;
+        Some(PreemptiveSwitch {
+            from_profile: lease.profile().id.clone(),
+            to_profile: next.profile().id.clone(),
+            used_percent,
+            resets_at,
+        })
+    }
+
     pub(crate) fn observe_rate_limits(
         &self,
         lease: &ExecutionAuthLease,

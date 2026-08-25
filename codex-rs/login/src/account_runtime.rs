@@ -38,7 +38,13 @@ pub struct AccountPoolRuntime {
     profile_issues: Vec<AccountPoolRuntimeProfileIssue>,
     runtime_state_issue: Option<String>,
     auth_sync_task: JoinHandle<()>,
+    keepalive_task: JoinHandle<()>,
 }
+
+/// ChatGPT refresh tokens can expire when a profile stays idle for weeks. Touching every
+/// profile's AuthManager on this cadence lets its own 8-day proactive-refresh policy keep
+/// stand-by credentials alive long before they are needed.
+const AUTH_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
 
 impl AccountPoolRuntime {
     /// Installs native account pooling only when the user has already configured the account
@@ -127,6 +133,13 @@ impl AccountPoolRuntime {
                 return Err(AccountPoolRuntimeError::WorkloadIdentitySelected);
             }
 
+            // A disabled profile keeps its slot without an auth probe: the user parked it on
+            // purpose and its credentials must not be touched until it is re-enabled.
+            if profile.disabled {
+                pool.register(profile, manager)?;
+                continue;
+            }
+
             match manager.auth().await {
                 Some(auth) if auth.is_chatgpt_auth() => {
                     pool.register(profile, manager)?;
@@ -170,6 +183,7 @@ impl AccountPoolRuntime {
             runtime_state_store.clone(),
             initial_generation,
         );
+        let keepalive_task = spawn_auth_keepalive_task(Arc::clone(&pool));
 
         Ok(Self {
             pool,
@@ -179,6 +193,7 @@ impl AccountPoolRuntime {
             profile_issues,
             runtime_state_issue,
             auth_sync_task,
+            keepalive_task,
         })
     }
 
@@ -210,6 +225,7 @@ impl AccountPoolRuntime {
 impl Drop for AccountPoolRuntime {
     fn drop(&mut self) {
         self.auth_sync_task.abort();
+        self.keepalive_task.abort();
     }
 }
 
@@ -270,15 +286,36 @@ fn spawn_auth_sync_task(
                 tracing::warn!("failed to persist account runtime state: {error}");
             }
 
-            let current_generation = pool
-                .lease()
-                .map(|lease| lease.generation())
-                .unwrap_or_else(|_| observed_generation.wrapping_add(1));
+            // A fully exhausted pool has no schedulable identity to sync; skipping the reload
+            // avoids hammering the outer AuthManager on every bookkeeping notification.
+            let Ok(lease) = pool.lease() else {
+                continue;
+            };
+            let current_generation = lease.generation();
             if current_generation == observed_generation {
                 continue;
             }
             observed_generation = current_generation;
             auth_manager.reload().await;
+        }
+    })
+}
+
+/// Periodically touches every profile's own AuthManager so idle stand-by accounts run their
+/// normal proactive token refresh instead of silently aging out while another account is active.
+fn spawn_auth_keepalive_task(pool: Arc<AccountPool>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(AUTH_KEEPALIVE_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick fires immediately; install already probed every profile.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            for (profile_id, manager) in pool.auth_managers() {
+                if manager.auth().await.is_none() {
+                    tracing::debug!(%profile_id, "account keep-alive found no usable auth");
+                }
+            }
         }
     })
 }

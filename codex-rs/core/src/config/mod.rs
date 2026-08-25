@@ -9,6 +9,7 @@ use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
 use crate::windows_sandbox::resolve_windows_sandbox_private_desktop;
 use codex_agent_roles::load_agent_roles;
+use codex_config::AccountPoolConfigToml;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -817,6 +818,9 @@ pub struct Config {
     /// keyring: Use an OS-specific keyring service.
     /// auto: Use the OS-specific keyring service if available, otherwise use a file.
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
+
+    /// Scheduling knobs for the native multi-account execution pool.
+    pub account_pool: AccountPoolConfigToml,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: Constrained<HashMap<String, McpServerConfig>>,
@@ -4140,6 +4144,7 @@ impl Config {
                     env!("CARGO_PKG_VERSION"),
                 ),
             },
+            account_pool: cfg.account_pool.unwrap_or_default(),
             mcp_servers,
             non_prefixed_mcp_tool_servers,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"

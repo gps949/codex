@@ -16,10 +16,14 @@ use crate::context::ContextualUserFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::execution_auth::ExecutionAuth;
 use crate::execution_provenance::record_conversation_items_with_execution_provenance;
+use crate::execution_provenance::sampling_execution_provenance;
 use crate::execution_provenance::set_sampling_execution_provenance;
 use crate::failover_checkpoint::SamplingHistoryCursor;
+use crate::failover_turn::AccountSwitchContinuation;
 use crate::failover_turn::SamplingFailoverDirective;
+use crate::failover_turn::account_switch_message;
 use crate::failover_turn::handle_sampling_failover;
+use crate::failover_turn::pool_exhausted_message;
 use crate::feedback_tags;
 use crate::hook_runtime::drain_async_hook_results;
 use crate::hook_runtime::inspect_pending_input;
@@ -181,6 +185,30 @@ pub(crate) async fn run_turn(
             false
         }
     };
+    // Rotate away from a nearly exhausted account at the turn boundary, before any transport or
+    // step state exists, so the switch costs nothing and the turn cannot hit the limit mid-response.
+    if multi_account_enabled
+        && let Some(threshold) = turn_context
+            .config
+            .account_pool
+            .effective_preemptive_switch_percent()
+        && let Some(switch) = execution_auth.preemptive_rotation(threshold)
+    {
+        execution_auth.compatibility_auth_manager().reload().await;
+        sess.send_event(
+            &turn_context,
+            EventMsg::Warning(WarningEvent {
+                message: format!(
+                    "Switched to Codex account `{}`: account `{}` reached {:.0}% of a usage window (resets at {}).",
+                    switch.to_profile,
+                    switch.from_profile,
+                    switch.used_percent,
+                    switch.resets_at.format("%Y-%m-%d %H:%M UTC"),
+                ),
+            }),
+        )
+        .await;
+    }
     let mut client_session = if multi_account_enabled {
         sess.services.model_client.new_session()
     } else {
@@ -1489,6 +1517,7 @@ async fn run_sampling_request(
                 let account_failure = matches!(
                     err.details(),
                     CodexErrorDetails::UsageLimitReached(_)
+                        | CodexErrorDetails::QuotaExceeded
                         | CodexErrorDetails::RefreshTokenFailed(_)
                 );
                 if pooled_execution && account_failure {
@@ -1517,6 +1546,17 @@ async fn run_sampling_request(
                             // Make the outer provider observe the selected pool identity now rather
                             // than racing the background auth-sync task.
                             execution_auth.compatibility_auth_manager().reload().await;
+                            if let Some(message) = account_switch_message(
+                                execution_auth.as_ref(),
+                                &execution_lease,
+                                AccountSwitchContinuation::Automatic,
+                            ) {
+                                sess.send_event(
+                                    &turn_context,
+                                    EventMsg::Warning(WarningEvent { message }),
+                                )
+                                .await;
+                            }
                             // A new turn-scoped session drops the old WebSocket, previous-response
                             // state and x-codex-turn-state before the next account sends anything.
                             *client_session = sess.services.model_client.new_session();
@@ -1532,9 +1572,34 @@ async fn run_sampling_request(
                             turn_context.turn_timing_state.record_sampling_retry();
                             continue;
                         }
-                        SamplingFailoverDirective::PoolExhausted
-                        | SamplingFailoverDirective::ReconcileCurrentAttempt
-                        | SamplingFailoverDirective::NotHandled => return Err(err),
+                        SamplingFailoverDirective::ReconcileCurrentAttempt => {
+                            // The pool already rotated, but visible partial output makes an
+                            // automatic replay unsafe. Tell the user how to continue before the
+                            // original error is surfaced.
+                            if let Some(message) = account_switch_message(
+                                execution_auth.as_ref(),
+                                &execution_lease,
+                                AccountSwitchContinuation::ResendRequired,
+                            ) {
+                                sess.send_event(
+                                    &turn_context,
+                                    EventMsg::Warning(WarningEvent { message }),
+                                )
+                                .await;
+                            }
+                            return Err(err);
+                        }
+                        SamplingFailoverDirective::PoolExhausted => {
+                            sess.send_event(
+                                &turn_context,
+                                EventMsg::Warning(WarningEvent {
+                                    message: pool_exhausted_message(execution_auth.as_ref()),
+                                }),
+                            )
+                            .await;
+                            return Err(err);
+                        }
+                        SamplingFailoverDirective::NotHandled => return Err(err),
                     }
                 }
                 err
@@ -2653,6 +2718,17 @@ async fn try_run_sampling_request(
                 sess.set_server_reasoning_included(included).await;
             }
             ResponseEvent::RateLimits(snapshot) => {
+                // Keep the account pool's per-profile usage view fresh so pre-emptive switching
+                // and status surfaces see real data instead of only hard-failure observations.
+                if let Some(provenance) = sampling_execution_provenance(turn_context.as_ref()) {
+                    let execution_auth =
+                        ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
+                    if let Err(error) =
+                        execution_auth.observe_rate_limits(provenance.lease(), &snapshot)
+                    {
+                        tracing::debug!(%error, "failed to record account-pool rate limits");
+                    }
+                }
                 // Update internal state with latest rate limits, but defer sending until
                 // token usage is available to avoid duplicate TokenCount events.
                 sess.record_rate_limits_info(snapshot).await;
