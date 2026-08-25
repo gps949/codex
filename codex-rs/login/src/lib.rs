@@ -1,3 +1,4 @@
+pub mod account_external_auth;
 pub mod account_login;
 pub mod account_pool;
 pub mod account_store;
@@ -13,6 +14,7 @@ mod pkce;
 mod server;
 mod success_page;
 
+pub use account_external_auth::AccountPoolExternalAuth;
 pub use account_login::AccountLoginFlowError;
 pub use account_login::PendingAccountBrowserLogin;
 pub use account_login::PendingAccountDeviceLogin;
