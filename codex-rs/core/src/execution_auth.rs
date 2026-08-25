@@ -1,5 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::sync::Weak;
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -17,6 +21,15 @@ use codex_protocol::protocol::RateLimitWindow;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
+/// Process-local registry that preserves one execution-auth coordinator for every live AuthManager.
+///
+/// This deliberately keys by Arc allocation identity rather than account id: before pooled auth is
+/// installed an AuthManager may not have a resolved ChatGPT account yet, and callers that supply a
+/// distinct AuthManager must keep their auth lifecycle isolated. Stale weak entries are removed on
+/// lookup, so allocator address reuse cannot attach a new manager to an old coordinator.
+static EXECUTION_AUTH_REGISTRY: OnceLock<StdMutex<HashMap<usize, Weak<ExecutionAuth>>>> =
+    OnceLock::new();
+
 /// Process/session-facing authentication facade for inference execution.
 ///
 /// The logical Codex thread, app-server and local state stay account-independent. Every concrete
@@ -25,7 +38,9 @@ use tokio::sync::watch;
 ///
 /// Construction is synchronous so existing ThreadManager creation sites do not need to become
 /// async. Native account pooling is installed lazily from the resolved Config when the first
-/// session starts. The same `ExecutionAuth` is shared by root threads and subagents.
+/// session starts. Sessions that already share the same AuthManager automatically share this
+/// coordinator through [`Self::shared`], so root threads and subagents do not need another plumbing
+/// field just for multi-account execution.
 pub(crate) struct ExecutionAuth {
     legacy_manager: Arc<AuthManager>,
     runtime: RwLock<Option<Arc<AccountPoolRuntime>>>,
@@ -51,6 +66,29 @@ impl std::fmt::Debug for ExecutionAuthLease {
 }
 
 impl ExecutionAuth {
+    /// Returns the process-local execution coordinator associated with this exact AuthManager.
+    ///
+    /// Existing Codex ownership already propagates an AuthManager from a root session to its
+    /// descendants. Reusing that identity here therefore gives the whole thread tree one account
+    /// pool without changing ThreadManager/SessionSpawnArgs APIs. A caller that intentionally uses
+    /// a different AuthManager receives an independent coordinator and keeps legacy behavior.
+    pub(crate) fn shared(legacy_manager: Arc<AuthManager>) -> Arc<Self> {
+        let key = Arc::as_ptr(&legacy_manager) as usize;
+        let registry = EXECUTION_AUTH_REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()));
+        let mut registry = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        registry.retain(|_, coordinator| coordinator.strong_count() > 0);
+        if let Some(existing) = registry.get(&key).and_then(Weak::upgrade) {
+            return existing;
+        }
+
+        let coordinator = Arc::new(Self::legacy(legacy_manager));
+        registry.insert(key, Arc::downgrade(&coordinator));
+        coordinator
+    }
+
     pub(crate) fn legacy(legacy_manager: Arc<AuthManager>) -> Self {
         let (change_tx, _change_rx) = watch::channel(0);
         Self {
