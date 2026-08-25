@@ -1,4 +1,5 @@
 pub mod account_pool;
+pub mod account_store;
 pub mod auth;
 pub mod auth_env_telemetry;
 pub mod test_support;
@@ -20,6 +21,8 @@ pub use account_pool::AccountProfile;
 pub use account_pool::AccountProfileId;
 pub use account_pool::AccountRateLimitWindow;
 pub use account_pool::AccountRateLimits;
+pub use account_store::AccountProfileStore;
+pub use account_store::AccountProfileStoreError;
 pub use callback_params::LoginCallbackResult;
 pub use callback_params::LoginOnboardingEntrypoint;
 pub use codex_config::types::AuthCredentialsStoreMode;
