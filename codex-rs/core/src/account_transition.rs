@@ -116,32 +116,6 @@ impl AccountHistoryTransition {
         transition
     }
 
-    pub(crate) fn is_cross_account(&self) -> bool {
-        self.cross_account
-    }
-
-    pub(crate) fn legacy_unattributed_profile_id(&self) -> Option<&str> {
-        self.legacy_unattributed_profile_id.as_deref()
-    }
-
-    /// Produces the request-history policy for a freshly rebound model session. Once a logical
-    /// session crosses profiles, cross-account filtering remains enabled for the rest of that
-    /// logical session because its durable history can contain items from several accounts.
-    pub(crate) fn rebind(
-        &self,
-        previous: &ExecutionAuthLease,
-        target: &ExecutionAuthLease,
-    ) -> Self {
-        let changed_profile = previous.profile_id().map(|id| id.as_str())
-            != target.profile_id().map(|id| id.as_str());
-        Self {
-            target_profile_id: target.profile_id().map(|id| id.as_str().to_string()),
-            target_generation: target.generation(),
-            legacy_unattributed_profile_id: self.legacy_unattributed_profile_id.clone(),
-            cross_account: self.cross_account || changed_profile,
-        }
-    }
-
     /// Converts normalized, annotated history into a request-safe projection for the active
     /// execution identity.
     ///

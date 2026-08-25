@@ -13,10 +13,10 @@ pub(crate) enum SamplingFailoverDirective {
     /// Keep normal Codex error/retry handling; this is not an account-availability failure.
     NotHandled,
     /// Submit the exact same logical prompt using the newly selected execution account.
-    ReplayCurrentSamplingRequest { next_lease: ExecutionAuthLease },
+    ReplayCurrentSamplingRequest,
     /// The failed response already produced durable conversation/tool state. Rebuild the prompt
     /// from local history and continue on the newly selected execution account.
-    ContinueFromDurableHistory { next_lease: ExecutionAuthLease },
+    ContinueFromDurableHistory,
     /// The account pool recognized the failure but every configured account is unavailable.
     PoolExhausted,
     /// A tool may have caused an external side effect without a durable result, or partial visible
@@ -33,28 +33,51 @@ pub(crate) enum SamplingFailoverDirective {
 pub(crate) fn handle_sampling_failover(
     execution_auth: &ExecutionAuth,
     failed_lease: &ExecutionAuthLease,
-    checkpoint: &SamplingAttemptCheckpoint,
+    checkpoint: SamplingAttemptCheckpoint,
     error: &CodexErr,
 ) -> std::io::Result<SamplingFailoverDirective> {
     match FailoverCoordinator::handle_inference_error(execution_auth, failed_lease, error)? {
         FailoverOutcome::NotApplicable => Ok(SamplingFailoverDirective::NotHandled),
-        FailoverOutcome::PoolExhausted { .. } => Ok(SamplingFailoverDirective::PoolExhausted),
-        FailoverOutcome::Rebound { next_lease, .. } => match checkpoint.retry_mode() {
-            FailoverRetryMode::ReplayCurrentSamplingRequest => {
-                Ok(SamplingFailoverDirective::ReplayCurrentSamplingRequest { next_lease })
+        FailoverOutcome::PoolExhausted { cause } => {
+            tracing::warn!(
+                ?cause,
+                "every configured Codex execution account is unavailable"
+            );
+            Ok(SamplingFailoverDirective::PoolExhausted)
+        }
+        FailoverOutcome::Rebound {
+            cause,
+            from_profile,
+            from_generation,
+            to_profile,
+            to_generation,
+        } => {
+            tracing::info!(
+                ?cause,
+                ?from_profile,
+                from_generation,
+                ?to_profile,
+                to_generation,
+                "rotated to another Codex execution account"
+            );
+            match checkpoint.retry_mode() {
+                FailoverRetryMode::ReplayCurrentSamplingRequest => {
+                    Ok(SamplingFailoverDirective::ReplayCurrentSamplingRequest)
+                }
+                // Until the UI/protocol layer has an explicit abandoned-partial-output lifecycle,
+                // never duplicate visible assistant/reasoning text just to make switching look
+                // seamless.
+                FailoverRetryMode::ReplayAfterAbandoningPartialOutput => {
+                    Ok(SamplingFailoverDirective::ReconcileCurrentAttempt)
+                }
+                FailoverRetryMode::ContinueFromDurableHistory => {
+                    Ok(SamplingFailoverDirective::ContinueFromDurableHistory)
+                }
+                FailoverRetryMode::ReconcileCurrentAttempt => {
+                    Ok(SamplingFailoverDirective::ReconcileCurrentAttempt)
+                }
             }
-            // Until the UI/protocol layer has an explicit abandoned-partial-output lifecycle,
-            // never duplicate visible assistant/reasoning text just to make switching look seamless.
-            FailoverRetryMode::ReplayAfterAbandoningPartialOutput => {
-                Ok(SamplingFailoverDirective::ReconcileCurrentAttempt)
-            }
-            FailoverRetryMode::ContinueFromDurableHistory => {
-                Ok(SamplingFailoverDirective::ContinueFromDurableHistory { next_lease })
-            }
-            FailoverRetryMode::ReconcileCurrentAttempt => {
-                Ok(SamplingFailoverDirective::ReconcileCurrentAttempt)
-            }
-        },
+        }
     }
 }
 

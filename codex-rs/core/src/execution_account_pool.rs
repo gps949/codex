@@ -49,7 +49,7 @@ impl ExecutionAccountPoolHandle {
 
     pub fn active_identity(&self) -> Option<ExecutionAccountIdentity> {
         let lease = self.inner.active_lease()?;
-        identity_from_lease(lease.account_lease()?)
+        Some(identity_from_lease(lease.account_lease()?))
     }
 
     pub fn change_receiver(&self) -> watch::Receiver<u64> {
@@ -70,7 +70,7 @@ impl ExecutionAccountPoolHandle {
         } else {
             pool.activate(profile_id)?
         };
-        let identity = identity_from_lease(&lease).expect("pooled lease always has an identity");
+        let identity = identity_from_lease(&lease);
         self.inner.compatibility_auth_manager().reload().await;
         Ok(identity)
     }
@@ -81,15 +81,15 @@ impl ExecutionAccountPoolHandle {
             .account_pool()
             .ok_or(AccountPoolError::NoEligibleAccount)?;
         let lease = pool.activate_fill_first()?;
-        let identity = identity_from_lease(&lease).expect("pooled lease always has an identity");
+        let identity = identity_from_lease(&lease);
         self.inner.compatibility_auth_manager().reload().await;
         Ok(identity)
     }
 }
 
-fn identity_from_lease(lease: &AccountLease) -> Option<ExecutionAccountIdentity> {
-    Some(ExecutionAccountIdentity {
+fn identity_from_lease(lease: &AccountLease) -> ExecutionAccountIdentity {
+    ExecutionAccountIdentity {
         profile_id: lease.profile().id.clone(),
         generation: lease.generation(),
-    })
+    }
 }

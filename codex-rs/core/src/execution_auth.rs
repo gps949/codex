@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
-use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -17,7 +18,7 @@ use codex_login::AuthManager;
 use codex_login::AuthManagerConfig;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
-use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
 use tokio::sync::watch;
 
 /// Process-local registry that preserves one execution-auth coordinator for every live AuthManager.
@@ -43,16 +44,21 @@ static EXECUTION_AUTH_REGISTRY: OnceLock<StdMutex<HashMap<usize, Arc<ExecutionAu
 /// field just for multi-account execution.
 pub(crate) struct ExecutionAuth {
     legacy_manager: Arc<AuthManager>,
-    runtime: RwLock<Option<Arc<AccountPoolRuntime>>>,
-    runtime_init_lock: Mutex<()>,
+    runtime: OnceCell<Arc<AccountPoolRuntime>>,
     change_tx: watch::Sender<u64>,
+}
+
+/// Private outcome of one lazy pool-install attempt. `NotConfigured` keeps the cell empty so a
+/// manifest created later (for example by `codex account add`) is picked up without a restart.
+enum RuntimeInitError {
+    NotConfigured,
+    Failed(AccountPoolRuntimeError),
 }
 
 /// Immutable execution identity captured by one account-bound model client/request path.
 #[derive(Clone)]
 pub(crate) struct ExecutionAuthLease {
     account: Option<AccountLease>,
-    auth_manager: Arc<AuthManager>,
 }
 
 impl std::fmt::Debug for ExecutionAuthLease {
@@ -92,21 +98,7 @@ impl ExecutionAuth {
         let (change_tx, _change_rx) = watch::channel(0);
         Self {
             legacy_manager,
-            runtime: RwLock::new(None),
-            runtime_init_lock: Mutex::new(()),
-            change_tx,
-        }
-    }
-
-    pub(crate) fn with_runtime(
-        legacy_manager: Arc<AuthManager>,
-        runtime: AccountPoolRuntime,
-    ) -> Self {
-        let (change_tx, _change_rx) = watch::channel(0);
-        Self {
-            legacy_manager,
-            runtime: RwLock::new(Some(Arc::new(runtime))),
-            runtime_init_lock: Mutex::new(()),
+            runtime: OnceCell::new(),
             change_tx,
         }
     }
@@ -122,40 +114,44 @@ impl ExecutionAuth {
             return Ok(true);
         }
 
-        let _init_guard = self.runtime_init_lock.lock().await;
-        if self.runtime().is_some() {
-            return Ok(true);
-        }
+        // OnceCell serializes concurrent initializers without holding a guard across await.
+        let newly_installed = AtomicBool::new(false);
+        let result = self
+            .runtime
+            .get_or_try_init(|| async {
+                match AccountPoolRuntime::try_install_from_config(
+                    Arc::clone(&self.legacy_manager),
+                    config,
+                    /*include_existing_root_login*/ true,
+                )
+                .await
+                {
+                    Ok(Some(runtime)) => {
+                        newly_installed.store(true, Ordering::Release);
+                        Ok(Arc::new(runtime))
+                    }
+                    Ok(None) => Err(RuntimeInitError::NotConfigured),
+                    Err(error) => Err(RuntimeInitError::Failed(error)),
+                }
+            })
+            .await;
 
-        let Some(runtime) = AccountPoolRuntime::try_install_from_config(
-            Arc::clone(&self.legacy_manager),
-            config,
-            /*include_existing_root_login*/ true,
-        )
-        .await?
-        else {
-            return Ok(false);
-        };
-
-        let runtime = Arc::new(runtime);
-        let pool = runtime.pool();
-        {
-            let mut guard = self
-                .runtime
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *guard = Some(Arc::clone(&runtime));
+        match result {
+            Ok(runtime) => {
+                if newly_installed.load(Ordering::Acquire) {
+                    let pool = runtime.pool();
+                    self.notify_change();
+                    self.spawn_pool_change_bridge(pool);
+                }
+                Ok(true)
+            }
+            Err(RuntimeInitError::NotConfigured) => Ok(false),
+            Err(RuntimeInitError::Failed(error)) => Err(error),
         }
-        self.notify_change();
-        self.spawn_pool_change_bridge(pool);
-        Ok(true)
     }
 
     pub(crate) fn runtime(&self) -> Option<Arc<AccountPoolRuntime>> {
-        self.runtime
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.runtime.get().cloned()
     }
 
     pub(crate) fn account_pool(&self) -> Option<Arc<AccountPool>> {
@@ -190,7 +186,7 @@ impl ExecutionAuth {
                 .lease()
                 .ok()
                 .map(ExecutionAuthLease::from_account_lease),
-            None => Some(ExecutionAuthLease::legacy(Arc::clone(&self.legacy_manager))),
+            None => Some(ExecutionAuthLease::legacy()),
         }
     }
 
@@ -280,16 +276,12 @@ impl ExecutionAuth {
 }
 
 impl ExecutionAuthLease {
-    fn legacy(auth_manager: Arc<AuthManager>) -> Self {
-        Self {
-            account: None,
-            auth_manager,
-        }
+    fn legacy() -> Self {
+        Self { account: None }
     }
 
     fn from_account_lease(account: AccountLease) -> Self {
         Self {
-            auth_manager: account.auth_manager(),
             account: Some(account),
         }
     }
@@ -302,22 +294,8 @@ impl ExecutionAuthLease {
         self.account.as_ref().map_or(0, AccountLease::generation)
     }
 
-    pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
-        Arc::clone(&self.auth_manager)
-    }
-
     pub(crate) fn account_lease(&self) -> Option<&AccountLease> {
         self.account.as_ref()
-    }
-
-    pub(crate) fn is_same_execution_identity(&self, other: &Self) -> bool {
-        match (&self.account, &other.account) {
-            (Some(left), Some(right)) => {
-                left.profile().id == right.profile().id && left.generation() == right.generation()
-            }
-            (None, None) => Arc::ptr_eq(&self.auth_manager, &other.auth_manager),
-            _ => false,
-        }
     }
 }
 

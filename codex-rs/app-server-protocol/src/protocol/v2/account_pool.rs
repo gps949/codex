@@ -57,7 +57,9 @@ pub enum AccountPoolAvailability {
         #[ts(type = "number | null")]
         resets_at: Option<i64>,
     },
-    AuthenticationUnavailable { reason: String },
+    AuthenticationUnavailable {
+        reason: String,
+    },
     Disabled,
 }
 

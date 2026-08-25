@@ -5,9 +5,9 @@ use super::bedrock_auth::ensure_user_model_provider_can_be_bedrock;
 use super::*;
 use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
-use codex_core::ExecutionAccountPoolHandle;
 use chrono::DateTime;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
+use codex_core::ExecutionAccountPoolHandle;
 use codex_login::LoginOnboardingEntrypoint;
 use codex_login::login_with_bedrock_access_keys;
 use codex_model_provider::is_supported_amazon_bedrock_region;
@@ -1183,7 +1183,9 @@ impl AccountRequestProcessor {
         }
         Ok(codex_app_server_protocol::AccountPoolReadResponse {
             enabled: true,
-            active_profile_id: active.as_ref().map(|identity| identity.profile_id.to_string()),
+            active_profile_id: active
+                .as_ref()
+                .map(|identity| identity.profile_id.to_string()),
             active_generation: active.map(|identity| identity.generation),
             accounts,
         })

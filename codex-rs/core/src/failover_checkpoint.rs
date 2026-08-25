@@ -173,7 +173,7 @@ impl SamplingAttemptCheckpoint {
         self.tool_reconciliation_failed |= other.tool_reconciliation_failed;
     }
 
-    pub(crate) fn retry_mode(&self) -> FailoverRetryMode {
+    pub(crate) fn retry_mode(self) -> FailoverRetryMode {
         if self.tool_reconciliation_failed {
             return FailoverRetryMode::ReconcileCurrentAttempt;
         }

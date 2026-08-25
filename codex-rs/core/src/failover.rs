@@ -35,7 +35,6 @@ pub(crate) enum FailoverOutcome {
         from_generation: u64,
         to_profile: Option<AccountProfileId>,
         to_generation: u64,
-        next_lease: ExecutionAuthLease,
     },
     /// Native routing recognized the failure, but every configured account is unavailable.
     PoolExhausted { cause: FailoverCause },
@@ -92,18 +91,12 @@ impl FailoverCoordinator {
             return FailoverOutcome::PoolExhausted { cause };
         };
 
-        let from_profile = failed_lease.profile_id().cloned();
-        let from_generation = failed_lease.generation();
-        let to_profile = next_lease.profile_id().cloned();
-        let to_generation = next_lease.generation();
-
         FailoverOutcome::Rebound {
             cause,
-            from_profile,
-            from_generation,
-            to_profile,
-            to_generation,
-            next_lease,
+            from_profile: failed_lease.profile_id().cloned(),
+            from_generation: failed_lease.generation(),
+            to_profile: next_lease.profile_id().cloned(),
+            to_generation: next_lease.generation(),
         }
     }
 }

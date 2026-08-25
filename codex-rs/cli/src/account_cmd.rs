@@ -178,7 +178,10 @@ pub(crate) async fn run_account_use(
             std::process::exit(1);
         }
     };
-    let Some(record) = records.iter().find(|record| record.profile.id == profile_id) else {
+    let Some(record) = records
+        .iter()
+        .find(|record| record.profile.id == profile_id)
+    else {
         eprintln!("Unknown Codex account profile: {profile_id}");
         std::process::exit(1);
     };
@@ -231,13 +234,16 @@ pub(crate) async fn run_account_remove(
             std::process::exit(1);
         }
     };
-    let Some(record) = records.into_iter().find(|record| record.profile.id == profile_id) else {
+    let Some(record) = records
+        .into_iter()
+        .find(|record| record.profile.id == profile_id)
+    else {
         eprintln!("Unknown Codex account profile: {profile_id}");
         std::process::exit(1);
     };
 
-    if !keep_credentials && profile_id.as_str() != "legacy-root" {
-        if let Err(error) = logout_with_revoke(
+    if !keep_credentials && profile_id.as_str() != "legacy-root"
+        && let Err(error) = logout_with_revoke(
             &record.profile.credential_home,
             config.cli_auth_credentials_store_mode,
             config.auth_keyring_backend_kind(),
@@ -248,7 +254,6 @@ pub(crate) async fn run_account_remove(
             eprintln!("Error revoking account credentials: {error}");
             std::process::exit(1);
         }
-    }
 
     match store.remove_profile_metadata(&profile_id) {
         Ok(true) => {}
@@ -267,12 +272,11 @@ pub(crate) async fn run_account_remove(
         eprintln!("Warning: failed to remove stale scheduler state: {error}");
     }
 
-    if !keep_credentials && profile_id.as_str() != "legacy-root" {
-        if let Err(error) = store.purge_managed_credentials(&profile_id) {
+    if !keep_credentials && profile_id.as_str() != "legacy-root"
+        && let Err(error) = store.purge_managed_credentials(&profile_id) {
             eprintln!("Error deleting account credentials: {error}");
             std::process::exit(1);
         }
-    }
 
     if profile_id.as_str() == "legacy-root" {
         eprintln!(
@@ -290,7 +294,8 @@ async fn register_existing_root_login(
     config: &Config,
     store: &AccountProfileStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let manager = AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
+    let manager =
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
     if manager
         .auth()
         .await
@@ -320,7 +325,8 @@ async fn load_profile_identity(
 ) -> (Option<String>, Option<String>) {
     let mut auth_config = config.auth_config();
     auth_config.codex_home = profile.credential_home.clone();
-    match AuthManager::shared_from_auth_config(auth_config, /*enable_codex_api_key_env*/ false).await
+    match AuthManager::shared_from_auth_config(auth_config, /*enable_codex_api_key_env*/ false)
+        .await
     {
         Ok(manager) => match manager.auth().await {
             Some(auth) => (

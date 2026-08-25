@@ -1507,13 +1507,13 @@ async fn run_sampling_request(
                     match handle_sampling_failover(
                         execution_auth.as_ref(),
                         &execution_lease,
-                        &checkpoint,
+                        checkpoint,
                         &err,
                     )
                     .map_err(CodexErr::from)?
                     {
-                        SamplingFailoverDirective::ReplayCurrentSamplingRequest { .. }
-                        | SamplingFailoverDirective::ContinueFromDurableHistory { .. } => {
+                        SamplingFailoverDirective::ReplayCurrentSamplingRequest
+                        | SamplingFailoverDirective::ContinueFromDurableHistory => {
                             // Make the outer provider observe the selected pool identity now rather
                             // than racing the background auth-sync task.
                             execution_auth.compatibility_auth_manager().reload().await;

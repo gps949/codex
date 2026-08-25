@@ -277,7 +277,7 @@ impl AccountPool {
         let account = state
             .accounts
             .get(&selected_id)
-            .expect("selected account must exist");
+            .ok_or_else(|| AccountPoolError::UnknownProfile(selected_id.clone()))?;
         let lease = make_lease(account, state.generation);
         drop(state);
         if refreshed || active_changed {
@@ -307,7 +307,7 @@ impl AccountPool {
         let account = state
             .accounts
             .get(profile_id)
-            .expect("activated account must exist");
+            .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
         let lease = make_lease(account, state.generation);
         drop(state);
         if refreshed || active_changed {
@@ -328,7 +328,7 @@ impl AccountPool {
         let account = state
             .accounts
             .get(&selected_id)
-            .expect("selected account must exist");
+            .ok_or_else(|| AccountPoolError::UnknownProfile(selected_id.clone()))?;
         let lease = make_lease(account, state.generation);
         drop(state);
         if refreshed || active_changed {
@@ -367,7 +367,7 @@ impl AccountPool {
         let account = state
             .accounts
             .get(profile_id)
-            .expect("activated account must exist");
+            .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
         let lease = make_lease(account, state.generation);
         drop(state);
         if refreshed || forced || active_changed {
@@ -515,7 +515,7 @@ impl AccountPool {
             let account = state
                 .accounts
                 .get(&selected_id)
-                .expect("selected account must exist");
+                .ok_or_else(|| AccountPoolError::UnknownProfile(selected_id.clone()))?;
             Some(make_lease(account, state.generation))
         } else {
             state.generation = state.generation.wrapping_add(1);
@@ -529,7 +529,7 @@ impl AccountPool {
     fn lock_state(&self) -> std::sync::MutexGuard<'_, AccountPoolState> {
         self.state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn notify_change(&self) {
@@ -697,8 +697,7 @@ mod tests {
         )
         .expect("register first");
         let lease = pool.lease().expect("initial lease");
-        pool.mark_exhausted(&lease, None)
-            .expect("mark exhausted");
+        pool.mark_exhausted(&lease, None).expect("mark exhausted");
         assert!(matches!(
             pool.activate(&first.id),
             Err(AccountPoolError::ProfileUnavailable(_))
