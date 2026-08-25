@@ -323,3 +323,17 @@ impl ExecutionModelClientSession {
             .try_switch_fallback_transport(session_telemetry, model_info)
     }
 }
+
+impl std::ops::Deref for ExecutionModelClientSession {
+    type Target = ModelClientSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for ExecutionModelClientSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
