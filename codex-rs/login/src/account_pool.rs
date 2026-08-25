@@ -39,6 +39,8 @@ impl AccountProfileId {
         Ok(Self(value))
     }
 
+    /// Allocates a profile id before OAuth starts. The id is intentionally opaque and is not
+    /// derived from account metadata that is unavailable until login completes.
     pub fn generate() -> Self {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -114,24 +116,24 @@ pub enum AccountAvailability {
 }
 
 impl AccountAvailability {
-    fn is_eligible(&self, now: DateTime<Utc>) -> bool {
+    fn is_eligible(&self, now: &DateTime<Utc>) -> bool {
         match self {
             Self::Available => true,
             Self::Exhausted {
                 resets_at: Some(resets_at),
-            } => *resets_at <= now,
+            } => resets_at <= now,
             Self::Exhausted { resets_at: None }
             | Self::AuthenticationUnavailable { .. }
             | Self::Disabled => false,
         }
     }
 
-    fn refresh_for_time(&mut self, now: DateTime<Utc>) {
+    fn refresh_for_time(&mut self, now: &DateTime<Utc>) {
         if matches!(
             self,
             Self::Exhausted {
                 resets_at: Some(resets_at)
-            } if *resets_at <= now
+            } if resets_at <= now
         ) {
             *self = Self::Available;
         }
@@ -242,15 +244,16 @@ impl AccountPool {
     pub fn lease(&self) -> Result<AccountLease, AccountPoolError> {
         let mut state = self.lock_state();
         refresh_expired_exhaustion(&mut state);
+        let now = Utc::now();
 
         if let Some(active_id) = state.active_profile.clone()
             && let Some(account) = state.accounts.get(&active_id)
-            && account.availability.is_eligible(Utc::now())
+            && account.availability.is_eligible(&now)
         {
             return Ok(make_lease(account, state.generation));
         }
 
-        let selected_id = select_fill_first(&state).ok_or(AccountPoolError::NoEligibleAccount)?;
+        let selected_id = select_fill_first(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
         activate(&mut state, &selected_id);
         let account = state
             .accounts
@@ -264,11 +267,12 @@ impl AccountPool {
     pub fn activate(&self, profile_id: &AccountProfileId) -> Result<AccountLease, AccountPoolError> {
         let mut state = self.lock_state();
         refresh_expired_exhaustion(&mut state);
+        let now = Utc::now();
         let account = state
             .accounts
             .get(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
-        if !account.availability.is_eligible(Utc::now()) {
+        if !account.availability.is_eligible(&now) {
             return Err(AccountPoolError::ProfileUnavailable(profile_id.clone()));
         }
 
@@ -392,7 +396,8 @@ impl AccountPool {
         account.availability = availability;
         state.active_profile = None;
 
-        let Some(selected_id) = select_fill_first(&state) else {
+        let now = Utc::now();
+        let Some(selected_id) = select_fill_first(&state, &now) else {
             state.generation = state.generation.wrapping_add(1);
             return Ok(None);
         };
@@ -420,12 +425,14 @@ fn make_lease(account: &ManagedAccount, generation: u64) -> AccountLease {
 fn refresh_expired_exhaustion(state: &mut AccountPoolState) {
     let now = Utc::now();
     for account in state.accounts.values_mut() {
-        account.availability.refresh_for_time(now);
+        account.availability.refresh_for_time(&now);
     }
 }
 
-fn select_fill_first(state: &AccountPoolState) -> Option<AccountProfileId> {
-    let now = Utc::now();
+fn select_fill_first(
+    state: &AccountPoolState,
+    now: &DateTime<Utc>,
+) -> Option<AccountProfileId> {
     state
         .accounts
         .values()
@@ -463,29 +470,24 @@ pub enum AccountPoolError {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::path::PathBuf;
 
     use codex_config::types::AuthCredentialsStoreMode;
-    use codex_protocol::auth::AuthMode;
 
     use super::*;
     use crate::AuthKeyringBackendKind;
-    use crate::AuthRouteConfig;
 
     async fn test_auth_manager(home: &Path) -> Arc<AuthManager> {
-        Arc::new(
-            AuthManager::shared(
-                home.to_path_buf(),
-                false,
-                AuthCredentialsStoreMode::File,
-                None,
-                None,
-                AuthKeyringBackendKind::default(),
-                AuthRouteConfig::default(),
-            )
-            .await
-            .as_ref()
-            .clone(),
+        AuthManager::shared(
+            home.to_path_buf(),
+            false,
+            AuthCredentialsStoreMode::File,
+            None,
+            None,
+            AuthKeyringBackendKind::default(),
+            crate::test_support::transport_default_auth_route_config(),
         )
+        .await
     }
 
     fn profile(name: &str, priority: u32) -> AccountProfile {
@@ -589,14 +591,5 @@ mod tests {
         pool.set_disabled(&first.id, true).expect("disable first");
         let next = pool.lease().expect("second lease");
         assert_eq!(next.profile().id, second.id);
-    }
-
-    #[test]
-    fn profile_id_is_not_an_auth_mode() {
-        let _ = AuthMode::ChatGPT;
-        assert_ne!(
-            AccountProfileId::new("account-a").expect("profile id"),
-            AccountProfileId::new("account-b").expect("profile id")
-        );
     }
 }
