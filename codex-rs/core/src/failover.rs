@@ -1,3 +1,6 @@
+use chrono::DateTime;
+use chrono::Duration;
+use chrono::Utc;
 use codex_login::AccountProfileId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
@@ -5,6 +8,12 @@ use codex_protocol::error::CodexErrorDetails;
 use crate::execution_auth::ExecutionAuthLease;
 use crate::execution_model_client::ExecutionModelClient;
 use crate::execution_model_client::ExecutionModelClientSession;
+
+/// Backend credit-depletion responses do not always include a reset timestamp. Such an account
+/// must not become permanently unusable until process restart: credits may be replenished while
+/// Codex remains open. A conservative periodic probe makes recovery automatic without hammering
+/// the exhausted account on every request.
+const UNKNOWN_QUOTA_RESET_REPROBE_DELAY: Duration = Duration::minutes(10);
 
 /// Why native execution-account failover was attempted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,9 +62,10 @@ impl FailoverCoordinator {
                         .execution_auth()
                         .observe_rate_limits(&failed_lease, rate_limits)?;
                 }
+                let reset_at = quota_reset_or_reprobe(limit.resets_at.as_ref());
                 let next = model_client
                     .execution_auth()
-                    .failover_after_quota_exhausted(&failed_lease, limit.resets_at)?;
+                    .failover_after_quota_exhausted(&failed_lease, Some(reset_at))?;
                 Self::finish_rebind(
                     model_client,
                     client_session,
@@ -108,5 +118,31 @@ impl FailoverCoordinator {
             to_profile,
             to_generation,
         })
+    }
+}
+
+fn quota_reset_or_reprobe(resets_at: Option<&DateTime<Utc>>) -> DateTime<Utc> {
+    resets_at
+        .cloned()
+        .unwrap_or_else(|| Utc::now() + UNKNOWN_QUOTA_RESET_REPROBE_DELAY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_reset_timestamp_wins_over_client_reprobe() {
+        let reset = Utc::now() + Duration::hours(2);
+        assert_eq!(quota_reset_or_reprobe(Some(&reset)), reset);
+    }
+
+    #[test]
+    fn missing_reset_gets_finite_reprobe_deadline() {
+        let before = Utc::now() + Duration::minutes(9);
+        let reset = quota_reset_or_reprobe(None);
+        let after = Utc::now() + Duration::minutes(11);
+        assert!(reset > before);
+        assert!(reset < after);
     }
 }
