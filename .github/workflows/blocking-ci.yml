@@ -70,10 +70,25 @@ jobs:
           cargo test -p codex-history --test execution_provenance
 
       - name: Test failover and history transition
+        id: core-tests
+        continue-on-error: true
         working-directory: codex-rs
         run: |
-          cargo test -p codex-core failover --lib
-          cargo test -p codex-core account_transition --lib
+          set -o pipefail
+          (set -e; cargo test -p codex-core failover --lib; cargo test -p codex-core account_transition --lib) 2>&1 | tee "$GITHUB_WORKSPACE/core-tests.log"
+
+      - name: Upload core test diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-multi-account-core-tests
+          path: core-tests.log
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Enforce core test result
+        if: ${{ steps.core-tests.outcome != 'success' }}
+        run: exit 1
 
       - name: Commit validated wiring
         run: |
