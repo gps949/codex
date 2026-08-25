@@ -38,7 +38,13 @@ impl AccountPoolExternalAuth {
         let mut last_reason = "no eligible account is available".to_string();
 
         for _ in 0..attempts {
-            let lease = self.pool.lease().map_err(pool_error)?;
+            let lease = match self.pool.lease() {
+                Ok(lease) => lease,
+                Err(AccountPoolError::NoEligibleAccount) => {
+                    return Err(io::Error::other(last_reason));
+                }
+                Err(error) => return Err(pool_error(error)),
+            };
             let manager = lease.auth_manager();
             let Some(auth) = manager.auth().await else {
                 last_reason = format!("account profile {} has no usable auth", lease.profile().id);
@@ -95,19 +101,25 @@ impl AccountPoolExternalAuth {
             match recovery.next().await {
                 Ok(step) => {
                     let Some(current) = manager.auth().await else {
-                        return self.fail_over_unusable_lease(
-                            &lease,
-                            "account auth disappeared during unauthorized recovery".to_string(),
-                        ).await;
+                        return self
+                            .fail_over_unusable_lease(
+                                &lease,
+                                "account auth disappeared during unauthorized recovery".to_string(),
+                            )
+                            .await;
                     };
                     if step.auth_state_changed() == Some(true) {
                         return Ok(current);
                     }
                 }
                 Err(RefreshTokenError::Permanent(error)) => {
-                    return self
-                        .fail_over_unusable_lease(&lease, error.to_string())
-                        .await;
+                    self.pool
+                        .mark_authentication_unavailable(&lease, error.to_string())
+                        .map_err(pool_error)?;
+                    return match self.resolve_usable_auth().await {
+                        Ok((_, replacement)) => Ok(replacement),
+                        Err(_) => Err(io::Error::other(RefreshTokenError::Permanent(error))),
+                    };
                 }
                 Err(error @ RefreshTokenError::Transient(_)) => {
                     return Err(io::Error::other(error));
