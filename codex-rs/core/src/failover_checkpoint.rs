@@ -1,8 +1,25 @@
+use std::collections::HashSet;
+
+use codex_history::ResponseItemEnvelope;
+use codex_protocol::models::ResponseItem;
+
+/// Cursor captured immediately before one concrete sampling request.
+///
+/// Codex already drains started tool futures and records completed tool outputs before
+/// `try_run_sampling_request` returns. Comparing durable history after an error therefore gives us
+/// a much more future-proof side-effect checkpoint than instrumenting every individual tool
+/// handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SamplingHistoryCursor {
+    history_version: u64,
+    item_count: usize,
+}
+
 /// Progress made by one concrete model sampling attempt.
 ///
-/// The turn loop owns this checkpoint because only it can distinguish transport progress from
-/// durable conversation progress and externally visible tool side effects. Native account failover
-/// uses it to avoid replaying a potentially non-idempotent tool call.
+/// Streaming/UI progress is still marked explicitly because partial deltas are intentionally not
+/// durable. Completed model items and tool call/output reconciliation are derived from the history
+/// delta using [`SamplingHistoryCursor`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SamplingAttemptCheckpoint {
     response_started: bool,
@@ -26,6 +43,86 @@ pub(crate) enum FailoverRetryMode {
     /// A tool may have had a side effect but its result could not be durably reconciled. Do not
     /// automatically replay or continue until the incomplete call pair is resolved.
     ReconcileCurrentAttempt,
+}
+
+impl SamplingHistoryCursor {
+    pub(crate) fn new(history_version: u64, item_count: usize) -> Self {
+        Self {
+            history_version,
+            item_count,
+        }
+    }
+
+    pub(crate) fn from_history(history_version: u64, items: &[ResponseItemEnvelope]) -> Self {
+        Self::new(history_version, items.len())
+    }
+
+    /// Reconstructs durable progress since this cursor. History rewrites are conservatively treated
+    /// as durable progress: replaying the old request across a compaction/rollback boundary would be
+    /// less safe than rebuilding the next prompt from the new canonical history.
+    pub(crate) fn checkpoint(
+        &self,
+        current_history_version: u64,
+        items: &[ResponseItemEnvelope],
+    ) -> SamplingAttemptCheckpoint {
+        let mut checkpoint = SamplingAttemptCheckpoint::default();
+        if current_history_version != self.history_version || items.len() < self.item_count {
+            checkpoint.mark_completed_output_persisted();
+            return checkpoint;
+        }
+
+        let mut pending_tool_calls = HashSet::<String>::new();
+        let mut unkeyed_tool_call = false;
+        for envelope in &items[self.item_count..] {
+            let item = &envelope.item;
+            match item {
+                ResponseItem::FunctionCall { call_id, .. }
+                | ResponseItem::CustomToolCall { call_id, .. } => {
+                    checkpoint.mark_tool_call_persisted();
+                    pending_tool_calls.insert(call_id.clone());
+                }
+                ResponseItem::LocalShellCall { call_id, .. }
+                | ResponseItem::ToolSearchCall { call_id, .. } => {
+                    checkpoint.mark_tool_call_persisted();
+                    if let Some(call_id) = call_id {
+                        pending_tool_calls.insert(call_id.clone());
+                    } else {
+                        // Older/local-only call shapes do not provide a stable id that can be
+                        // paired here. Fail closed if an error interrupts such an attempt.
+                        unkeyed_tool_call = true;
+                    }
+                }
+                ResponseItem::FunctionCallOutput { call_id, .. }
+                | ResponseItem::ToolSearchOutput { call_id, .. } => {
+                    checkpoint.mark_tool_result_committed();
+                    if let Some(call_id) = call_id {
+                        pending_tool_calls.remove(call_id);
+                    }
+                }
+                ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                    checkpoint.mark_tool_result_committed();
+                    pending_tool_calls.remove(call_id);
+                }
+                // Server-side search/image calls and ordinary assistant/reasoning items have no
+                // local tool side effect to replay, but their completed representation is durable.
+                ResponseItem::AdditionalTools { .. }
+                | ResponseItem::Message { .. }
+                | ResponseItem::AgentMessage { .. }
+                | ResponseItem::WebSearchCall { .. }
+                | ResponseItem::Reasoning { .. }
+                | ResponseItem::ImageGenerationCall { .. }
+                | ResponseItem::Compaction { .. }
+                | ResponseItem::ContextCompaction { .. }
+                | ResponseItem::CompactionTrigger { .. }
+                | ResponseItem::Other => checkpoint.mark_completed_output_persisted(),
+            }
+        }
+
+        if unkeyed_tool_call || !pending_tool_calls.is_empty() {
+            checkpoint.mark_tool_reconciliation_failed();
+        }
+        checkpoint
+    }
 }
 
 impl SamplingAttemptCheckpoint {
@@ -67,6 +164,15 @@ impl SamplingAttemptCheckpoint {
         self.tool_reconciliation_failed = true;
     }
 
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.response_started |= other.response_started;
+        self.visible_output_emitted |= other.visible_output_emitted;
+        self.completed_output_persisted |= other.completed_output_persisted;
+        self.tool_call_persisted |= other.tool_call_persisted;
+        self.tool_result_committed |= other.tool_result_committed;
+        self.tool_reconciliation_failed |= other.tool_reconciliation_failed;
+    }
+
     pub(crate) fn retry_mode(&self) -> FailoverRetryMode {
         if self.tool_reconciliation_failed {
             return FailoverRetryMode::ReconcileCurrentAttempt;
@@ -87,6 +193,10 @@ impl SamplingAttemptCheckpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn envelope(item: ResponseItem) -> ResponseItemEnvelope {
+        ResponseItemEnvelope::new(item)
+    }
 
     #[test]
     fn untouched_attempt_can_be_replayed() {
@@ -117,14 +227,17 @@ mod tests {
     }
 
     #[test]
-    fn persisted_tool_call_continues_from_history() {
-        let mut checkpoint = SamplingAttemptCheckpoint::default();
-        checkpoint.mark_tool_call_persisted();
-        assert_eq!(
-            checkpoint.retry_mode(),
-            FailoverRetryMode::ContinueFromDurableHistory
-        );
-        checkpoint.mark_tool_result_committed();
+    fn completed_message_in_history_continues_instead_of_replaying() {
+        let before = Vec::<ResponseItemEnvelope>::new();
+        let cursor = SamplingHistoryCursor::from_history(0, &before);
+        let after = vec![envelope(ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: Vec::new(),
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        })];
+        let checkpoint = cursor.checkpoint(0, &after);
         assert_eq!(
             checkpoint.retry_mode(),
             FailoverRetryMode::ContinueFromDurableHistory
@@ -132,13 +245,31 @@ mod tests {
     }
 
     #[test]
-    fn unreconciled_tool_failure_blocks_automatic_replay() {
-        let mut checkpoint = SamplingAttemptCheckpoint::default();
-        checkpoint.mark_tool_call_persisted();
-        checkpoint.mark_tool_reconciliation_failed();
+    fn unmatched_function_call_requires_reconciliation() {
+        let cursor = SamplingHistoryCursor::new(0, 0);
+        let after = vec![envelope(ResponseItem::FunctionCall {
+            id: None,
+            name: "write_file".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call-1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        })];
+        let checkpoint = cursor.checkpoint(0, &after);
         assert_eq!(
             checkpoint.retry_mode(),
             FailoverRetryMode::ReconcileCurrentAttempt
+        );
+    }
+
+    #[test]
+    fn rewritten_history_is_durable_boundary() {
+        let cursor = SamplingHistoryCursor::new(4, 10);
+        let checkpoint = cursor.checkpoint(5, &[]);
+        assert_eq!(
+            checkpoint.retry_mode(),
+            FailoverRetryMode::ContinueFromDurableHistory
         );
     }
 }
