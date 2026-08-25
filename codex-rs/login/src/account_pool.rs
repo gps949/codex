@@ -12,6 +12,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
+use tokio::sync::watch;
 
 use crate::auth::AuthManager;
 
@@ -128,7 +129,7 @@ impl AccountAvailability {
         }
     }
 
-    fn refresh_for_time(&mut self, now: &DateTime<Utc>) {
+    fn refresh_for_time(&mut self, now: &DateTime<Utc>) -> bool {
         if matches!(
             self,
             Self::Exhausted {
@@ -136,7 +137,9 @@ impl AccountAvailability {
             } if resets_at <= now
         ) {
             *self = Self::Available;
+            return true;
         }
+        false
     }
 }
 
@@ -202,6 +205,7 @@ impl Default for AccountPoolState {
 /// shared while only the execution identity changes.
 pub struct AccountPool {
     state: Mutex<AccountPoolState>,
+    change_tx: watch::Sender<u64>,
 }
 
 impl Default for AccountPool {
@@ -212,9 +216,20 @@ impl Default for AccountPool {
 
 impl AccountPool {
     pub fn new() -> Self {
+        let (change_tx, _change_rx) = watch::channel(0);
         Self {
             state: Mutex::new(AccountPoolState::default()),
+            change_tx,
         }
+    }
+
+    /// Subscribes to any account-pool mutation relevant to model execution or UI state.
+    ///
+    /// Execution identity changes use [`AccountLease::generation`] as their stronger stale-work
+    /// guard. This revision stream is intentionally broader and also covers rate-limit/status
+    /// updates that app-server, TUI and model-catalog consumers may want to refresh.
+    pub fn change_receiver(&self) -> watch::Receiver<u64> {
+        self.change_tx.subscribe()
     }
 
     pub fn register(
@@ -236,6 +251,8 @@ impl AccountPool {
                 rate_limits: AccountRateLimits::default(),
             },
         );
+        drop(state);
+        self.notify_change();
         Ok(())
     }
 
@@ -243,30 +260,40 @@ impl AccountPool {
     /// account, fill-first selection chooses the lowest-priority available profile.
     pub fn lease(&self) -> Result<AccountLease, AccountPoolError> {
         let mut state = self.lock_state();
-        refresh_expired_exhaustion(&mut state);
+        let refreshed = refresh_expired_exhaustion(&mut state);
         let now = Utc::now();
 
         if let Some(active_id) = state.active_profile.clone()
             && let Some(account) = state.accounts.get(&active_id)
             && account.availability.is_eligible(&now)
         {
-            return Ok(make_lease(account, state.generation));
+            let lease = make_lease(account, state.generation);
+            drop(state);
+            if refreshed {
+                self.notify_change();
+            }
+            return Ok(lease);
         }
 
         let selected_id = select_fill_first(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
-        activate(&mut state, &selected_id);
+        let active_changed = set_active_profile(&mut state, &selected_id);
         let account = state
             .accounts
             .get(&selected_id)
             .expect("selected account must exist");
-        Ok(make_lease(account, state.generation))
+        let lease = make_lease(account, state.generation);
+        drop(state);
+        if refreshed || active_changed {
+            self.notify_change();
+        }
+        Ok(lease)
     }
 
     /// Explicitly selects a profile. This is primarily for user-directed account selection and
     /// does not bypass disabled/auth-unavailable state.
     pub fn activate(&self, profile_id: &AccountProfileId) -> Result<AccountLease, AccountPoolError> {
         let mut state = self.lock_state();
-        refresh_expired_exhaustion(&mut state);
+        let refreshed = refresh_expired_exhaustion(&mut state);
         let now = Utc::now();
         let account = state
             .accounts
@@ -276,12 +303,17 @@ impl AccountPool {
             return Err(AccountPoolError::ProfileUnavailable(profile_id.clone()));
         }
 
-        activate(&mut state, profile_id);
+        let active_changed = set_active_profile(&mut state, profile_id);
         let account = state
             .accounts
             .get(profile_id)
             .expect("activated account must exist");
-        Ok(make_lease(account, state.generation))
+        let lease = make_lease(account, state.generation);
+        drop(state);
+        if refreshed || active_changed {
+            self.notify_change();
+        }
+        Ok(lease)
     }
 
     /// Marks a lease exhausted and rotates only when that exact lease is still the active
@@ -318,18 +350,28 @@ impl AccountPool {
         disabled: bool,
     ) -> Result<(), AccountPoolError> {
         let mut state = self.lock_state();
-        let account = state
-            .accounts
-            .get_mut(profile_id)
-            .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
-        account.availability = if disabled {
+        let new_availability = if disabled {
             AccountAvailability::Disabled
         } else {
             AccountAvailability::Available
         };
-        if disabled && state.active_profile.as_ref() == Some(profile_id) {
+        let account = state
+            .accounts
+            .get_mut(profile_id)
+            .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+        let availability_changed = account.availability != new_availability;
+        account.availability = new_availability;
+
+        let active_changed = if disabled && state.active_profile.as_ref() == Some(profile_id) {
             state.active_profile = None;
             state.generation = state.generation.wrapping_add(1);
+            true
+        } else {
+            false
+        };
+        drop(state);
+        if availability_changed || active_changed {
+            self.notify_change();
         }
         Ok(())
     }
@@ -344,13 +386,18 @@ impl AccountPool {
             .accounts
             .get_mut(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+        let changed = account.rate_limits != rate_limits;
         account.rate_limits = rate_limits;
+        drop(state);
+        if changed {
+            self.notify_change();
+        }
         Ok(())
     }
 
     pub fn snapshots(&self) -> Vec<AccountPoolSnapshot> {
         let mut state = self.lock_state();
-        refresh_expired_exhaustion(&mut state);
+        let refreshed = refresh_expired_exhaustion(&mut state);
         let active_profile = state.active_profile.clone();
         let mut snapshots = state
             .accounts
@@ -368,6 +415,10 @@ impl AccountPool {
                 .cmp(&right.profile.priority)
                 .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
         });
+        drop(state);
+        if refreshed {
+            self.notify_change();
+        }
         snapshots
     }
 
@@ -377,16 +428,21 @@ impl AccountPool {
         availability: AccountAvailability,
     ) -> Result<Option<AccountLease>, AccountPoolError> {
         let mut state = self.lock_state();
-        refresh_expired_exhaustion(&mut state);
+        let refreshed = refresh_expired_exhaustion(&mut state);
 
         if state.active_profile.as_ref() != Some(&lease.profile.id)
             || state.generation != lease.generation
         {
-            return Ok(state
+            let active = state
                 .active_profile
                 .as_ref()
                 .and_then(|profile_id| state.accounts.get(profile_id))
-                .map(|account| make_lease(account, state.generation)));
+                .map(|account| make_lease(account, state.generation));
+            drop(state);
+            if refreshed {
+                self.notify_change();
+            }
+            return Ok(active);
         }
 
         let account = state
@@ -397,20 +453,30 @@ impl AccountPool {
         state.active_profile = None;
 
         let now = Utc::now();
-        let Some(selected_id) = select_fill_first(&state, &now) else {
+        let next = if let Some(selected_id) = select_fill_first(&state, &now) {
+            set_active_profile(&mut state, &selected_id);
+            let account = state
+                .accounts
+                .get(&selected_id)
+                .expect("selected account must exist");
+            Some(make_lease(account, state.generation))
+        } else {
             state.generation = state.generation.wrapping_add(1);
-            return Ok(None);
+            None
         };
-        activate(&mut state, &selected_id);
-        let account = state
-            .accounts
-            .get(&selected_id)
-            .expect("selected account must exist");
-        Ok(Some(make_lease(account, state.generation)))
+        drop(state);
+        self.notify_change();
+        Ok(next)
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, AccountPoolState> {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn notify_change(&self) {
+        self.change_tx.send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
     }
 }
 
@@ -422,11 +488,13 @@ fn make_lease(account: &ManagedAccount, generation: u64) -> AccountLease {
     }
 }
 
-fn refresh_expired_exhaustion(state: &mut AccountPoolState) {
+fn refresh_expired_exhaustion(state: &mut AccountPoolState) -> bool {
     let now = Utc::now();
+    let mut changed = false;
     for account in state.accounts.values_mut() {
-        account.availability.refresh_for_time(&now);
+        changed |= account.availability.refresh_for_time(&now);
     }
+    changed
 }
 
 fn select_fill_first(
@@ -446,11 +514,13 @@ fn select_fill_first(
         .map(|account| account.profile.id.clone())
 }
 
-fn activate(state: &mut AccountPoolState, profile_id: &AccountProfileId) {
-    if state.active_profile.as_ref() != Some(profile_id) {
-        state.active_profile = Some(profile_id.clone());
-        state.generation = state.generation.wrapping_add(1);
+fn set_active_profile(state: &mut AccountPoolState, profile_id: &AccountProfileId) -> bool {
+    if state.active_profile.as_ref() == Some(profile_id) {
+        return false;
     }
+    state.active_profile = Some(profile_id.clone());
+    state.generation = state.generation.wrapping_add(1);
+    true
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -591,5 +661,42 @@ mod tests {
         pool.set_disabled(&first.id, true).expect("disable first");
         let next = pool.lease().expect("second lease");
         assert_eq!(next.profile().id, second.id);
+    }
+
+    #[tokio::test]
+    async fn change_receiver_tracks_execution_and_status_mutations() {
+        let pool = AccountPool::new();
+        let mut changes = pool.change_receiver();
+        let first = profile("first", 10);
+
+        pool.register(
+            first.clone(),
+            test_auth_manager(&first.credential_home).await,
+        )
+        .expect("register first");
+        assert!(changes.has_changed().expect("watch channel open"));
+        let after_register = *changes.borrow_and_update();
+
+        let lease = pool.lease().expect("activate first");
+        assert!(changes.has_changed().expect("watch channel open"));
+        let after_activation = *changes.borrow_and_update();
+        assert!(after_activation > after_register);
+
+        pool.update_rate_limits(
+            &first.id,
+            AccountRateLimits {
+                observed_at: Some(Utc::now()),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("update rate limits");
+        assert!(changes.has_changed().expect("watch channel open"));
+        let after_rate_limit = *changes.borrow_and_update();
+        assert!(after_rate_limit > after_activation);
+
+        pool.mark_exhausted(&lease, None)
+            .expect("mark exhausted without fallback");
+        assert!(changes.has_changed().expect("watch channel open"));
+        assert!(*changes.borrow_and_update() > after_rate_limit);
     }
 }
