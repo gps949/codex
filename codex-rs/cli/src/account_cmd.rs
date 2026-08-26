@@ -107,6 +107,117 @@ pub(crate) async fn run_account_add(
     }
 }
 
+pub(crate) async fn run_account_relogin(
+    cli_config_overrides: CliConfigOverrides,
+    profile_id: String,
+    device_auth: bool,
+) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    if !config
+        .auth_config()
+        .is_login_method_allowed(ForcedLoginMethod::Chatgpt)
+    {
+        eprintln!("ChatGPT login is disabled by the current authentication policy.");
+        std::process::exit(1);
+    }
+    let profile_id = parse_profile_id_or_exit(&profile_id);
+    let store = AccountProfileStore::new(config.codex_home.to_path_buf());
+    let options = ServerOptions::new(
+        config.codex_home.to_path_buf(),
+        CLIENT_ID.to_string(),
+        config.auth_config().effective_chatgpt_workspaces(),
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+        config.auth_route_config(),
+    );
+
+    let result = if device_auth {
+        match codex_login::begin_account_device_relogin(store, options, &profile_id).await {
+            Ok(pending) => {
+                eprintln!("Re-authenticating Codex account profile {profile_id}.");
+                if let (Some(url), Some(code)) = (pending.verification_url(), pending.user_code()) {
+                    eprintln!("Open this URL and enter the code:\n\n{url}\n\nCode: {code}\n");
+                }
+                pending.complete().await
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        match codex_login::begin_account_browser_relogin(store, options, &profile_id) {
+            Ok(pending) => {
+                if let (Some(port), Some(url)) = (pending.actual_port(), pending.auth_url()) {
+                    eprintln!(
+                        "Re-authenticating Codex account profile {profile_id}.\nStarting local login server on http://localhost:{port}.\nIf your browser did not open, navigate to:\n\n{url}\n"
+                    );
+                }
+                pending.complete().await
+            }
+            Err(error) => Err(error),
+        }
+    };
+
+    match result {
+        Ok(profile) => {
+            eprintln!("Re-authenticated Codex account {}.", profile.id);
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("Error re-authenticating Codex account: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub(crate) async fn run_account_set(
+    cli_config_overrides: CliConfigOverrides,
+    profile_id: String,
+    priority: Option<u32>,
+    label: Option<String>,
+    clear_label: bool,
+    disabled: Option<bool>,
+) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    let profile_id = parse_profile_id_or_exit(&profile_id);
+    let store = AccountProfileStore::new(config.codex_home.to_path_buf());
+    let label_update = if clear_label {
+        Some(codex_login::AccountLabelUpdate::Clear)
+    } else {
+        label.map(codex_login::AccountLabelUpdate::Set)
+    };
+    if priority.is_none() && label_update.is_none() && disabled.is_none() {
+        eprintln!(
+            "Nothing to update. Pass --priority, --label/--clear-label, or use enable/disable."
+        );
+        std::process::exit(1);
+    }
+    let update = codex_login::AccountProfileMetadataUpdate {
+        priority,
+        label: label_update,
+        disabled,
+    };
+    match store.update_profile_metadata(&profile_id, update) {
+        Ok(profile) => {
+            eprintln!(
+                "Updated account profile {} (priority {}{}{}).",
+                profile.id,
+                profile.priority,
+                profile
+                    .label
+                    .as_deref()
+                    .map(|label| format!(", label \"{label}\""))
+                    .unwrap_or_default(),
+                if profile.disabled { ", disabled" } else { "" },
+            );
+            eprintln!("Running Codex processes pick up the change on their next restart.");
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("Error updating account profile: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub(crate) async fn run_account_list(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let store = AccountProfileStore::new(config.codex_home.to_path_buf());
@@ -150,9 +261,13 @@ pub(crate) async fn run_account_list(cli_config_overrides: CliConfigOverrides) -
             if active { "*" } else { "" },
             record.profile.priority,
             record.profile.id,
-            match record.state {
-                AccountProfileState::PendingLogin => "pending_login",
-                AccountProfileState::Ready => "ready",
+            if record.profile.disabled {
+                "disabled"
+            } else {
+                match record.state {
+                    AccountProfileState::PendingLogin => "pending_login",
+                    AccountProfileState::Ready => "ready",
+                }
             },
             plan.unwrap_or_else(|| "-".to_string()),
             email.unwrap_or_else(|| "-".to_string()),
@@ -178,7 +293,10 @@ pub(crate) async fn run_account_use(
             std::process::exit(1);
         }
     };
-    let Some(record) = records.iter().find(|record| record.profile.id == profile_id) else {
+    let Some(record) = records
+        .iter()
+        .find(|record| record.profile.id == profile_id)
+    else {
         eprintln!("Unknown Codex account profile: {profile_id}");
         std::process::exit(1);
     };
@@ -231,23 +349,26 @@ pub(crate) async fn run_account_remove(
             std::process::exit(1);
         }
     };
-    let Some(record) = records.into_iter().find(|record| record.profile.id == profile_id) else {
+    let Some(record) = records
+        .into_iter()
+        .find(|record| record.profile.id == profile_id)
+    else {
         eprintln!("Unknown Codex account profile: {profile_id}");
         std::process::exit(1);
     };
 
-    if !keep_credentials && profile_id.as_str() != "legacy-root" {
-        if let Err(error) = logout_with_revoke(
+    if !keep_credentials
+        && profile_id.as_str() != "legacy-root"
+        && let Err(error) = logout_with_revoke(
             &record.profile.credential_home,
             config.cli_auth_credentials_store_mode,
             config.auth_keyring_backend_kind(),
             &config.auth_route_config(),
         )
         .await
-        {
-            eprintln!("Error revoking account credentials: {error}");
-            std::process::exit(1);
-        }
+    {
+        eprintln!("Error revoking account credentials: {error}");
+        std::process::exit(1);
     }
 
     match store.remove_profile_metadata(&profile_id) {
@@ -267,11 +388,12 @@ pub(crate) async fn run_account_remove(
         eprintln!("Warning: failed to remove stale scheduler state: {error}");
     }
 
-    if !keep_credentials && profile_id.as_str() != "legacy-root" {
-        if let Err(error) = store.purge_managed_credentials(&profile_id) {
-            eprintln!("Error deleting account credentials: {error}");
-            std::process::exit(1);
-        }
+    if !keep_credentials
+        && profile_id.as_str() != "legacy-root"
+        && let Err(error) = store.purge_managed_credentials(&profile_id)
+    {
+        eprintln!("Error deleting account credentials: {error}");
+        std::process::exit(1);
     }
 
     if profile_id.as_str() == "legacy-root" {
@@ -290,7 +412,8 @@ async fn register_existing_root_login(
     config: &Config,
     store: &AccountProfileStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let manager = AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
+    let manager =
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
     if manager
         .auth()
         .await
@@ -320,7 +443,8 @@ async fn load_profile_identity(
 ) -> (Option<String>, Option<String>) {
     let mut auth_config = config.auth_config();
     auth_config.codex_home = profile.credential_home.clone();
-    match AuthManager::shared_from_auth_config(auth_config, /*enable_codex_api_key_env*/ false).await
+    match AuthManager::shared_from_auth_config(auth_config, /*enable_codex_api_key_env*/ false)
+        .await
     {
         Ok(manager) => match manager.auth().await {
             Some(auth) => (

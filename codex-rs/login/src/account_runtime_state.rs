@@ -153,7 +153,7 @@ fn runtime_state_from_snapshots(snapshots: &[AccountPoolSnapshot]) -> AccountRun
                 exhausted_until: match &snapshot.availability {
                     AccountAvailability::Exhausted {
                         resets_at: Some(reset),
-                    } if reset > &now => Some(reset.clone()),
+                    } if reset > &now => Some(*reset),
                     _ => None,
                 },
                 rate_limits: snapshot.rate_limits.clone(),

@@ -44,6 +44,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use supports_color::Stream;
 
+mod account_cmd;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
 mod cloud_config;
@@ -146,6 +147,9 @@ enum Subcommand {
 
     /// Remove stored authentication credentials.
     Logout(LogoutCommand),
+
+    /// [experimental] Manage the native multi-account pool.
+    Account(AccountCommand),
 
     /// Manage external MCP servers for Codex.
     Mcp(McpCli),
@@ -544,6 +548,96 @@ struct LogoutCommand {
 }
 
 #[derive(Debug, Parser)]
+struct AccountCommand {
+    #[clap(skip)]
+    config_overrides: CliConfigOverrides,
+
+    #[command(subcommand)]
+    action: AccountSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum AccountSubcommand {
+    /// Add another Codex account profile via ChatGPT login.
+    Add {
+        /// Human-readable label for the new account profile.
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Scheduling priority (lower is preferred). Defaults to the next free slot.
+        #[arg(long)]
+        priority: Option<u32>,
+
+        /// Use device-code auth instead of the local browser flow.
+        #[arg(long = "device-auth")]
+        device_auth: bool,
+    },
+
+    /// List configured account profiles and their scheduler state.
+    List,
+
+    /// Re-run ChatGPT login for an existing account profile in place.
+    Login {
+        /// Account profile id to re-authenticate.
+        profile_id: String,
+
+        /// Use device-code auth instead of the local browser flow.
+        #[arg(long = "device-auth")]
+        device_auth: bool,
+    },
+
+    /// Update priority or label of an account profile.
+    Set {
+        /// Account profile id to update.
+        profile_id: String,
+
+        /// New scheduling priority (lower is preferred).
+        #[arg(long)]
+        priority: Option<u32>,
+
+        /// New human-readable label.
+        #[arg(long, conflicts_with = "clear_label")]
+        label: Option<String>,
+
+        /// Remove the current label.
+        #[arg(long)]
+        clear_label: bool,
+    },
+
+    /// Re-enable a disabled account profile for scheduling.
+    Enable {
+        /// Account profile id to enable.
+        profile_id: String,
+    },
+
+    /// Park an account profile: keep its credentials but never schedule it.
+    Disable {
+        /// Account profile id to disable.
+        profile_id: String,
+    },
+
+    /// Select the active account profile.
+    Use {
+        /// Account profile id to activate.
+        profile_id: String,
+
+        /// Clear a quota cooldown on the target profile before activating it.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Remove an account profile from the pool.
+    Remove {
+        /// Account profile id to remove.
+        profile_id: String,
+
+        /// Keep the stored credentials instead of revoking and deleting them.
+        #[arg(long)]
+        keep_credentials: bool,
+    },
+}
+
+#[derive(Debug, Parser)]
 struct AppServerCommand {
     /// Omit to run the app server; specify a subcommand for tooling.
     #[command(subcommand)]
@@ -905,22 +999,11 @@ fn resolve_windows_update_command_from_path(
 }
 
 fn run_update_command() -> anyhow::Result<()> {
-    #[cfg(debug_assertions)]
-    {
-        anyhow::bail!(
-            "`codex update` is not available in debug builds. Install a release build of Codex to use this command."
-        );
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        let Some(action) = codex_tui::get_update_action() else {
-            anyhow::bail!(
-                "Could not detect the Codex installation method. Please update manually: https://developers.openai.com/codex/cli/"
-            );
-        };
-        run_update_action(action)
-    }
+    // Fork: every built-in update action reinstalls the official openai/codex build, which would
+    // silently remove the multi-account fork. Point users at the fork's own releases instead.
+    anyhow::bail!(
+        "This build is the multi-account Codex fork; automatic self-update would replace it with the official binary. Download updates from https://github.com/gps949/codex/releases or rebuild from source."
+    );
 }
 
 fn run_execpolicycheck(cmd: ExecPolicyCheckCommand) -> anyhow::Result<()> {
@@ -1593,6 +1676,99 @@ async fn cli_main(
                 root_config_overrides.clone(),
             );
             run_logout(logout_cli.config_overrides).await;
+        }
+        Some(Subcommand::Account(mut account_cli)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "account",
+            )?;
+            prepend_config_flags(
+                &mut account_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            match account_cli.action {
+                AccountSubcommand::Add {
+                    label,
+                    priority,
+                    device_auth,
+                } => {
+                    account_cmd::run_account_add(
+                        account_cli.config_overrides,
+                        label,
+                        priority,
+                        device_auth,
+                    )
+                    .await;
+                }
+                AccountSubcommand::List => {
+                    account_cmd::run_account_list(account_cli.config_overrides).await;
+                }
+                AccountSubcommand::Login {
+                    profile_id,
+                    device_auth,
+                } => {
+                    account_cmd::run_account_relogin(
+                        account_cli.config_overrides,
+                        profile_id,
+                        device_auth,
+                    )
+                    .await;
+                }
+                AccountSubcommand::Set {
+                    profile_id,
+                    priority,
+                    label,
+                    clear_label,
+                } => {
+                    account_cmd::run_account_set(
+                        account_cli.config_overrides,
+                        profile_id,
+                        priority,
+                        label,
+                        clear_label,
+                        /*disabled*/ None,
+                    )
+                    .await;
+                }
+                AccountSubcommand::Enable { profile_id } => {
+                    account_cmd::run_account_set(
+                        account_cli.config_overrides,
+                        profile_id,
+                        /*priority*/ None,
+                        /*label*/ None,
+                        /*clear_label*/ false,
+                        Some(false),
+                    )
+                    .await;
+                }
+                AccountSubcommand::Disable { profile_id } => {
+                    account_cmd::run_account_set(
+                        account_cli.config_overrides,
+                        profile_id,
+                        /*priority*/ None,
+                        /*label*/ None,
+                        /*clear_label*/ false,
+                        Some(true),
+                    )
+                    .await;
+                }
+                AccountSubcommand::Use { profile_id, force } => {
+                    account_cmd::run_account_use(account_cli.config_overrides, profile_id, force)
+                        .await;
+                }
+                AccountSubcommand::Remove {
+                    profile_id,
+                    keep_credentials,
+                } => {
+                    account_cmd::run_account_remove(
+                        account_cli.config_overrides,
+                        profile_id,
+                        keep_credentials,
+                    )
+                    .await;
+                }
+            }
         }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -2461,6 +2637,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::App(_)) => Some("app"),
         Some(Subcommand::Login(_)) => Some("login"),
         Some(Subcommand::Logout(_)) => Some("logout"),
+        Some(Subcommand::Account(_)) => Some("account"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),

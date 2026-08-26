@@ -7,6 +7,7 @@ use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
 use chrono::DateTime;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
+use codex_core::ExecutionAccountPoolHandle;
 use codex_login::LoginOnboardingEntrypoint;
 use codex_login::login_with_bedrock_access_keys;
 use codex_model_provider::is_supported_amazon_bedrock_region;
@@ -85,11 +86,22 @@ impl Drop for ActiveLogin {
 #[derive(Clone)]
 pub(crate) struct AccountRequestProcessor {
     auth_manager: Arc<AuthManager>,
+    execution_account_pool: ExecutionAccountPoolHandle,
     thread_manager: Arc<ThreadManager>,
     outgoing: Arc<OutgoingMessageSender>,
     config: Arc<Config>,
     config_manager: ConfigManager,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
+    /// Aborts the accountPool/updated push task when the last processor clone drops.
+    _pool_updates_task: Arc<AbortOnDrop>,
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl AccountRequestProcessor {
@@ -100,13 +112,18 @@ impl AccountRequestProcessor {
         config: Arc<Config>,
         config_manager: ConfigManager,
     ) -> Self {
+        let execution_account_pool = ExecutionAccountPoolHandle::shared(Arc::clone(&auth_manager));
+        let pool_updates_task =
+            spawn_account_pool_updates_task(execution_account_pool.clone(), Arc::clone(&outgoing));
         Self {
             auth_manager,
+            execution_account_pool,
             thread_manager,
             outgoing,
             config,
             config_manager,
             active_login: Arc::new(Mutex::new(None)),
+            _pool_updates_task: Arc::new(AbortOnDrop(pool_updates_task)),
         }
     }
 
@@ -148,6 +165,23 @@ impl AccountRequestProcessor {
         params: GetAuthStatusParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.get_auth_status_response(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn get_account_pool(
+        &self,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.get_account_pool_response()
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn use_account_pool(
+        &self,
+        params: codex_app_server_protocol::AccountPoolUseParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.use_account_pool_response(params)
             .await
             .map(|response| Some(response.into()))
     }
@@ -1128,6 +1162,110 @@ impl AccountRequestProcessor {
         })
     }
 
+    async fn get_account_pool_response(
+        &self,
+    ) -> Result<codex_app_server_protocol::AccountPoolReadResponse, JSONRPCErrorError> {
+        let enabled = self
+            .execution_account_pool
+            .ensure_from_config(self.config.as_ref())
+            .await
+            .map_err(|err| internal_error(format!("failed to initialize account pool: {err}")))?;
+        if !enabled {
+            return Ok(codex_app_server_protocol::AccountPoolReadResponse {
+                enabled: false,
+                active_profile_id: None,
+                active_generation: None,
+                accounts: Vec::new(),
+            });
+        }
+
+        let active = self.execution_account_pool.active_identity();
+        let mut accounts = Vec::new();
+        for snapshot in self.execution_account_pool.snapshots() {
+            let (plan_type, email) = self.load_pool_profile_identity(&snapshot).await;
+            accounts.push(codex_app_server_protocol::AccountPoolAccount {
+                profile_id: snapshot.profile.id.to_string(),
+                label: snapshot.profile.label.clone(),
+                priority: snapshot.profile.priority,
+                is_active: snapshot.is_active,
+                availability: account_pool_availability(snapshot.availability),
+                plan_type,
+                email,
+                rate_limits: account_pool_rate_limits(snapshot.rate_limits),
+            });
+        }
+        Ok(codex_app_server_protocol::AccountPoolReadResponse {
+            enabled: true,
+            active_profile_id: active
+                .as_ref()
+                .map(|identity| identity.profile_id.to_string()),
+            active_generation: active.map(|identity| identity.generation),
+            accounts,
+        })
+    }
+
+    async fn use_account_pool_response(
+        &self,
+        params: codex_app_server_protocol::AccountPoolUseParams,
+    ) -> Result<codex_app_server_protocol::AccountPoolUseResponse, JSONRPCErrorError> {
+        let enabled = self
+            .execution_account_pool
+            .ensure_from_config(self.config.as_ref())
+            .await
+            .map_err(|err| internal_error(format!("failed to initialize account pool: {err}")))?;
+        if !enabled {
+            return Err(invalid_request("native account pool is not configured"));
+        }
+
+        let identity = if let Some(profile_id) = params.profile_id {
+            let profile_id = codex_login::AccountProfileId::new(profile_id)
+                .map_err(|err| invalid_request(err.to_string()))?;
+            self.execution_account_pool
+                .activate(&profile_id, params.force)
+                .await
+        } else {
+            if params.force {
+                return Err(invalid_request(
+                    "force is only valid when selecting a specific account profile",
+                ));
+            }
+            self.execution_account_pool.activate_fill_first().await
+        }
+        .map_err(|err| invalid_request(err.to_string()))?;
+
+        Ok(codex_app_server_protocol::AccountPoolUseResponse {
+            active_profile_id: identity.profile_id.to_string(),
+            generation: identity.generation,
+        })
+    }
+
+    async fn load_pool_profile_identity(
+        &self,
+        snapshot: &codex_login::AccountPoolSnapshot,
+    ) -> (Option<codex_protocol::account::PlanType>, Option<String>) {
+        let mut auth_config = self.config.auth_config();
+        auth_config.codex_home = snapshot.profile.credential_home.clone();
+        match AuthManager::shared_from_auth_config(
+            auth_config,
+            /*enable_codex_api_key_env*/ false,
+        )
+        .await
+        {
+            Ok(manager) => match manager.auth().await {
+                Some(auth) => (auth.account_plan_type(), auth.get_account_email()),
+                None => (None, None),
+            },
+            Err(err) => {
+                tracing::warn!(
+                    profile_id = %snapshot.profile.id,
+                    %err,
+                    "failed to read account-pool profile identity"
+                );
+                (None, None)
+            }
+        }
+    }
+
     async fn get_account_rate_limits_response(
         &self,
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
@@ -1427,6 +1565,89 @@ impl AccountRequestProcessor {
             AddCreditsNudgeCreditType::Credits => BackendAddCreditsNudgeCreditType::Credits,
             AddCreditsNudgeCreditType::UsageLimit => BackendAddCreditsNudgeCreditType::UsageLimit,
         }
+    }
+}
+
+/// Pushes `accountPool/updated` to this connection whenever the pool's scheduling state changes
+/// (activation, exhaustion, recovery, rate-limit observations), so clients never need to poll.
+/// Identity fields (plan/email) are intentionally omitted; they require per-profile credential
+/// reads and are served by `accountPool/read` on demand.
+fn spawn_account_pool_updates_task(
+    pool: ExecutionAccountPoolHandle,
+    outgoing: Arc<OutgoingMessageSender>,
+) -> tokio::task::JoinHandle<()> {
+    let mut changes = pool.change_receiver();
+    tokio::spawn(async move {
+        while changes.changed().await.is_ok() {
+            let snapshots = pool.snapshots();
+            if snapshots.is_empty() {
+                continue;
+            }
+            let active = pool.active_identity();
+            let accounts = snapshots
+                .into_iter()
+                .map(|snapshot| codex_app_server_protocol::AccountPoolAccount {
+                    profile_id: snapshot.profile.id.to_string(),
+                    label: snapshot.profile.label.clone(),
+                    priority: snapshot.profile.priority,
+                    is_active: snapshot.is_active,
+                    availability: account_pool_availability(snapshot.availability),
+                    plan_type: None,
+                    email: None,
+                    rate_limits: account_pool_rate_limits(snapshot.rate_limits),
+                })
+                .collect();
+            let notification = codex_app_server_protocol::AccountPoolUpdatedNotification {
+                active_profile_id: active
+                    .as_ref()
+                    .map(|identity| identity.profile_id.to_string()),
+                active_generation: active.map(|identity| identity.generation),
+                accounts,
+            };
+            outgoing
+                .send_server_notification(ServerNotification::AccountPoolUpdated(notification))
+                .await;
+        }
+    })
+}
+
+fn account_pool_availability(
+    availability: codex_login::AccountAvailability,
+) -> codex_app_server_protocol::AccountPoolAvailability {
+    match availability {
+        codex_login::AccountAvailability::Available => {
+            codex_app_server_protocol::AccountPoolAvailability::Available
+        }
+        codex_login::AccountAvailability::Exhausted { resets_at } => {
+            codex_app_server_protocol::AccountPoolAvailability::Exhausted {
+                resets_at: resets_at.map(|value| value.timestamp()),
+            }
+        }
+        codex_login::AccountAvailability::AuthenticationUnavailable { reason } => {
+            codex_app_server_protocol::AccountPoolAvailability::AuthenticationUnavailable { reason }
+        }
+        codex_login::AccountAvailability::Disabled => {
+            codex_app_server_protocol::AccountPoolAvailability::Disabled
+        }
+    }
+}
+
+fn account_pool_rate_limits(
+    limits: codex_login::AccountRateLimits,
+) -> codex_app_server_protocol::AccountPoolRateLimits {
+    codex_app_server_protocol::AccountPoolRateLimits {
+        primary: limits.primary.map(account_pool_rate_limit_window),
+        secondary: limits.secondary.map(account_pool_rate_limit_window),
+        observed_at: limits.observed_at.map(|value| value.timestamp()),
+    }
+}
+
+fn account_pool_rate_limit_window(
+    window: codex_login::AccountRateLimitWindow,
+) -> codex_app_server_protocol::AccountPoolRateLimitWindow {
+    codex_app_server_protocol::AccountPoolRateLimitWindow {
+        used_percent: window.used_percent,
+        resets_at: window.resets_at.map(|value| value.timestamp()),
     }
 }
 

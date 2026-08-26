@@ -1223,6 +1223,20 @@ client_request_definitions! {
         response: v2::LogoutAccountResponse,
     },
 
+    #[experimental("accountPool/read")]
+    AccountPoolRead => "accountPool/read" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: global("account-auth"),
+        response: v2::AccountPoolReadResponse,
+    },
+
+    #[experimental("accountPool/use")]
+    AccountPoolUse => "accountPool/use" {
+        params: v2::AccountPoolUseParams,
+        serialization: global("account-auth"),
+        response: v2::AccountPoolUseResponse,
+    },
+
     GetAccountRateLimits => "account/rateLimits/read" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: None,
@@ -1898,6 +1912,8 @@ server_notification_definitions! {
     McpServerEventStream => "mcpServer/event/stream/notification" (v2::McpServerEventStreamNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
+    #[experimental("accountPool/updated")]
+    AccountPoolUpdated => "accountPool/updated" (v2::AccountPoolUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
     RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
     ExternalAgentConfigImportProgress => "externalAgentConfig/import/progress" (v2::ExternalAgentConfigImportProgressNotification),

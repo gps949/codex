@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
-use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
+use crate::config::Config;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_login::AccountLease;
@@ -14,10 +16,9 @@ use codex_login::AccountProfileId;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AuthManager;
-use codex_login::AuthManagerConfig;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
-use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
 use tokio::sync::watch;
 
 /// Process-local registry that preserves one execution-auth coordinator for every live AuthManager.
@@ -43,16 +44,34 @@ static EXECUTION_AUTH_REGISTRY: OnceLock<StdMutex<HashMap<usize, Arc<ExecutionAu
 /// field just for multi-account execution.
 pub(crate) struct ExecutionAuth {
     legacy_manager: Arc<AuthManager>,
-    runtime: RwLock<Option<Arc<AccountPoolRuntime>>>,
-    runtime_init_lock: Mutex<()>,
+    runtime: OnceCell<Arc<AccountPoolRuntime>>,
     change_tx: watch::Sender<u64>,
+}
+
+/// Private outcome of one lazy pool-install attempt. `NotConfigured` keeps the cell empty so a
+/// manifest created later (for example by `codex account add`) is picked up without a restart.
+enum RuntimeInitError {
+    NotConfigured,
+    Failed(AccountPoolRuntimeError),
 }
 
 /// Immutable execution identity captured by one account-bound model client/request path.
 #[derive(Clone)]
 pub(crate) struct ExecutionAuthLease {
     account: Option<AccountLease>,
-    auth_manager: Arc<AuthManager>,
+}
+
+/// A preemptive rotation lacking an authoritative reset timestamp re-probes the parked account
+/// after this delay, mirroring the hard-failure reprobe policy in the failover coordinator.
+const PREEMPTIVE_UNKNOWN_RESET_REPROBE_DELAY: chrono::Duration = chrono::Duration::minutes(10);
+
+/// Describes one completed preemptive account rotation for logging and user notification.
+#[derive(Clone, Debug)]
+pub(crate) struct PreemptiveSwitch {
+    pub(crate) from_profile: AccountProfileId,
+    pub(crate) to_profile: AccountProfileId,
+    pub(crate) used_percent: f64,
+    pub(crate) resets_at: DateTime<Utc>,
 }
 
 impl std::fmt::Debug for ExecutionAuthLease {
@@ -92,21 +111,7 @@ impl ExecutionAuth {
         let (change_tx, _change_rx) = watch::channel(0);
         Self {
             legacy_manager,
-            runtime: RwLock::new(None),
-            runtime_init_lock: Mutex::new(()),
-            change_tx,
-        }
-    }
-
-    pub(crate) fn with_runtime(
-        legacy_manager: Arc<AuthManager>,
-        runtime: AccountPoolRuntime,
-    ) -> Self {
-        let (change_tx, _change_rx) = watch::channel(0);
-        Self {
-            legacy_manager,
-            runtime: RwLock::new(Some(Arc::new(runtime))),
-            runtime_init_lock: Mutex::new(()),
+            runtime: OnceCell::new(),
             change_tx,
         }
     }
@@ -116,46 +121,54 @@ impl ExecutionAuth {
     /// `account add` creates the manifest without requiring a restart.
     pub(crate) async fn ensure_runtime_from_config(
         &self,
-        config: &impl AuthManagerConfig,
+        config: &Config,
     ) -> Result<bool, AccountPoolRuntimeError> {
-        if self.runtime().is_some() {
+        if let Some(runtime) = self.runtime() {
+            runtime
+                .pool()
+                .set_return_to_preferred(config.account_pool.effective_return_to_preferred());
             return Ok(true);
         }
 
-        let _init_guard = self.runtime_init_lock.lock().await;
-        if self.runtime().is_some() {
-            return Ok(true);
-        }
+        // OnceCell serializes concurrent initializers without holding a guard across await.
+        let newly_installed = AtomicBool::new(false);
+        let result = self
+            .runtime
+            .get_or_try_init(|| async {
+                match AccountPoolRuntime::try_install_from_config(
+                    Arc::clone(&self.legacy_manager),
+                    config,
+                    /*include_existing_root_login*/ true,
+                )
+                .await
+                {
+                    Ok(Some(runtime)) => {
+                        newly_installed.store(true, Ordering::Release);
+                        Ok(Arc::new(runtime))
+                    }
+                    Ok(None) => Err(RuntimeInitError::NotConfigured),
+                    Err(error) => Err(RuntimeInitError::Failed(error)),
+                }
+            })
+            .await;
 
-        let Some(runtime) = AccountPoolRuntime::try_install_from_config(
-            Arc::clone(&self.legacy_manager),
-            config,
-            /*include_existing_root_login*/ true,
-        )
-        .await?
-        else {
-            return Ok(false);
-        };
-
-        let runtime = Arc::new(runtime);
-        let pool = runtime.pool();
-        {
-            let mut guard = self
-                .runtime
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *guard = Some(Arc::clone(&runtime));
+        match result {
+            Ok(runtime) => {
+                let pool = runtime.pool();
+                pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
+                if newly_installed.load(Ordering::Acquire) {
+                    self.notify_change();
+                    self.spawn_pool_change_bridge(pool);
+                }
+                Ok(true)
+            }
+            Err(RuntimeInitError::NotConfigured) => Ok(false),
+            Err(RuntimeInitError::Failed(error)) => Err(error),
         }
-        self.notify_change();
-        self.spawn_pool_change_bridge(pool);
-        Ok(true)
     }
 
     pub(crate) fn runtime(&self) -> Option<Arc<AccountPoolRuntime>> {
-        self.runtime
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.runtime.get().cloned()
     }
 
     pub(crate) fn account_pool(&self) -> Option<Arc<AccountPool>> {
@@ -190,7 +203,7 @@ impl ExecutionAuth {
                 .lease()
                 .ok()
                 .map(ExecutionAuthLease::from_account_lease),
-            None => Some(ExecutionAuthLease::legacy(Arc::clone(&self.legacy_manager))),
+            None => Some(ExecutionAuthLease::legacy()),
         }
     }
 
@@ -211,6 +224,53 @@ impl ExecutionAuth {
 
     /// Associates a backend rate-limit snapshot with the exact lease that observed it. Cached
     /// snapshots are advisory; a real UsageLimitReached response remains authoritative.
+    /// Rotates away from the active account before it hits a hard usage limit.
+    ///
+    /// The decision uses the pool's cached per-account rate-limit windows, which are refreshed on
+    /// every successful response. The rotation is skipped when no window has crossed `threshold`,
+    /// when the data is stale or already reset, or when no other account could take over.
+    pub(crate) fn preemptive_rotation(&self, threshold: f64) -> Option<PreemptiveSwitch> {
+        const STALE_OBSERVATION_CUTOFF: chrono::Duration = chrono::Duration::minutes(30);
+
+        let pool = self.account_pool()?;
+        let lease = pool.lease().ok()?;
+        let snapshot = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == lease.profile().id)?;
+
+        let now = Utc::now();
+        let observed_recently = snapshot
+            .rate_limits
+            .observed_at
+            .is_some_and(|observed_at| now - observed_at < STALE_OBSERVATION_CUTOFF);
+        let depleted_window = [
+            snapshot.rate_limits.primary.as_ref(),
+            snapshot.rate_limits.secondary.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|window| window.used_percent >= threshold)
+        .filter(|window| match window.resets_at {
+            // A window whose reset already passed no longer constrains the account.
+            Some(resets_at) => resets_at > now,
+            None => observed_recently,
+        })
+        .max_by(|left, right| left.used_percent.total_cmp(&right.used_percent))?;
+
+        let used_percent = depleted_window.used_percent;
+        let resets_at = depleted_window
+            .resets_at
+            .unwrap_or_else(|| now + PREEMPTIVE_UNKNOWN_RESET_REPROBE_DELAY);
+        let next = pool.rotate_preemptively(&lease, resets_at)?;
+        Some(PreemptiveSwitch {
+            from_profile: lease.profile().id.clone(),
+            to_profile: next.profile().id.clone(),
+            used_percent,
+            resets_at,
+        })
+    }
+
     pub(crate) fn observe_rate_limits(
         &self,
         lease: &ExecutionAuthLease,
@@ -280,16 +340,12 @@ impl ExecutionAuth {
 }
 
 impl ExecutionAuthLease {
-    fn legacy(auth_manager: Arc<AuthManager>) -> Self {
-        Self {
-            account: None,
-            auth_manager,
-        }
+    fn legacy() -> Self {
+        Self { account: None }
     }
 
     fn from_account_lease(account: AccountLease) -> Self {
         Self {
-            auth_manager: account.auth_manager(),
             account: Some(account),
         }
     }
@@ -302,18 +358,8 @@ impl ExecutionAuthLease {
         self.account.as_ref().map_or(0, AccountLease::generation)
     }
 
-    pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
-        Arc::clone(&self.auth_manager)
-    }
-
-    pub(crate) fn is_same_execution_identity(&self, other: &Self) -> bool {
-        match (&self.account, &other.account) {
-            (Some(left), Some(right)) => {
-                left.profile().id == right.profile().id && left.generation() == right.generation()
-            }
-            (None, None) => Arc::ptr_eq(&self.auth_manager, &other.auth_manager),
-            _ => false,
-        }
+    pub(crate) fn account_lease(&self) -> Option<&AccountLease> {
+        self.account.as_ref()
     }
 }
 

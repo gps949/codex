@@ -522,6 +522,24 @@ pub(crate) enum AppEvent {
         result: Result<GetAccountRateLimitsResponse, String>,
     },
 
+    /// Fetch the multi-account pool state to open the `/account` picker.
+    RefreshAccountPool,
+
+    /// Result of fetching the multi-account pool state.
+    AccountPoolLoaded {
+        result: Result<codex_app_server_protocol::AccountPoolReadResponse, String>,
+    },
+
+    /// Activate a pool profile (`None` re-enters automatic fill-first scheduling).
+    ActivateAccountPoolProfile {
+        profile_id: Option<String>,
+    },
+
+    /// Result of activating a pool profile.
+    AccountPoolActivated {
+        result: Result<codex_app_server_protocol::AccountPoolUseResponse, String>,
+    },
+
     /// Open the default token-activity view selected from the `/usage` menu.
     OpenTokenActivity,
 

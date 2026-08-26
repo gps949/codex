@@ -6,6 +6,35 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AccountPoolConfigToml": {
+      "additionalProperties": false,
+      "description": "Scheduling knobs for the native multi-account execution pool.\n\nThe pool itself is enabled by the account-profile manifest created with `codex account add`; this section only tunes how the scheduler behaves once more than one profile exists.",
+      "properties": {
+        "auto_reset_credit_min_wait_minutes": {
+          "description": "With `auto_reset_credits = \"when_pool_exhausted\"`, skip redemption when the earliest natural reset across the pool is within this many minutes (waiting is free). Defaults to 60.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "auto_reset_credits": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AutoResetCredits"
+            }
+          ],
+          "description": "When the scheduler may automatically redeem an earned rate-limit reset credit. Defaults to `never`: some users prefer waiting out a nearby natural reset or saving credits for a broader account-wide reset."
+        },
+        "preemptive_switch_percent": {
+          "description": "Rotate the active account before a hard usage-limit failure once its observed usage for any rate-limit window reaches this percentage. Defaults to 95. Values outside the exclusive (0, 100) range disable preemptive switching.",
+          "format": "double",
+          "type": "number"
+        },
+        "return_to_preferred": {
+          "description": "Return to the most preferred (lowest priority value) account when its quota cooldown expires instead of staying on the currently active account. Defaults to true.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "AgentRoleToml": {
       "additionalProperties": false,
       "properties": {
@@ -338,6 +367,25 @@
           "description": "Count sampled output and later growth after the carried window prefix.",
           "enum": [
             "body_after_prefix"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AutoResetCredits": {
+      "description": "When the scheduler may redeem an earned rate-limit reset credit on the user's behalf. Credits are a limited resource, so automation is opt-in.",
+      "oneOf": [
+        {
+          "description": "Never redeem automatically (default). Redemption stays an explicit user action (TUI /status, app UI, `account/rateLimitResetCredit/consume`).",
+          "enum": [
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Redeem one credit only when every configured account is exhausted and the earliest natural reset is still further away than `auto_reset_credit_min_wait_minutes`.",
+          "enum": [
+            "when_pool_exhausted"
           ],
           "type": "string"
         }
@@ -5408,6 +5456,15 @@
   },
   "description": "Base config deserialized from ~/.codex/config.toml.",
   "properties": {
+    "account_pool": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AccountPoolConfigToml"
+        }
+      ],
+      "default": null,
+      "description": "Scheduling knobs for the native multi-account execution pool."
+    },
     "agents": {
       "allOf": [
         {

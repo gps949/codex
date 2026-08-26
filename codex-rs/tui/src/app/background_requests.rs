@@ -109,6 +109,32 @@ impl App {
         });
     }
 
+    pub(super) fn refresh_account_pool(&mut self, app_server: &AppServerSession) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = fetch_account_pool(request_handle)
+                .await
+                .map_err(|err| err.to_string());
+            app_event_tx.send(AppEvent::AccountPoolLoaded { result });
+        });
+    }
+
+    pub(super) fn activate_account_pool_profile(
+        &mut self,
+        app_server: &AppServerSession,
+        profile_id: Option<String>,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = use_account_pool_profile(request_handle, profile_id)
+                .await
+                .map_err(|err| err.to_string());
+            app_event_tx.send(AppEvent::AccountPoolActivated { result });
+        });
+    }
+
     pub(super) fn refresh_token_activity(
         &mut self,
         app_server: &AppServerSession,
@@ -794,6 +820,36 @@ pub(super) async fn fetch_account_rate_limits(
         })
         .await
         .wrap_err("account/rateLimits/read failed in TUI")
+}
+
+pub(super) async fn fetch_account_pool(
+    request_handle: AppServerRequestHandle,
+) -> Result<codex_app_server_protocol::AccountPoolReadResponse> {
+    let request_id = RequestId::String(format!("account-pool-read-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::AccountPoolRead {
+            request_id,
+            params: None,
+        })
+        .await
+        .wrap_err("accountPool/read failed in TUI")
+}
+
+pub(super) async fn use_account_pool_profile(
+    request_handle: AppServerRequestHandle,
+    profile_id: Option<String>,
+) -> Result<codex_app_server_protocol::AccountPoolUseResponse> {
+    let request_id = RequestId::String(format!("account-pool-use-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::AccountPoolUse {
+            request_id,
+            params: codex_app_server_protocol::AccountPoolUseParams {
+                profile_id,
+                force: false,
+            },
+        })
+        .await
+        .wrap_err("accountPool/use failed in TUI")
 }
 
 pub(super) async fn fetch_account_token_activity(

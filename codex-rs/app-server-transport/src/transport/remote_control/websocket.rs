@@ -306,6 +306,11 @@ enum ConnectionEndReason {
     Disabled,
     EnabledWatchClosed,
     ConnectionWorkerStopped,
+    /// The active ChatGPT account changed (for example a multi-account pool rotation) while this
+    /// connection was still enrolled under the previous account. Ending the connection lets the
+    /// normal reconnect path re-enroll under the new account immediately instead of serving remote
+    /// clients from a stale identity until the relay drops the socket.
+    AccountChanged,
 }
 
 pub(super) struct RemoteControlChannels {
@@ -856,6 +861,11 @@ impl RemoteControlWebsocket {
         ));
 
         let mut desired_state_rx = self.desired_state_rx.clone();
+        let mut auth_change_rx = self.auth_change_rx.clone();
+        let enrolled_account_id = self
+            .current_enrollment
+            .snapshot()
+            .map(|enrollment| enrollment.account_id);
         let connection_end_reason = tokio::select! {
             _ = shutdown_token.cancelled() => ConnectionEndReason::Shutdown,
             changed = desired_state_rx.wait_for(|state| !state.is_enabled()) => {
@@ -867,6 +877,11 @@ impl RemoteControlWebsocket {
                     ConnectionEndReason::EnabledWatchClosed
                 }
             }
+            end_reason = Self::wait_for_enrolled_account_change(
+                &mut auth_change_rx,
+                &self.auth_manager,
+                enrolled_account_id,
+            ) => end_reason,
             _ = join_set.join_next() => ConnectionEndReason::ConnectionWorkerStopped,
         };
         shutdown_token.cancel();
@@ -874,6 +889,36 @@ impl RemoteControlWebsocket {
         Self::join_connection_workers(&mut join_set, REMOTE_CONTROL_CONNECTION_SHUTDOWN_TIMEOUT)
             .await;
         connection_end_reason
+    }
+
+    /// Resolves only when the active auth identity moves to a different ChatGPT account than the
+    /// one this connection enrolled under. Routine token refreshes on the same account and
+    /// transient auth-load failures keep the connection untouched; the existing 401 handling
+    /// covers genuinely broken credentials.
+    async fn wait_for_enrolled_account_change(
+        auth_change_rx: &mut watch::Receiver<u64>,
+        auth_manager: &Arc<AuthManager>,
+        enrolled_account_id: Option<String>,
+    ) -> ConnectionEndReason {
+        let Some(enrolled_account_id) = enrolled_account_id else {
+            return std::future::pending().await;
+        };
+        loop {
+            if auth_change_rx.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+            match load_remote_control_auth(auth_manager).await {
+                Ok(auth) if auth.account_id != enrolled_account_id => {
+                    info!(
+                        previous_account_id = %enrolled_account_id,
+                        current_account_id = %auth.account_id,
+                        "ending remote control connection to re-enroll under the new active account"
+                    );
+                    return ConnectionEndReason::AccountChanged;
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
     }
 
     async fn join_connection_workers(

@@ -33,12 +33,35 @@ pub fn begin_account_browser_login(
             store,
             profile,
             server: Some(server),
+            mode: AccountLoginMode::NewProfile,
         }),
         Err(error) => {
             abandon_after_failed_login(&store, &profile.id);
             Err(error.into())
         }
     }
+}
+
+/// Re-runs the official browser OAuth flow for an existing profile in place.
+///
+/// This repairs a profile whose refresh token expired (or resumes an interrupted first login)
+/// without losing the profile's identity, priority, or scheduling history. A failed or cancelled
+/// re-login keeps the existing profile and its stored credentials untouched.
+pub fn begin_account_browser_relogin(
+    store: AccountProfileStore,
+    mut options: ServerOptions,
+    profile_id: &AccountProfileId,
+) -> Result<PendingAccountBrowserLogin, AccountLoginFlowError> {
+    let profile = existing_profile(&store, profile_id)?;
+    options.codex_home = profile.credential_home.clone();
+
+    let server = run_login_server(options)?;
+    Ok(PendingAccountBrowserLogin {
+        store,
+        profile,
+        server: Some(server),
+        mode: AccountLoginMode::Relogin,
+    })
 }
 
 /// Starts the official device-code flow for a new account profile.
@@ -60,6 +83,7 @@ pub async fn begin_account_device_login(
             profile,
             options: Some(options),
             device_code: Some(device_code),
+            mode: AccountLoginMode::NewProfile,
         }),
         Err(error) => {
             abandon_after_failed_login(&store, &profile.id);
@@ -68,10 +92,56 @@ pub async fn begin_account_device_login(
     }
 }
 
+/// Device-code variant of [`begin_account_browser_relogin`].
+pub async fn begin_account_device_relogin(
+    store: AccountProfileStore,
+    mut options: ServerOptions,
+    profile_id: &AccountProfileId,
+) -> Result<PendingAccountDeviceLogin, AccountLoginFlowError> {
+    let profile = existing_profile(&store, profile_id)?;
+    options.codex_home = profile.credential_home.clone();
+
+    let device_code = request_device_code(&options).await?;
+    Ok(PendingAccountDeviceLogin {
+        store,
+        profile,
+        options: Some(options),
+        device_code: Some(device_code),
+        mode: AccountLoginMode::Relogin,
+    })
+}
+
+/// Whether a login flow owns a freshly allocated profile or repairs an existing one.
+///
+/// A new profile is abandoned (metadata and credential directory removed) when its first login
+/// fails; an existing profile always survives a failed re-login with its stored state intact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AccountLoginMode {
+    NewProfile,
+    Relogin,
+}
+
+fn existing_profile(
+    store: &AccountProfileStore,
+    profile_id: &AccountProfileId,
+) -> Result<AccountProfile, AccountLoginFlowError> {
+    store
+        .load_profile_records()?
+        .into_iter()
+        .map(|record| record.profile)
+        .find(|profile| &profile.id == profile_id)
+        .ok_or_else(|| {
+            AccountLoginFlowError::Store(AccountProfileStoreError::UnknownProfile(
+                profile_id.clone(),
+            ))
+        })
+}
+
 pub struct PendingAccountBrowserLogin {
     store: AccountProfileStore,
     profile: AccountProfile,
     server: Option<LoginServer>,
+    mode: AccountLoginMode,
 }
 
 impl PendingAccountBrowserLogin {
@@ -103,13 +173,16 @@ impl PendingAccountBrowserLogin {
                 .complete_profile(&self.profile.id)
                 .map_err(AccountLoginFlowError::from),
             Err(error) => {
-                abandon_after_failed_login(&self.store, &self.profile.id);
+                if self.mode == AccountLoginMode::NewProfile {
+                    abandon_after_failed_login(&self.store, &self.profile.id);
+                }
                 Err(error.into())
             }
         }
     }
 
-    /// Cancels the running callback server, waits for it to exit, and removes the pending profile.
+    /// Cancels the running callback server, waits for it to exit, and removes a pending
+    /// newly-allocated profile. An existing profile being re-logged-in is left untouched.
     pub async fn cancel(mut self) -> Result<(), AccountLoginFlowError> {
         let server = self
             .server
@@ -117,7 +190,9 @@ impl PendingAccountBrowserLogin {
             .ok_or(AccountLoginFlowError::FlowAlreadyConsumed)?;
         server.cancel();
         let _ = server.block_until_done().await;
-        self.store.abandon_pending_profile(&self.profile.id)?;
+        if self.mode == AccountLoginMode::NewProfile {
+            self.store.abandon_pending_profile(&self.profile.id)?;
+        }
         Ok(())
     }
 }
@@ -137,6 +212,7 @@ pub struct PendingAccountDeviceLogin {
     profile: AccountProfile,
     options: Option<ServerOptions>,
     device_code: Option<DeviceCode>,
+    mode: AccountLoginMode,
 }
 
 impl PendingAccountDeviceLogin {
@@ -172,7 +248,9 @@ impl PendingAccountDeviceLogin {
                 .complete_profile(&self.profile.id)
                 .map_err(AccountLoginFlowError::from),
             Err(error) => {
-                abandon_after_failed_login(&self.store, &self.profile.id);
+                if self.mode == AccountLoginMode::NewProfile {
+                    abandon_after_failed_login(&self.store, &self.profile.id);
+                }
                 Err(error.into())
             }
         }
@@ -181,7 +259,9 @@ impl PendingAccountDeviceLogin {
     pub fn cancel(mut self) -> Result<(), AccountLoginFlowError> {
         self.options.take();
         self.device_code.take();
-        self.store.abandon_pending_profile(&self.profile.id)?;
+        if self.mode == AccountLoginMode::NewProfile {
+            self.store.abandon_pending_profile(&self.profile.id)?;
+        }
         Ok(())
     }
 }
