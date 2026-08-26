@@ -21,6 +21,7 @@ warn() { printf 'WARN: %s\n' "$*" >&2; }
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) target="aarch64-apple-darwin" ;;
   Linux-x86_64) target="x86_64-unknown-linux-gnu" ;;
+  Linux-aarch64) target="aarch64-unknown-linux-gnu" ;;
   *)
     warn "Unsupported platform: $(uname -s)-$(uname -m)."
     warn "Download an asset manually from https://github.com/$REPO/releases (Windows: codex-x86_64-pc-windows-msvc.zip)."
