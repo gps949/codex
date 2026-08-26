@@ -195,6 +195,30 @@ impl App {
                     .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
                 return;
             }
+            ServerNotification::AccountPoolUpdated(notification) => {
+                // Overlay the active pool profile onto the /status account line and refresh
+                // rate limits so automatic failover updates the visible account state too.
+                let active_profile = notification
+                    .accounts
+                    .iter()
+                    .find(|account| account.is_active)
+                    .map(|account| {
+                        account
+                            .label
+                            .clone()
+                            .unwrap_or_else(|| account.profile_id.clone())
+                    });
+                self.chat_widget
+                    .update_account_pool_identity(active_profile);
+                let reset_hint_request_id = self.chat_widget.start_rate_limit_reset_startup_check();
+                self.refresh_rate_limits(
+                    app_server_client,
+                    crate::app_event::RateLimitRefreshOrigin::StartupPrefetch {
+                        reset_hint_request_id,
+                    },
+                );
+                return;
+            }
             ServerNotification::AccountUpdated(notification) => {
                 // Deferred terminal writes must never carry the previous account's billing into
                 // the newly authenticated identity, even when both accounts share one thread.

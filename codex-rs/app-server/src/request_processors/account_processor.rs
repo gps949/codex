@@ -113,8 +113,11 @@ impl AccountRequestProcessor {
         config_manager: ConfigManager,
     ) -> Self {
         let execution_account_pool = ExecutionAccountPoolHandle::shared(Arc::clone(&auth_manager));
-        let pool_updates_task =
-            spawn_account_pool_updates_task(execution_account_pool.clone(), Arc::clone(&outgoing));
+        let pool_updates_task = spawn_account_pool_updates_task(
+            execution_account_pool.clone(),
+            Arc::clone(&auth_manager),
+            Arc::clone(&outgoing),
+        );
         Self {
             auth_manager,
             execution_account_pool,
@@ -1574,6 +1577,7 @@ impl AccountRequestProcessor {
 /// reads and are served by `accountPool/read` on demand.
 fn spawn_account_pool_updates_task(
     pool: ExecutionAccountPoolHandle,
+    auth_manager: Arc<AuthManager>,
     outgoing: Arc<OutgoingMessageSender>,
 ) -> tokio::task::JoinHandle<()> {
     let mut changes = pool.change_receiver();
@@ -1583,6 +1587,20 @@ fn spawn_account_pool_updates_task(
             if snapshots.is_empty() {
                 continue;
             }
+            // Clients cache the account identity (auth mode/plan) from bootstrap; a pool
+            // rotation changes it, so refresh that cache before the pool details arrive.
+            let auth = auth_manager.auth().await;
+            outgoing
+                .send_server_notification(ServerNotification::AccountUpdated(
+                    AccountUpdatedNotification {
+                        auth_mode: auth
+                            .as_ref()
+                            .map(CodexAuth::api_auth_mode)
+                            .map(auth_mode_to_api),
+                        plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
+                    },
+                ))
+                .await;
             let active = pool.active_identity();
             let accounts = snapshots
                 .into_iter()

@@ -74,6 +74,17 @@ impl ChatWidget {
         });
     }
 
+    /// Shows the active pool profile in the `/status` account line. Runs after the
+    /// `account/updated` refresh so the profile identity overlays the (email-less)
+    /// auth-mode display instead of being overwritten by it.
+    pub(crate) fn update_account_pool_identity(&mut self, active_profile: Option<String>) {
+        if let Some(crate::status::StatusAccountDisplay::ChatGpt { email, .. }) =
+            self.status_account_display.as_mut()
+        {
+            *email = active_profile;
+        }
+    }
+
     pub(crate) fn on_account_pool_activated(
         &mut self,
         result: Result<AccountPoolUseResponse, String>,
