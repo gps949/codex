@@ -269,9 +269,18 @@ fn restore_runtime_state(
     }
 
     // Establish a deterministic fill-first active account if the saved account is unavailable.
-    let _ = pool.lease()?;
-    Ok(())
+    // A pool whose every profile is cooling down is still a valid pool: it installs, reports
+    // the cooldowns, and recovers on its own once a reset passes. Only unexpected errors fail
+    // the install.
+    match pool.lease() {
+        Ok(_) | Err(AccountPoolError::NoEligibleAccount) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
+
+#[cfg(test)]
+#[path = "account_runtime_tests.rs"]
+mod tests;
 
 fn spawn_auth_sync_task(
     pool: Arc<AccountPool>,
