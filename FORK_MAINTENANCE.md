@@ -106,19 +106,29 @@ This keeps the cheap agent on mechanical work and escalates judgment calls.
 
 ## Releases
 
-The fork inherits upstream's tag-triggered release pipeline
-(`.github/workflows/rust-release.yml`). GitHub Actions on public repositories
-are free on standard runners (including macOS), so cost is not a concern —
-noise and queue time are; trim the target matrix if you only use one or two
-platforms.
+Releases are built by the fork-owned `fork-release` workflow (free standard
+runners: Apple Silicon macOS, x64 Linux, x64 Windows). The inherited
+`rust-release*` workflows need Apple signing, R2 buckets, and self-hosted
+runners — they will fail if they fire on a release tag; disable them in the
+Actions UI when they first appear.
 
-- **Version scheme**: `rust-vX.Y.Z-ma.N` — upstream baseline plus a fork
-  iteration suffix, so any bug report immediately shows which upstream release
-  the build is based on.
+- **Tag format**: `rust-vX.Y.Z-ma.N` — upstream baseline plus a fork
+  iteration. The binary is stamped `X.Y.Z+ma.N`, and the in-app update check
+  compares on the upstream base, so users get an upgrade prompt whenever a
+  release moves to a newer baseline.
+- **Releasing**: `git tag rust-v0.149.1-ma.1 && git push origin rust-v0.149.1-ma.1`
+  from a green integration branch. The workflow builds all three platforms and
+  publishes a GitHub release with the archives.
 - **Order of operations**: sync + verify first, tag only from a green
   integration branch. Never tag a release from an unsynced/untested state.
-- **Install**: download the release binary, or `cargo build --release -p
-codex-cli` (binary at `codex-rs/target/release/codex`).
+- **Install (users)**: download the asset for the platform, extract, put
+  `codex` on PATH. No compilation needed. Linux builds link against system
+  OpenSSL 3 (any 2022+ distro).
+- **After swapping binaries, restart the shared daemon**: the TUI reuses an
+  already-running local app-server daemon socket when one exists. A daemon
+  left behind by the official binary (or an older fork build) does not know
+  the `accountPool/*` methods, so `/account` fails with "accountPool/read
+  failed". Run `codex app-server daemon stop` (fork binary) and relaunch.
 - **Self-update is intentionally disabled** in this fork: `codex update` and
   the TUI upgrade prompt would otherwise reinstall the official binary over
   the fork. Update checks point at this fork's releases; `codex update` prints

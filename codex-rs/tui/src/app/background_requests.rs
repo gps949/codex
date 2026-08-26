@@ -113,9 +113,11 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
+            // Keep the full error chain: the root cause (for example "unknown method"
+            // from a stale pre-fork app-server daemon) is what makes this actionable.
             let result = fetch_account_pool(request_handle)
                 .await
-                .map_err(|err| err.to_string());
+                .map_err(|err| format!("{err:#}"));
             app_event_tx.send(AppEvent::AccountPoolLoaded { result });
         });
     }
@@ -130,7 +132,7 @@ impl App {
         tokio::spawn(async move {
             let result = use_account_pool_profile(request_handle, profile_id)
                 .await
-                .map_err(|err| err.to_string());
+                .map_err(|err| format!("{err:#}"));
             app_event_tx.send(AppEvent::AccountPoolActivated { result });
         });
     }
