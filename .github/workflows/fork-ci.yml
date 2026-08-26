@@ -32,6 +32,18 @@ jobs:
           toolchain: "1.95.0"
           components: rustfmt, clippy
 
+      # Text checks run before the Rust cache restores codex-rs/target, so
+      # codespell never scans restored build artifacts.
+      - name: Spelling (codespell)
+        run: pipx run codespell --config .codespellrc --ignore-words .codespellignore
+
+      - name: Formatting (rustfmt)
+        working-directory: codex-rs
+        run: cargo fmt --all -- --check
+
+      - name: Prettier on fork-owned files
+        run: npx --yes prettier@3.5.3 --check FORK_MAINTENANCE.md .github/workflows/fork-ci.yml .github/workflows/fork-release.yml .github/workflows/upstream-sync-check.yml
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -44,16 +56,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,cargo-shear@1.11.2
-
-      - name: Spelling (codespell)
-        run: pipx run codespell --config .codespellrc --ignore-words .codespellignore
-
-      - name: Formatting (rustfmt)
-        working-directory: codex-rs
-        run: cargo fmt --all -- --check
-
-      - name: Prettier on fork-owned files
-        run: npx --yes prettier@3.5.3 --check FORK_MAINTENANCE.md .github/workflows/fork-ci.yml .github/workflows/upstream-sync-check.yml
 
       - name: Unused dependencies (cargo shear)
         working-directory: codex-rs
