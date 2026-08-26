@@ -28,29 +28,34 @@ Skip alphas unless one carries a fix you need.
 
 ### CI on the fork
 
-The inherited upstream workflows largely require self-hosted runner groups,
-paid larger macOS runners, BuildBuddy secrets, or bot tokens that only exist
-in `openai/codex`. Treat `fork-ci` (rustfmt, clippy `-D warnings` on
-fork-touched crates, targeted multi-account tests, codespell, cargo-shear,
-Prettier) as this fork's gate, and disable the following under Actions →
-(select workflow) → “···” → “Disable workflow”:
+The inherited upstream CI largely requires self-hosted runner groups, paid
+larger macOS runners, BuildBuddy secrets, or bot tokens that only exist in
+`openai/codex`. Treat `fork-ci` (rustfmt, clippy `-D warnings` on fork-touched
+crates, targeted multi-account tests, codespell, cargo-shear, Prettier) as
+this fork's gate.
 
-- `blocking-ci`, `bazel`, `rust-ci`, `rust-ci-full`,
-  `rust-ci-full-nextest-platform`, `postmerge-ci` — self-hosted/larger
-  runners + BuildBuddy secrets
-- `sdk`, `python-runtime-build` — self-hosted runners
-- `repo-checks` — carries an upstream-side failure and duplicates fork-ci
-- `codespell`, `cargo-deny`, `blob-size-policy` — duplicated by or irrelevant
-  to fork-ci (cargo-deny can stay enabled if you want advisory scanning)
-- `v8-canary`, `rusty-v8-release` — upstream V8 release plumbing
-- `issue-deduplicator`, `issue-labeler`, `issue-translator`,
-  `close-stale-contributor-prs`, `cla` — upstream repo bots
-- `python-runtime-release`, `python-sdk-release`, `r2-release` — upstream
-  release publishing (needs their secrets)
+Note on granularity: `bazel`, `rust-ci`, `sdk`, `repo-checks`, `codespell`,
+`cargo-deny`, and `blob-size-policy` are _reusable_ workflows invoked from
+inside `blocking-ci` (`on: workflow_call`), so they never appear as separate
+entries in the Actions list and cannot be disabled individually — **disabling
+`blocking-ci` turns all of them off at once**. GitHub also only registers a
+workflow in the Actions list after its trigger has fired at least once, so
+never-triggered upstream workflows (issue bots, release pipelines) stay
+invisible until something fires them.
 
-Keep enabled: `fork-ci`, `upstream-sync-check`, and the tag-triggered
-`rust-release*` workflows (they only run when you push a release tag; trim
-their target matrix before the first release).
+Disable list (Actions → select workflow → “···” → “Disable workflow”):
+
+- `blocking-ci` — covers the whole heavy upstream CI tree
+- `v8-canary` — upstream V8 canary
+- `CLA Assistant` — upstream contributor-agreement bot
+- Anything else that appears later because its trigger fired (for example
+  issue bots once issues are opened), except the keep list below.
+
+Keep enabled: `fork-ci`, `upstream-sync-check` (appears after it exists on
+the default branch), and the tag-triggered `rust-release*` workflows (they
+only run when you push a release tag; trim their target matrix before the
+first release). The stale `.github/workflows/native-multi-account-live.yml`
+entry is a deleted temporary workflow that can never run again; ignore it.
 
 The `upstream-sync-check` workflow (weekly, metadata-only, ~1 minute) opens an
 issue when a new stable tag exists, listing which contact-surface files changed
