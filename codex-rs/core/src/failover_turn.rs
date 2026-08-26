@@ -130,7 +130,7 @@ pub(crate) fn pool_exhausted_message(execution_auth: &ExecutionAuth) -> String {
         .min();
     match earliest_reset {
         Some(resets_at) => format!(
-            "All configured Codex accounts have hit their usage limits. The earliest cooldown ends at {}.",
+            "All configured Codex accounts have hit their usage limits. The earliest cooldown ends at {}. If a plan has earned rate-limit reset credits, redeeming one (for example from /status in the TUI or the app) unblocks that account immediately.",
             resets_at.format("%Y-%m-%d %H:%M UTC")
         ),
         None => "All configured Codex accounts are currently unavailable. Run `codex account list` for details.".to_string(),

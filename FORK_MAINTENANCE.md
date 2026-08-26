@@ -98,6 +98,17 @@ codex-cli` (binary at `codex-rs/target/release/codex`).
   the fork. Update checks point at this fork's releases; `codex update` prints
   a pointer to the releases page instead of executing an installer.
 
+## Intentionally not implemented
+
+- **Automatic reset-credit consumption during failover.** Rotating to another
+  pool account is free while a reset credit is a limited resource, so spending
+  credits silently is the wrong default. Architecturally it would also force a
+  `codex-backend-client` dependency into `codex-core` (upstream explicitly
+  resists growing core, and `backend-client` already depends on `codex-login`,
+  ruling the login crate out too), adding two lockfiles to the permanent sync
+  conflict surface. The pool-exhausted warning instead points users at the
+  explicit redeem flow (`account/rateLimitResetCredit/consume`, TUI `/status`).
+
 ## Fork feature roadmap (not yet implemented)
 
 - TUI surface: active-account indicator and an `/account` picker. (Automatic
