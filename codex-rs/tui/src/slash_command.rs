@@ -53,6 +53,7 @@ pub enum SlashCommand {
     #[strum(to_string = "pwd", serialize = "cwd")]
     Pwd,
     Usage,
+    Account,
     DebugConfig,
     Title,
     Statusline,
@@ -86,6 +87,7 @@ impl SlashCommand {
     /// User-visible description shown in the popup.
     pub fn description(self) -> &'static str {
         match self {
+            SlashCommand::Account => "view or switch the active multi-account pool profile",
             SlashCommand::Feedback => "send logs to maintainers",
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
@@ -239,6 +241,7 @@ impl SlashCommand {
             | SlashCommand::Status
             | SlashCommand::Pwd
             | SlashCommand::Usage
+            | SlashCommand::Account
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop

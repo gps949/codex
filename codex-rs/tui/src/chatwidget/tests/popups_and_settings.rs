@@ -3237,6 +3237,77 @@ async fn model_selection_popup_snapshot() {
 }
 
 #[tokio::test]
+async fn account_pool_picker_snapshot() {
+    use codex_app_server_protocol::AccountPoolAccount;
+    use codex_app_server_protocol::AccountPoolAvailability;
+    use codex_app_server_protocol::AccountPoolRateLimitWindow;
+    use codex_app_server_protocol::AccountPoolRateLimits;
+    use codex_app_server_protocol::AccountPoolReadResponse;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.open_account_pool_picker(Ok(AccountPoolReadResponse {
+        enabled: true,
+        active_profile_id: Some("primary-acct".to_string()),
+        active_generation: Some(3),
+        accounts: vec![
+            AccountPoolAccount {
+                profile_id: "primary-acct".to_string(),
+                label: Some("Team plan".to_string()),
+                priority: 0,
+                is_active: true,
+                availability: AccountPoolAvailability::Available,
+                plan_type: None,
+                email: None,
+                rate_limits: AccountPoolRateLimits {
+                    primary: Some(AccountPoolRateLimitWindow {
+                        used_percent: 42.0,
+                        resets_at: None,
+                    }),
+                    secondary: None,
+                    observed_at: None,
+                },
+            },
+            AccountPoolAccount {
+                profile_id: "backup-acct".to_string(),
+                label: None,
+                priority: 10,
+                is_active: false,
+                availability: AccountPoolAvailability::Exhausted { resets_at: None },
+                plan_type: None,
+                email: Some("backup@example.com".to_string()),
+                rate_limits: AccountPoolRateLimits::default(),
+            },
+        ],
+    }));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("account_pool_picker", popup);
+}
+
+#[tokio::test]
+async fn account_pool_picker_reports_unconfigured_pool() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.open_account_pool_picker(Ok(codex_app_server_protocol::AccountPoolReadResponse {
+        enabled: false,
+        active_profile_id: None,
+        active_generation: None,
+        accounts: Vec::new(),
+    }));
+
+    let event = rx.try_recv().expect("expected unconfigured-pool notice");
+    match event {
+        AppEvent::InsertHistoryCell(cell) => {
+            let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
+            assert!(
+                rendered.contains("codex account add"),
+                "expected guidance to configure the pool, got {rendered:?}"
+            );
+        }
+        other => panic!("expected InsertHistoryCell notice, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn personality_selection_popup_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.thread_id = Some(ThreadId::new());

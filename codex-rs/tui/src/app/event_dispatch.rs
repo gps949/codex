@@ -1208,6 +1208,18 @@ impl App {
             AppEvent::RefreshRateLimits { origin } => {
                 self.refresh_rate_limits(app_server, origin);
             }
+            AppEvent::RefreshAccountPool => {
+                self.refresh_account_pool(app_server);
+            }
+            AppEvent::AccountPoolLoaded { result } => {
+                self.chat_widget.open_account_pool_picker(result);
+            }
+            AppEvent::ActivateAccountPoolProfile { profile_id } => {
+                self.activate_account_pool_profile(app_server, profile_id);
+            }
+            AppEvent::AccountPoolActivated { result } => {
+                self.chat_widget.on_account_pool_activated(result);
+            }
             AppEvent::RefreshTokenActivity { request_id } => {
                 self.refresh_token_activity(app_server, request_id);
             }
