@@ -102,6 +102,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
 
+      # Codex pins a v8 build flavor whose prebuilt static libraries are
+      # published on the upstream openai/codex releases (public download),
+      # not on denoland/rusty_v8; without this the v8 build script 404s.
+      - name: Set up Codex-built rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
       - name: Stamp version from tag
         shell: bash
         env:
