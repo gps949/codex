@@ -26,6 +26,15 @@ Upstream ships a stable release roughly every 3–4 days and alphas daily.
 **Track stable tags (`rust-vX.Y.Z`), not `main`, and sync about once a week.**
 Skip alphas unless one carries a fix you need.
 
+### CI on the fork
+
+The inherited upstream workflows (`bazel`, `rust-ci`, `sdk`, `blocking-ci`)
+require self-hosted runner groups, paid larger macOS runners, and BuildBuddy
+secrets that only exist in `openai/codex` — they can never fully pass here.
+Disable them under Actions → (workflow) → “Disable workflow”, and treat
+`fork-ci` (rustfmt, clippy `-D warnings` on fork-touched crates, targeted
+multi-account tests, codespell, cargo-shear, Prettier) as this fork's gate.
+
 The `upstream-sync-check` workflow (weekly, metadata-only, ~1 minute) opens an
 issue when a new stable tag exists, listing which contact-surface files changed
 upstream. Scheduled workflows only run from the repository's **default
