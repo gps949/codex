@@ -63,11 +63,13 @@ upstream. Scheduled workflows only run from the repository's **default
 branch** — set the default branch to the integration branch (or copy the
 workflow there) for the schedule to fire.
 
-Sync steps:
+Sync steps (merge-based: the integration branch contains PR merge commits, so
+rebasing would replay dozens of commits one by one and force-push the default
+branch; a merge resolves conflicts once and keeps history append-only):
 
 1. `git fetch upstream --tags`
 2. `git checkout -b sync/rust-vX.Y.Z feature/native-multi-account`
-3. `git rebase rust-vX.Y.Z` — resolve conflicts (usually only in
+3. `git merge rust-vX.Y.Z` — resolve conflicts once (usually only in
    `core/src/session/turn.rs`; the fork's insertions are marked by
    `execution_auth` / `failover` identifiers).
 4. Verify:
@@ -81,8 +83,9 @@ Sync steps:
    per-profile credential homes (`CODEX_HOME/accounts/<id>/auth.json`) still
    load. Upstream migrations only run against the root `CODEX_HOME`; a
    credential format change may need a fork-side migration for profile homes.
-6. Force-push the rebased result to `feature/native-multi-account`, update
-   `.github/upstream-baseline.txt` to the new tag, close the sync issue.
+6. Update `.github/upstream-baseline.txt` to the new tag, push the sync
+   branch, open a PR into `feature/native-multi-account`, merge once
+   `fork-ci` is green, and close the sync issue.
 
 ### Scheduled Cursor agent (recommended)
 
@@ -90,13 +93,14 @@ Create a weekly scheduled cloud agent with a cheap/Auto model and this prompt:
 
 > Check whether openai/codex has a stable release tag newer than
 > `.github/upstream-baseline.txt` on this fork. If not, stop. If yes, create
-> `sync/<tag>` from `feature/native-multi-account`, rebase onto the tag, and run
-> the verification commands from FORK_MAINTENANCE.md. If the rebase applies
-> cleanly and tests pass, push the branch and open a PR titled "sync: <tag>".
-> If there are conflicts in contact-surface files or test failures, do NOT
-> guess: push whatever is safe, then summarize the conflicting hunks and
-> failing tests in the PR/issue and explicitly state that a human or a
-> stronger model must finish the adaptation.
+> `sync/<tag>` from `feature/native-multi-account`, run `git merge <tag>`, and
+> follow the verification commands from FORK_MAINTENANCE.md. If the merge is
+> conflict-free and tests pass, update `.github/upstream-baseline.txt` to the
+> new tag, push the branch, and open a PR titled "sync: <tag>". If there are
+> merge conflicts in contact-surface files or test failures, do NOT guess:
+> push whatever is safe, then summarize the conflicting hunks and failing
+> tests in the PR/issue and explicitly state that a human or a stronger model
+> must finish the adaptation.
 
 This keeps the cheap agent on mechanical work and escalates judgment calls.
 

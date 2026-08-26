@@ -19,7 +19,9 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Cold-cache builds of the clippy + test tree can exceed an hour on the
+    # 4-core free runner; warm runs settle far below this.
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,7 +46,7 @@ jobs:
           tool: cargo-nextest,cargo-shear@1.11.2
 
       - name: Spelling (codespell)
-        run: pipx run codespell --config .codespellrc
+        run: pipx run codespell --config .codespellrc --ignore-words .codespellignore
 
       - name: Formatting (rustfmt)
         working-directory: codex-rs
@@ -60,6 +62,12 @@ jobs:
       - name: Clippy on fork-touched crates
         working-directory: codex-rs
         run: cargo clippy --tests -p codex-login -p codex-config -p codex-history -p codex-core -p codex-cli -p codex-tui -p codex-app-server -p codex-app-server-protocol -- -D warnings
+
+      - name: Build test helper binaries
+        working-directory: codex-rs
+        # The codex-core integration fixture requires the Linux sandbox binary,
+        # which a package-scoped nextest build does not produce on its own.
+        run: cargo build -p codex-linux-sandbox --bin codex-linux-sandbox
 
       - name: Multi-account tests
         working-directory: codex-rs
