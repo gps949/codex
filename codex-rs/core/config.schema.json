@@ -11,7 +11,7 @@
       "description": "Scheduling knobs for the native multi-account execution pool.\n\nThe pool itself is enabled by the account-profile manifest created with `codex account add`; this section only tunes how the scheduler behaves once more than one profile exists.",
       "properties": {
         "preemptive_switch_percent": {
-          "description": "Rotate the active account before a hard usage-limit failure once its observed usage for any rate-limit window reaches this percentage. Defaults to 95. Values outside the exclusive (0, 100) range disable pre-emptive switching.",
+          "description": "Rotate the active account before a hard usage-limit failure once its observed usage for any rate-limit window reaches this percentage. Defaults to 95. Values outside the exclusive (0, 100) range disable preemptive switching.",
           "format": "double",
           "type": "number"
         },

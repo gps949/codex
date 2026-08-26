@@ -61,11 +61,11 @@ pub(crate) struct ExecutionAuthLease {
     account: Option<AccountLease>,
 }
 
-/// A pre-emptive rotation lacking an authoritative reset timestamp re-probes the parked account
+/// A preemptive rotation lacking an authoritative reset timestamp re-probes the parked account
 /// after this delay, mirroring the hard-failure reprobe policy in the failover coordinator.
 const PREEMPTIVE_UNKNOWN_RESET_REPROBE_DELAY: chrono::Duration = chrono::Duration::minutes(10);
 
-/// Describes one completed pre-emptive account rotation for logging and user notification.
+/// Describes one completed preemptive account rotation for logging and user notification.
 #[derive(Clone, Debug)]
 pub(crate) struct PreemptiveSwitch {
     pub(crate) from_profile: AccountProfileId,

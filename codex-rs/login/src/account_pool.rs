@@ -421,7 +421,7 @@ impl AccountPool {
     /// Rotates away from a still-working lease whose observed usage is close to its limit.
     ///
     /// Unlike [`Self::mark_exhausted`], this never leaves the pool without an active account: the
-    /// rotation only happens when another eligible profile exists to take over, so a pre-emptive
+    /// rotation only happens when another eligible profile exists to take over, so a preemptive
     /// switch can never make things worse than staying on the nearly exhausted account.
     pub fn rotate_preemptively(
         &self,

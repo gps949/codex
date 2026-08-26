@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Default usage percentage that triggers a pre-emptive account rotation.
+/// Default usage percentage that triggers a preemptive account rotation.
 const DEFAULT_PREEMPTIVE_SWITCH_PERCENT: f64 = 95.0;
 
 /// Scheduling knobs for the native multi-account execution pool.
@@ -14,7 +14,7 @@ const DEFAULT_PREEMPTIVE_SWITCH_PERCENT: f64 = 95.0;
 pub struct AccountPoolConfigToml {
     /// Rotate the active account before a hard usage-limit failure once its observed usage for
     /// any rate-limit window reaches this percentage. Defaults to 95. Values outside the
-    /// exclusive (0, 100) range disable pre-emptive switching.
+    /// exclusive (0, 100) range disable preemptive switching.
     pub preemptive_switch_percent: Option<f64>,
     /// Return to the most preferred (lowest priority value) account when its quota cooldown
     /// expires instead of staying on the currently active account. Defaults to true.
@@ -22,7 +22,7 @@ pub struct AccountPoolConfigToml {
 }
 
 impl AccountPoolConfigToml {
-    /// Effective pre-emptive switch threshold; `None` means the feature is disabled.
+    /// Effective preemptive switch threshold; `None` means the feature is disabled.
     pub fn effective_preemptive_switch_percent(&self) -> Option<f64> {
         let percent = self
             .preemptive_switch_percent

@@ -2718,7 +2718,7 @@ async fn try_run_sampling_request(
                 sess.set_server_reasoning_included(included).await;
             }
             ResponseEvent::RateLimits(snapshot) => {
-                // Keep the account pool's per-profile usage view fresh so pre-emptive switching
+                // Keep the account pool's per-profile usage view fresh so preemptive switching
                 // and status surfaces see real data instead of only hard-failure observations.
                 if let Some(provenance) = sampling_execution_provenance(turn_context.as_ref()) {
                     let execution_auth =

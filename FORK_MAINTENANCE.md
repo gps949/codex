@@ -14,7 +14,7 @@ describes how to keep the fork in sync with upstream and how to cut releases.
 - `sync/rust-vX.Y.Z` — short-lived branches produced by a sync (rebase of the
   integration branch onto a new upstream stable tag), merged back after tests.
 
-The fork's diff is intentionally mostly *additive* (new modules such as
+The fork's diff is intentionally mostly _additive_ (new modules such as
 `login/src/account_pool.rs`, `core/src/failover*.rs`). The files that modify
 upstream code — the "contact surface" — are listed in
 `.github/workflows/upstream-sync-check.yml`; conflicts concentrate in
@@ -83,7 +83,7 @@ platforms.
 - **Order of operations**: sync + verify first, tag only from a green
   integration branch. Never tag a release from an unsynced/untested state.
 - **Install**: download the release binary, or `cargo build --release -p
-  codex-cli` (binary at `codex-rs/target/release/codex`).
+codex-cli` (binary at `codex-rs/target/release/codex`).
 - **Self-update is intentionally disabled** in this fork: `codex update` and
   the TUI upgrade prompt would otherwise reinstall the official binary over
   the fork. Update checks point at this fork's releases; `codex update` prints
