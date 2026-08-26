@@ -74,21 +74,36 @@ jobs:
       - name: Build codex
         working-directory: codex-rs
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }} --bin codex -p codex-cli
+        # Mirror the upstream CLI bundle: codex plus the sibling binaries the
+        # TUI spawns at runtime (code-mode host, responses proxy; bwrap
+        # sandbox helper on Linux).
+        run: |
+          set -euo pipefail
+          cargo build --release --target ${{ matrix.target }} --bin codex -p codex-cli
+          cargo build --release --target ${{ matrix.target }} -p codex-code-mode-host
+          cargo build --release --target ${{ matrix.target }} -p codex-responses-api-proxy
+          if [[ "${{ matrix.target }}" == *linux* ]]; then
+            cargo build --release --target ${{ matrix.target }} --bin bwrap
+          fi
 
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
+          mkdir -p dist stage
+          release_dir="codex-rs/target/${{ matrix.target }}/release"
           case "${{ matrix.target }}" in
             *windows*)
-              cp "codex-rs/target/${{ matrix.target }}/release/codex.exe" dist/
-              cd dist && 7z a "codex-${{ matrix.target }}.zip" codex.exe && rm codex.exe
+              cp "$release_dir/codex.exe" "$release_dir/codex-code-mode-host.exe" "$release_dir/codex-responses-api-proxy.exe" stage/
+              (cd stage && 7z a "../dist/codex-${{ matrix.target }}.zip" .)
+              ;;
+            *linux*)
+              cp "$release_dir/codex" "$release_dir/codex-code-mode-host" "$release_dir/codex-responses-api-proxy" "$release_dir/bwrap" stage/
+              tar czf "dist/codex-${{ matrix.target }}.tar.gz" -C stage .
               ;;
             *)
-              cp "codex-rs/target/${{ matrix.target }}/release/codex" dist/
-              cd dist && tar czf "codex-${{ matrix.target }}.tar.gz" codex && rm codex
+              cp "$release_dir/codex" "$release_dir/codex-code-mode-host" "$release_dir/codex-responses-api-proxy" stage/
+              tar czf "dist/codex-${{ matrix.target }}.tar.gz" -C stage .
               ;;
           esac
 
@@ -119,5 +134,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "${GITHUB_REF_NAME#rust-v} (multi-account fork)" \
-            --notes "Multi-account fork build. Baseline: upstream ${GITHUB_REF_NAME%%-ma.*}. Install: download the asset for your platform, extract, and place \`codex\` on your PATH. Linux builds link against system OpenSSL 3." \
+            --notes "Multi-account fork build. Baseline: upstream ${GITHUB_REF_NAME%%-ma.*}. Install: download the asset for your platform, extract, and place ALL extracted binaries in one directory on your PATH (codex spawns its sibling helper binaries by path). Linux builds link against system OpenSSL 3." \
             dist/*
