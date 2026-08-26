@@ -41,6 +41,7 @@ pub mod types;
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
 pub use account_pool::AccountPoolConfigToml;
+pub use account_pool::AutoResetCredits;
 pub use auth_policy::ManagedAuthPolicy;
 pub use browser_computer_use_requirements::AllowDenyRequirementToml;
 pub use browser_computer_use_requirements::BrowserUseAccessApprovalLifetimeToml;

@@ -88,7 +88,6 @@ fn write_account_pool_fixture(codex_home: &Path) {
 
 /// End-to-end: a usage-limit rejection on the preferred account rotates the pool to the backup
 /// account, warns the user, and completes the same turn on the backup account's credentials.
-#[expect(clippy::unwrap_used)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));

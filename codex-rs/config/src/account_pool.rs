@@ -5,6 +5,25 @@ use serde::Serialize;
 /// Default usage percentage that triggers a preemptive account rotation.
 const DEFAULT_PREEMPTIVE_SWITCH_PERCENT: f64 = 95.0;
 
+/// Default minimum distance to the next natural quota reset before a reset
+/// credit is worth redeeming automatically.
+const DEFAULT_RESET_CREDIT_MIN_WAIT_MINUTES: i64 = 60;
+
+/// When the scheduler may redeem an earned rate-limit reset credit on the
+/// user's behalf. Credits are a limited resource, so automation is opt-in.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoResetCredits {
+    /// Never redeem automatically (default). Redemption stays an explicit
+    /// user action (TUI /status, app UI, `account/rateLimitResetCredit/consume`).
+    #[default]
+    Never,
+    /// Redeem one credit only when every configured account is exhausted and
+    /// the earliest natural reset is still further away than
+    /// `auto_reset_credit_min_wait_minutes`.
+    WhenPoolExhausted,
+}
+
 /// Scheduling knobs for the native multi-account execution pool.
 ///
 /// The pool itself is enabled by the account-profile manifest created with `codex account add`;
@@ -19,6 +38,14 @@ pub struct AccountPoolConfigToml {
     /// Return to the most preferred (lowest priority value) account when its quota cooldown
     /// expires instead of staying on the currently active account. Defaults to true.
     pub return_to_preferred: Option<bool>,
+    /// When the scheduler may automatically redeem an earned rate-limit reset credit.
+    /// Defaults to `never`: some users prefer waiting out a nearby natural reset or saving
+    /// credits for a broader account-wide reset.
+    pub auto_reset_credits: Option<AutoResetCredits>,
+    /// With `auto_reset_credits = "when_pool_exhausted"`, skip redemption when the earliest
+    /// natural reset across the pool is within this many minutes (waiting is free). Defaults
+    /// to 60.
+    pub auto_reset_credit_min_wait_minutes: Option<i64>,
 }
 
 impl AccountPoolConfigToml {
@@ -32,6 +59,16 @@ impl AccountPoolConfigToml {
 
     pub fn effective_return_to_preferred(&self) -> bool {
         self.return_to_preferred.unwrap_or(true)
+    }
+
+    pub fn effective_auto_reset_credits(&self) -> AutoResetCredits {
+        self.auto_reset_credits.unwrap_or_default()
+    }
+
+    pub fn effective_reset_credit_min_wait_minutes(&self) -> i64 {
+        self.auto_reset_credit_min_wait_minutes
+            .unwrap_or(DEFAULT_RESET_CREDIT_MIN_WAIT_MINUTES)
+            .max(0)
     }
 }
 
@@ -53,7 +90,7 @@ mod tests {
         for percent in [0.0, -1.0, 100.0, 250.0] {
             let config = AccountPoolConfigToml {
                 preemptive_switch_percent: Some(percent),
-                return_to_preferred: None,
+                ..Default::default()
             };
             assert_eq!(config.effective_preemptive_switch_percent(), None);
         }

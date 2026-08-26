@@ -1590,6 +1590,40 @@ async fn run_sampling_request(
                             return Err(err);
                         }
                         SamplingFailoverDirective::PoolExhausted => {
+                            // Opt-in last resort before failing the turn: redeem an earned
+                            // rate-limit reset credit and continue on the reactivated account.
+                            if let Some(rescue) =
+                                crate::reset_credit_rescue::try_reset_credit_rescue(
+                                    execution_auth.as_ref(),
+                                    &execution_lease,
+                                    turn_context.config.as_ref(),
+                                )
+                                .await
+                            {
+                                execution_auth.compatibility_auth_manager().reload().await;
+                                sess.send_event(
+                                    &turn_context,
+                                    EventMsg::Warning(WarningEvent {
+                                        message: format!(
+                                            "Redeemed one rate-limit reset credit on Codex account `{}`; the turn continues on that account.",
+                                            rescue.profile_id
+                                        ),
+                                    }),
+                                )
+                                .await;
+                                *client_session = sess.services.model_client.new_session();
+                                retry_state = ResponsesStreamRetryState::default();
+                                initial_input = None;
+                                sess.refresh_mcp_if_dirty().await;
+                                step_context = sess
+                                    .capture_step_context(
+                                        Arc::clone(&turn_context),
+                                        &cancellation_token,
+                                    )
+                                    .await?;
+                                turn_context.turn_timing_state.record_sampling_retry();
+                                continue;
+                            }
                             sess.send_event(
                                 &turn_context,
                                 EventMsg::Warning(WarningEvent {

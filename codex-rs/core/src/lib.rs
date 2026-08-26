@@ -20,6 +20,7 @@ mod portable_compaction;
 mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;
+mod reset_credit_rescue;
 mod responses_metadata;
 mod responses_retry;
 mod sampling_attempt;

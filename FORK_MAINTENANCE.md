@@ -28,12 +28,29 @@ Skip alphas unless one carries a fix you need.
 
 ### CI on the fork
 
-The inherited upstream workflows (`bazel`, `rust-ci`, `sdk`, `blocking-ci`)
-require self-hosted runner groups, paid larger macOS runners, and BuildBuddy
-secrets that only exist in `openai/codex` — they can never fully pass here.
-Disable them under Actions → (workflow) → “Disable workflow”, and treat
-`fork-ci` (rustfmt, clippy `-D warnings` on fork-touched crates, targeted
-multi-account tests, codespell, cargo-shear, Prettier) as this fork's gate.
+The inherited upstream workflows largely require self-hosted runner groups,
+paid larger macOS runners, BuildBuddy secrets, or bot tokens that only exist
+in `openai/codex`. Treat `fork-ci` (rustfmt, clippy `-D warnings` on
+fork-touched crates, targeted multi-account tests, codespell, cargo-shear,
+Prettier) as this fork's gate, and disable the following under Actions →
+(select workflow) → “···” → “Disable workflow”:
+
+- `blocking-ci`, `bazel`, `rust-ci`, `rust-ci-full`,
+  `rust-ci-full-nextest-platform`, `postmerge-ci` — self-hosted/larger
+  runners + BuildBuddy secrets
+- `sdk`, `python-runtime-build` — self-hosted runners
+- `repo-checks` — carries an upstream-side failure and duplicates fork-ci
+- `codespell`, `cargo-deny`, `blob-size-policy` — duplicated by or irrelevant
+  to fork-ci (cargo-deny can stay enabled if you want advisory scanning)
+- `v8-canary`, `rusty-v8-release` — upstream V8 release plumbing
+- `issue-deduplicator`, `issue-labeler`, `issue-translator`,
+  `close-stale-contributor-prs`, `cla` — upstream repo bots
+- `python-runtime-release`, `python-sdk-release`, `r2-release` — upstream
+  release publishing (needs their secrets)
+
+Keep enabled: `fork-ci`, `upstream-sync-check`, and the tag-triggered
+`rust-release*` workflows (they only run when you push a release tag; trim
+their target matrix before the first release).
 
 The `upstream-sync-check` workflow (weekly, metadata-only, ~1 minute) opens an
 issue when a new stable tag exists, listing which contact-surface files changed
@@ -98,21 +115,35 @@ codex-cli` (binary at `codex-rs/target/release/codex`).
   the fork. Update checks point at this fork's releases; `codex update` prints
   a pointer to the releases page instead of executing an installer.
 
-## Intentionally not implemented
+## Reset-credit automation
 
-- **Automatic reset-credit consumption during failover.** Rotating to another
-  pool account is free while a reset credit is a limited resource, so spending
-  credits silently is the wrong default. Architecturally it would also force a
-  `codex-backend-client` dependency into `codex-core` (upstream explicitly
-  resists growing core, and `backend-client` already depends on `codex-login`,
-  ruling the login crate out too), adding two lockfiles to the permanent sync
-  conflict surface. The pool-exhausted warning instead points users at the
-  explicit redeem flow (`account/rateLimitResetCredit/consume`, TUI `/status`).
+Automatic redemption is **opt-in and rule-bound** because credits are a
+limited resource and some users prefer waiting for a nearby natural reset or
+saving credits for an account-wide reset event:
+
+```toml
+[account_pool]
+auto_reset_credits = "when_pool_exhausted" # default: "never"
+auto_reset_credit_min_wait_minutes = 60    # skip when the natural reset is closer than this
+```
+
+Rules: automation only triggers when **every** pool account is exhausted
+(rotating to a free account always wins over spending a credit), and only when
+the earliest natural reset is further away than the configured wait threshold.
+One credit is redeemed for the account that just failed; the turn then
+continues on that account. Failures fall back to the normal pool-exhausted
+error. Manual redemption (TUI `/status`, app UI,
+`account/rateLimitResetCredit/consume`) is unaffected.
+
+Note: this adds a `codex-backend-client` dependency edge to `codex-core`
+(already present in the workspace lockfile). `MODULE.bazel.lock` was not
+regenerated because Bazel CI is disabled on this fork; run
+`just bazel-lock-update` if Bazel builds are ever re-enabled.
 
 ## Fork feature roadmap
 
 All originally planned items are implemented: the `/account` TUI picker,
-`accountPool/read|use|updated` app-server APIs, pre-emptive switching, cooldown
+`accountPool/read|use|updated` app-server APIs, preemptive switching, cooldown
 fallback, keep-alive, per-profile re-login and enable/disable, remote-control
-re-enrollment after rotation, and the failover integration test. See
-"Intentionally not implemented" above for the one deliberate exception.
+re-enrollment after rotation, opt-in reset-credit automation, and the failover
+integration test.
