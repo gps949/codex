@@ -43,13 +43,24 @@ workflow in the Actions list after its trigger has fired at least once, so
 never-triggered upstream workflows (issue bots, release pipelines) stay
 invisible until something fires them.
 
+Once the fork's integration branch is the default branch, GitHub registers
+every workflow file on it. Only self-triggering ones need disabling; the
+`workflow_call`-only helpers (Bazel, Codespell, cargo-deny, blob-size-policy,
+repo-checks, rust-ci, rust-ci-full-nextest-platform, sdk,
+python-runtime-build, publish-r2-release, rust-release-windows,
+rust-release-argument-comment-lint) can never run on their own because their
+only caller, `blocking-ci`, is disabled.
+
 Disable list (Actions → select workflow → “···” → “Disable workflow”):
 
-- `blocking-ci` — covers the whole heavy upstream CI tree
-- `v8-canary` — upstream V8 canary
-- `CLA Assistant` — upstream contributor-agreement bot
-- Anything else that appears later because its trigger fired (for example
-  issue bots once issues are opened), except the keep list below.
+- `blocking-ci`, `v8-canary`, `CLA Assistant`
+- `postmerge-ci`, `rust-ci-full` — push-triggered heavy CI
+- `rust-release`, `rust-release-zsh`, `rusty-v8-release`,
+  `python-sdk-release` — tag/push-triggered upstream release pipelines
+  (replaced by `fork-release`)
+- `rust-release-prepare`, `Close stale contributor PRs` — scheduled
+- `Issue Deduplicator`, `Issue Labeler`, `Issue Translator` — need upstream
+  bot secrets; fail on every issue event
 
 Keep enabled: `fork-ci`, `upstream-sync-check` (appears after it exists on
 the default branch), and the tag-triggered `rust-release*` workflows (they
@@ -106,19 +117,55 @@ This keeps the cheap agent on mechanical work and escalates judgment calls.
 
 ## Releases
 
-The fork inherits upstream's tag-triggered release pipeline
-(`.github/workflows/rust-release.yml`). GitHub Actions on public repositories
-are free on standard runners (including macOS), so cost is not a concern —
-noise and queue time are; trim the target matrix if you only use one or two
-platforms.
+Releases are built by the fork-owned `fork-release` workflow (free standard
+runners: Apple Silicon macOS, x64 Linux, x64 Windows). The inherited
+`rust-release*` workflows need Apple signing, R2 buckets, and self-hosted
+runners — they will fail if they fire on a release tag; disable them in the
+Actions UI when they first appear.
 
-- **Version scheme**: `rust-vX.Y.Z-ma.N` — upstream baseline plus a fork
-  iteration suffix, so any bug report immediately shows which upstream release
-  the build is based on.
+- **Tag format**: `rust-vX.Y.Z-ma.N` — upstream baseline plus a fork
+  iteration. The binary is stamped `X.Y.Z+ma.N`, and the in-app update check
+  compares on the upstream base, so users get an upgrade prompt whenever a
+  release moves to a newer baseline.
+- **Releasing**: `git tag rust-v0.149.1-ma.1 && git push origin rust-v0.149.1-ma.1`
+  from a green integration branch. The workflow builds all three platforms and
+  publishes a GitHub release with the archives.
 - **Order of operations**: sync + verify first, tag only from a green
   integration branch. Never tag a release from an unsynced/untested state.
-- **Install**: download the release binary, or `cargo build --release -p
-codex-cli` (binary at `codex-rs/target/release/codex`).
+- **Install (users)**: download the asset for the platform, extract, put
+  `codex` on PATH. No compilation needed. Linux builds link against system
+  OpenSSL 3 (any 2022+ distro).
+
+### Coexistence with the official binary (audited)
+
+Verified safe by design — no user action needed:
+
+| Surface                        | Why it is safe                                                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config.toml` `[account_pool]` | Official builds ignore unknown config sections (only `--strict-config` rejects them)                                                        |
+| Root `auth.json`               | The pool never rewrites it; per-profile credentials live under `auth-profiles/<id>/`                                                        |
+| OS keyring                     | Entries are keyed by each credential home's path, so profiles and the root login never collide                                              |
+| SQLite state DB                | Upstream explicitly tolerates databases migrated by a newer binary running in parallel                                                      |
+| Sessions/rollouts              | Official builds ignore the fork's provenance metadata; items they write are genuinely root-account items, so pool attribution stays correct |
+| Sibling helper binaries        | Each installation resolves helpers next to its own executable                                                                               |
+| Self-update                    | The fork checks its own releases; npm/brew updates of the official build never touch the fork's install dir                                 |
+| Daemon socket                  | The fork only reuses a daemon whose version matches; the installer stops stale managed daemons                                              |
+
+Remaining edge cases (documented, not auto-fixable):
+
+- Running the **official** binary with `--strict-config` against a config that
+  contains `[account_pool]` errors out; drop the flag or the section.
+- An **old official client** (for example a tool-bundled build) may reuse a
+  fork daemon it finds on the socket — protocol drift between distant upstream
+  versions is upstream's own compatibility domain, not widened by the fork.
+- Hook scripts written for older Codex versions may need updating to the
+  current hook JSON format regardless of fork vs official.
+
+- **After swapping binaries, restart the shared daemon**: the TUI reuses an
+  already-running local app-server daemon socket when one exists. A daemon
+  left behind by the official binary (or an older fork build) does not know
+  the `accountPool/*` methods, so `/account` fails with "accountPool/read
+  failed". Run `codex app-server daemon stop` (fork binary) and relaunch.
 - **Self-update is intentionally disabled** in this fork: `codex update` and
   the TUI upgrade prompt would otherwise reinstall the official binary over
   the fork. Update checks point at this fork's releases; `codex update` prints

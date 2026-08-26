@@ -1,0 +1,144 @@
+# Fork release pipeline.
+#
+# Tag format: rust-vX.Y.Z-ma.N, where X.Y.Z is the upstream stable baseline and
+# N is the fork iteration on that baseline. The binary is stamped X.Y.Z+ma.N
+# (valid semver build metadata), and the in-app update check compares on the
+# upstream base, so pushing a tag for a newer baseline notifies existing users.
+#
+# This intentionally replaces the upstream rust-release* workflows, which need
+# Apple signing identities, R2 buckets, and self-hosted runners that do not
+# exist on this fork. The upstream workflow also triggers on rust-v* tags —
+# disable it in the Actions UI when it first appears.
+name: fork-release
+
+on:
+  push:
+    tags:
+      - "rust-v*-ma.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - name: Stamp version from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#rust-v}"
+          cargo_version="${version/-ma./+ma.}"
+          python3 - "$cargo_version" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          manifest = Path("codex-rs/Cargo.toml")
+          text = manifest.read_text()
+          stamped, count = re.subn(
+              r'^version = "0\.0\.0"$', f'version = "{version}"', text, count=1, flags=re.M
+          )
+          if count != 1:
+              raise SystemExit("expected exactly one workspace version placeholder")
+          manifest.write_text(stamped)
+          print(f"stamped {version}")
+          PY
+
+      - name: Build codex
+        working-directory: codex-rs
+        shell: bash
+        # Mirror the upstream CLI bundle: codex plus the sibling binaries the
+        # TUI spawns at runtime (code-mode host, responses proxy; bwrap
+        # sandbox helper on Linux).
+        run: |
+          set -euo pipefail
+          cargo build --release --target ${{ matrix.target }} --bin codex -p codex-cli
+          cargo build --release --target ${{ matrix.target }} -p codex-code-mode-host
+          cargo build --release --target ${{ matrix.target }} -p codex-responses-api-proxy
+          if [[ "${{ matrix.target }}" == *linux* ]]; then
+            cargo build --release --target ${{ matrix.target }} --bin bwrap
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist stage
+          release_dir="codex-rs/target/${{ matrix.target }}/release"
+          case "${{ matrix.target }}" in
+            *windows*)
+              cp "$release_dir/codex.exe" "$release_dir/codex-code-mode-host.exe" "$release_dir/codex-responses-api-proxy.exe" stage/
+              (cd stage && 7z a "../dist/codex-${{ matrix.target }}.zip" .)
+              ;;
+            *linux*)
+              cp "$release_dir/codex" "$release_dir/codex-code-mode-host" "$release_dir/codex-responses-api-proxy" "$release_dir/bwrap" stage/
+              tar czf "dist/codex-${{ matrix.target }}.tar.gz" -C stage .
+              ;;
+            *)
+              cp "$release_dir/codex" "$release_dir/codex-code-mode-host" "$release_dir/codex-responses-api-proxy" stage/
+              tar czf "dist/codex-${{ matrix.target }}.tar.gz" -C stage .
+              ;;
+          esac
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${GITHUB_REF_NAME#rust-v} (multi-account fork)" \
+            --notes "Multi-account fork build. Baseline: upstream ${GITHUB_REF_NAME%%-ma.*}.
+
+          Install (macOS arm64 / Linux x64):
+          \`\`\`
+          curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/feature/native-multi-account/install.sh | bash
+          \`\`\`
+          Or download the asset for your platform, extract, and keep ALL extracted binaries together in one directory on your PATH (codex spawns its sibling helper binaries by path). Linux builds link against system OpenSSL 3." \
+            dist/*
