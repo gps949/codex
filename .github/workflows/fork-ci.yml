@@ -44,7 +44,7 @@ jobs:
           tool: cargo-nextest,cargo-shear@1.11.2
 
       - name: Spelling (codespell)
-        run: pipx run codespell --config .codespellrc
+        run: pipx run codespell --config .codespellrc --ignore-words .codespellignore
 
       - name: Formatting (rustfmt)
         working-directory: codex-rs
