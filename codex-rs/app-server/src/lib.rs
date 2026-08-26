@@ -763,6 +763,14 @@ pub async fn run_main_with_transport_options(
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
             .await
             .map_err(std::io::Error::other)?;
+    // Remote-control enrollment identity stays pinned to root CODEX_HOME credentials. The
+    // execution AuthManager above may later gain AccountPoolExternalAuth and rotate across
+    // pool profiles; a separate manager keeps pairing/websocket enrollment from following
+    // those rotations.
+    let remote_control_auth_manager =
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
+            .await
+            .map_err(std::io::Error::other)?;
 
     let remote_control_enabled = remote_control_policy == RemoteControlPolicy::Allowed
         && remote_control_explicitly_requested
@@ -794,7 +802,7 @@ pub async fn run_main_with_transport_options(
             policy: remote_control_policy,
         },
         state_db.clone(),
-        auth_manager.clone(),
+        remote_control_auth_manager,
         transport_event_tx.clone(),
         transport_shutdown_token.clone(),
         app_server_client_name_rx,
