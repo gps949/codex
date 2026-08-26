@@ -102,6 +102,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
 
+      # The rusty_v8 version-resolution script needs tomllib (Python 3.11+);
+      # the ubuntu-22.04 runner ships 3.10, so install a modern Python first.
+      - name: Set up Python for rusty_v8 version resolution
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       # Codex pins a v8 build flavor whose prebuilt static libraries are
       # published on the upstream openai/codex releases (public download),
       # not on denoland/rusty_v8; without this the v8 build script 404s.
