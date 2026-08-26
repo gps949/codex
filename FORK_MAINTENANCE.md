@@ -135,6 +135,32 @@ Actions UI when they first appear.
 - **Install (users)**: download the asset for the platform, extract, put
   `codex` on PATH. No compilation needed. Linux builds link against system
   OpenSSL 3 (any 2022+ distro).
+
+### Coexistence with the official binary (audited)
+
+Verified safe by design — no user action needed:
+
+| Surface                        | Why it is safe                                                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config.toml` `[account_pool]` | Official builds ignore unknown config sections (only `--strict-config` rejects them)                                                        |
+| Root `auth.json`               | The pool never rewrites it; per-profile credentials live under `auth-profiles/<id>/`                                                        |
+| OS keyring                     | Entries are keyed by each credential home's path, so profiles and the root login never collide                                              |
+| SQLite state DB                | Upstream explicitly tolerates databases migrated by a newer binary running in parallel                                                      |
+| Sessions/rollouts              | Official builds ignore the fork's provenance metadata; items they write are genuinely root-account items, so pool attribution stays correct |
+| Sibling helper binaries        | Each installation resolves helpers next to its own executable                                                                               |
+| Self-update                    | The fork checks its own releases; npm/brew updates of the official build never touch the fork's install dir                                 |
+| Daemon socket                  | The fork only reuses a daemon whose version matches; the installer stops stale managed daemons                                              |
+
+Remaining edge cases (documented, not auto-fixable):
+
+- Running the **official** binary with `--strict-config` against a config that
+  contains `[account_pool]` errors out; drop the flag or the section.
+- An **old official client** (for example a tool-bundled build) may reuse a
+  fork daemon it finds on the socket — protocol drift between distant upstream
+  versions is upstream's own compatibility domain, not widened by the fork.
+- Hook scripts written for older Codex versions may need updating to the
+  current hook JSON format regardless of fork vs official.
+
 - **After swapping binaries, restart the shared daemon**: the TUI reuses an
   already-running local app-server daemon socket when one exists. A daemon
   left behind by the official binary (or an older fork build) does not know
