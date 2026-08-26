@@ -138,11 +138,14 @@ jobs:
           version = sys.argv[1]
           manifest = Path("codex-rs/Cargo.toml")
           text = manifest.read_text()
+          # The workspace version is "0.0.0" on development branches but already
+          # stamped (for example "0.149.1") on official release-tag baselines;
+          # replace whatever single top-level version line is present.
           stamped, count = re.subn(
-              r'^version = "0\.0\.0"$', f'version = "{version}"', text, count=1, flags=re.M
+              r'^version = "[^"]+"$', f'version = "{version}"', text, count=0, flags=re.M
           )
           if count != 1:
-              raise SystemExit("expected exactly one workspace version placeholder")
+              raise SystemExit(f"expected exactly one workspace version line, found {count}")
           manifest.write_text(stamped)
           print(f"stamped {version}")
           PY
