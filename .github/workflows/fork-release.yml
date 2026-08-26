@@ -134,5 +134,11 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "${GITHUB_REF_NAME#rust-v} (multi-account fork)" \
-            --notes "Multi-account fork build. Baseline: upstream ${GITHUB_REF_NAME%%-ma.*}. Install: download the asset for your platform, extract, and place ALL extracted binaries in one directory on your PATH (codex spawns its sibling helper binaries by path). Linux builds link against system OpenSSL 3." \
+            --notes "Multi-account fork build. Baseline: upstream ${GITHUB_REF_NAME%%-ma.*}.
+
+          Install (macOS arm64 / Linux x64):
+          \`\`\`
+          curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/feature/native-multi-account/install.sh | bash
+          \`\`\`
+          Or download the asset for your platform, extract, and keep ALL extracted binaries together in one directory on your PATH (codex spawns its sibling helper binaries by path). Linux builds link against system OpenSSL 3." \
             dist/*
