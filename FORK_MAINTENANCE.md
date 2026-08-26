@@ -43,13 +43,24 @@ workflow in the Actions list after its trigger has fired at least once, so
 never-triggered upstream workflows (issue bots, release pipelines) stay
 invisible until something fires them.
 
+Once the fork's integration branch is the default branch, GitHub registers
+every workflow file on it. Only self-triggering ones need disabling; the
+`workflow_call`-only helpers (Bazel, Codespell, cargo-deny, blob-size-policy,
+repo-checks, rust-ci, rust-ci-full-nextest-platform, sdk,
+python-runtime-build, publish-r2-release, rust-release-windows,
+rust-release-argument-comment-lint) can never run on their own because their
+only caller, `blocking-ci`, is disabled.
+
 Disable list (Actions → select workflow → “···” → “Disable workflow”):
 
-- `blocking-ci` — covers the whole heavy upstream CI tree
-- `v8-canary` — upstream V8 canary
-- `CLA Assistant` — upstream contributor-agreement bot
-- Anything else that appears later because its trigger fired (for example
-  issue bots once issues are opened), except the keep list below.
+- `blocking-ci`, `v8-canary`, `CLA Assistant`
+- `postmerge-ci`, `rust-ci-full` — push-triggered heavy CI
+- `rust-release`, `rust-release-zsh`, `rusty-v8-release`,
+  `python-sdk-release` — tag/push-triggered upstream release pipelines
+  (replaced by `fork-release`)
+- `rust-release-prepare`, `Close stale contributor PRs` — scheduled
+- `Issue Deduplicator`, `Issue Labeler`, `Issue Translator` — need upstream
+  bot secrets; fail on every issue event
 
 Keep enabled: `fork-ci`, `upstream-sync-check` (appears after it exists on
 the default branch), and the tag-triggered `rust-release*` workflows (they
