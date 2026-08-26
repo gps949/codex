@@ -72,6 +72,7 @@ impl Session {
             && matches!(&item, ResponseItem::Message { role, .. } if role == "developer"))
         .then_some(CodexHarnessMetadata {
             client_authored: true,
+            ..CodexHarnessMetadata::default()
         });
 
         ResponseItemEnvelope { item, metadata }

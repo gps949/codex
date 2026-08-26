@@ -1,0 +1,81 @@
+# Fork maintenance: the checks that actually gate this fork's changes.
+#
+# The inherited upstream workflows (bazel, rust-ci, sdk, blocking-ci) depend on
+# self-hosted runner groups, paid larger macOS runners, and BuildBuddy secrets
+# that only exist in openai/codex, so they can never pass on a personal fork.
+# Disable them in the Actions UI and treat this workflow as the fork's gate.
+name: fork-ci
+
+on:
+  pull_request: {}
+  push:
+    branches:
+      - feature/native-multi-account
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    # Cold-cache builds of the clippy + test tree can exceed an hour on the
+    # 4-core free runner; warm runs settle far below this.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+
+      # Text checks run before the Rust cache restores codex-rs/target, so
+      # codespell never scans restored build artifacts.
+      - name: Spelling (codespell)
+        run: pipx run codespell --config .codespellrc --ignore-words .codespellignore
+
+      - name: Formatting (rustfmt)
+        working-directory: codex-rs
+        run: cargo fmt --all -- --check
+
+      - name: Prettier on fork-owned files
+        run: npx --yes prettier@3.5.3 --check FORK_MAINTENANCE.md .github/workflows/fork-ci.yml .github/workflows/fork-release.yml .github/workflows/upstream-sync-check.yml
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+
+      - name: Install system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-shear@1.11.2
+
+      - name: Unused dependencies (cargo shear)
+        working-directory: codex-rs
+        run: cargo shear
+
+      - name: Clippy on fork-touched crates
+        working-directory: codex-rs
+        run: cargo clippy --tests -p codex-login -p codex-config -p codex-history -p codex-core -p codex-cli -p codex-tui -p codex-app-server -p codex-app-server-protocol -- -D warnings
+
+      - name: Build test helper binaries
+        working-directory: codex-rs
+        # The codex-core integration fixture requires the Linux sandbox binary,
+        # which a package-scoped nextest build does not produce on its own.
+        run: cargo build -p codex-linux-sandbox --bin codex-linux-sandbox
+
+      - name: Multi-account tests
+        working-directory: codex-rs
+        env:
+          RUST_MIN_STACK: "8388608"
+          NEXTEST_PROFILE: default
+        run: |
+          cargo nextest run --no-fail-fast -p codex-login -p codex-config -p codex-history -p codex-app-server-protocol
+          cargo nextest run --no-fail-fast -p codex-core -E 'test(account_failover) or test(failover) or test(account_transition) or test(preemptive)'

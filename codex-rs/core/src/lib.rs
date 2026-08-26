@@ -5,15 +5,25 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod account_transition;
 mod apply_patch;
 mod apps;
 mod client;
 mod client_common;
+mod execution_account_pool;
+mod execution_auth;
+mod execution_provenance;
+mod failover;
+mod failover_checkpoint;
+mod failover_turn;
+mod portable_compaction;
 mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;
+mod reset_credit_rescue;
 mod responses_metadata;
 mod responses_retry;
+mod sampling_attempt;
 pub(crate) mod session;
 pub use codex_protocol::turn_input::NotSubmittedReason;
 pub use codex_protocol::turn_input::RecoverTurnRequest;
@@ -201,6 +211,8 @@ pub use exec_policy::ExecPolicyError;
 pub use exec_policy::check_execpolicy_for_warnings;
 pub use exec_policy::format_exec_policy_error_with_source;
 pub use exec_policy::load_exec_policy;
+pub use execution_account_pool::ExecutionAccountIdentity;
+pub use execution_account_pool::ExecutionAccountPoolHandle;
 pub use installation_id::resolve_installation_id;
 pub mod compact;
 mod memory_usage;

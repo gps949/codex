@@ -478,24 +478,56 @@ async fn start_app_server(
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppServerClient> {
     match target {
-        AppServerTarget::Embedded => start_embedded_app_server(
-            arg0_paths,
-            config,
-            cli_kv_overrides,
-            loader_overrides,
-            strict_config,
-            cloud_config_bundle,
-            feedback,
-            log_db,
-            state_db,
-            environment_manager,
-        )
-        .await
-        .map(AppServerClient::InProcess),
-        AppServerTarget::LocalDaemon { endpoint } | AppServerTarget::Remote { endpoint } => {
-            connect_remote_app_server(endpoint.clone()).await
+        AppServerTarget::Remote { endpoint } => {
+            return connect_remote_app_server(endpoint.clone()).await;
         }
+        AppServerTarget::LocalDaemon { endpoint } => {
+            // The implicit local daemon is only reused when it runs the same version as this
+            // binary. A daemon left behind by the official build (or another fork build) does
+            // not know this fork's API surface, so silently reusing it breaks features like
+            // the account pool. Mismatches fall back to an embedded app server; the foreign
+            // daemon itself is left running for whichever tool owns it.
+            match connect_remote_app_server(endpoint.clone()).await {
+                Ok(client) => {
+                    let client_version = env!("CARGO_PKG_VERSION");
+                    let server_version = match &client {
+                        AppServerClient::Remote(remote) => remote.server_version(),
+                        AppServerClient::InProcess(_) => Some(client_version),
+                    };
+                    if server_version == Some(client_version) {
+                        return Ok(client);
+                    }
+                    tracing::info!(
+                        ?server_version,
+                        client_version,
+                        "local app-server daemon runs a different version; using an embedded app server"
+                    );
+                }
+                Err(err) => {
+                    tracing::info!(
+                        %err,
+                        "failed to connect to the local app-server daemon; using an embedded app server"
+                    );
+                }
+            }
+        }
+        AppServerTarget::Embedded => {}
     }
+
+    start_embedded_app_server(
+        arg0_paths,
+        config,
+        cli_kv_overrides,
+        loader_overrides,
+        strict_config,
+        cloud_config_bundle,
+        feedback,
+        log_db,
+        state_db,
+        environment_manager,
+    )
+    .await
+    .map(AppServerClient::InProcess)
 }
 
 pub(crate) async fn start_app_server_for_picker(

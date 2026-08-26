@@ -17,7 +17,13 @@ pub(crate) fn is_source_build_version(version: &str) -> bool {
 }
 
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let mut iter = v.trim().split('.');
+    // Fork: releases are tagged `rust-vX.Y.Z-ma.N` and stamped `X.Y.Z+ma.N`, so
+    // comparisons use the upstream-base core and ignore the fork suffix.
+    let core = v.trim();
+    let core = core
+        .find(['-', '+'])
+        .map_or(core, |suffix_start| &core[..suffix_start]);
+    let mut iter = core.split('.');
     let maj = iter.next()?.parse::<u64>().ok()?;
     let min = iter.next()?.parse::<u64>().ok()?;
     let pat = iter.next()?.parse::<u64>().ok()?;
@@ -43,9 +49,13 @@ mod tests {
     }
 
     #[test]
-    fn prerelease_version_is_not_considered_newer() {
-        assert_eq!(is_newer("0.11.0-beta.1", "0.11.0"), None);
-        assert_eq!(is_newer("1.0.0-rc.1", "1.0.0"), None);
+    fn suffixed_versions_compare_on_the_upstream_base() {
+        // Fork builds are stamped `X.Y.Z+ma.N` and tagged `rust-vX.Y.Z-ma.N`;
+        // both must compare by the upstream base version.
+        assert_eq!(is_newer("0.150.0-ma.1", "0.149.1+ma.2"), Some(true));
+        assert_eq!(is_newer("0.149.1-ma.2", "0.149.1+ma.1"), Some(false));
+        assert_eq!(is_newer("0.11.0-beta.1", "0.11.0"), Some(false));
+        assert_eq!(is_newer("1.0.0-rc.1", "1.0.0"), Some(false));
     }
 
     #[test]

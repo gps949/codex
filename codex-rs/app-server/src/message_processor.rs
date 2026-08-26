@@ -1518,6 +1518,12 @@ impl MessageProcessor {
             ClientRequest::GetAuthStatus { params, .. } => {
                 self.account_processor.get_auth_status(params).await
             }
+            ClientRequest::AccountPoolRead { .. } => {
+                self.account_processor.get_account_pool().await
+            }
+            ClientRequest::AccountPoolUse { params, .. } => {
+                self.account_processor.use_account_pool(params).await
+            }
             ClientRequest::GetAccountRateLimits { .. } => {
                 self.account_processor.get_account_rate_limits().await
             }

@@ -6,6 +6,7 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use crate::HooksToml;
+use crate::account_pool::AccountPoolConfigToml;
 use crate::permissions_toml::PermissionsToml;
 use crate::profile_toml::ConfigProfile;
 use crate::types::AnalyticsConfigToml;
@@ -181,6 +182,10 @@ pub struct ConfigToml {
     /// Optional policy instructions for the guardian auto-reviewer.
     #[serde(default)]
     pub auto_review: Option<AutoReviewToml>,
+
+    /// Scheduling knobs for the native multi-account execution pool.
+    #[serde(default)]
+    pub account_pool: Option<AccountPoolConfigToml>,
 
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,

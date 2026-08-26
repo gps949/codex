@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Select Codex account
+
+  1. Automatic                           Fill-first scheduling: prefer the
+                                         lowest-priority eligible account
+› 2. primary-acct (Team plan) (current)  priority 0 · available · 42% of 5h
+                                         window used
+  3. backup-acct (backup@example.com)    priority 10 · cooling down
+
+  Press enter to confirm or esc to go back

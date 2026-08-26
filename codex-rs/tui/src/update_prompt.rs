@@ -26,7 +26,8 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
 use tokio_stream::StreamExt;
 
-const RELEASE_NOTES_URL: &str = "https://github.com/openai/codex/releases/latest";
+// Fork: release notes live on this fork's releases page.
+const RELEASE_NOTES_URL: &str = "https://github.com/gps949/codex/releases/latest";
 
 pub(crate) enum UpdatePromptOutcome {
     Continue,

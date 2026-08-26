@@ -479,6 +479,9 @@ impl ChatWidget {
                     self.open_usage_menu();
                 }
             }
+            SlashCommand::Account => {
+                self.app_event_tx.send(AppEvent::RefreshAccountPool);
+            }
             SlashCommand::Ide => {
                 self.handle_ide_command();
             }
@@ -1124,6 +1127,7 @@ impl ChatWidget {
             | SlashCommand::Status
             | SlashCommand::Pwd
             | SlashCommand::Usage
+            | SlashCommand::Account
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop

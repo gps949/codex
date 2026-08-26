@@ -1134,6 +1134,31 @@ impl App {
             AppEvent::RefreshRateLimits { origin } => {
                 self.refresh_rate_limits(app_server, origin);
             }
+            AppEvent::RefreshAccountPool => {
+                self.refresh_account_pool(app_server);
+            }
+            AppEvent::AccountPoolLoaded { result } => {
+                self.chat_widget.open_account_pool_picker(result);
+            }
+            AppEvent::ActivateAccountPoolProfile { profile_id } => {
+                self.activate_account_pool_profile(app_server, profile_id);
+            }
+            AppEvent::AccountPoolActivated { result } => {
+                let switched = result.is_ok();
+                self.chat_widget.on_account_pool_activated(result);
+                // The status surfaces still show the previous account's rate limits
+                // until the next turn; refresh them for the newly active account now.
+                if switched {
+                    let reset_hint_request_id =
+                        self.chat_widget.start_rate_limit_reset_startup_check();
+                    self.refresh_rate_limits(
+                        app_server,
+                        RateLimitRefreshOrigin::StartupPrefetch {
+                            reset_hint_request_id,
+                        },
+                    );
+                }
+            }
             AppEvent::RefreshTokenActivity { request_id } => {
                 self.refresh_token_activity(app_server, request_id);
             }

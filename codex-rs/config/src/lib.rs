@@ -1,3 +1,4 @@
+mod account_pool;
 mod auth_policy;
 mod cloud_config_bundle;
 mod cloud_config_layers;
@@ -35,6 +36,8 @@ pub mod types;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
+pub use account_pool::AccountPoolConfigToml;
+pub use account_pool::AutoResetCredits;
 pub use auth_policy::ManagedAuthPolicy;
 pub use cloud_config_bundle::CloudConfigBundle;
 pub use cloud_config_bundle::CloudConfigBundleLayers;

@@ -121,6 +121,7 @@ fn image_treatment_preserves_client_developer_boundary_behavior() {
         item,
         metadata: Some(CodexHarnessMetadata {
             client_authored: true,
+            ..CodexHarnessMetadata::default()
         }),
     };
     for max_tokens in [1871, 1879, 1880, 1950, 2200] {
