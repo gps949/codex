@@ -306,10 +306,13 @@ enum ConnectionEndReason {
     Disabled,
     EnabledWatchClosed,
     ConnectionWorkerStopped,
-    /// The active ChatGPT account changed (for example a multi-account pool rotation) while this
+    /// The ChatGPT account on the AuthManager given to remote control changed while this
     /// connection was still enrolled under the previous account. Ending the connection lets the
-    /// normal reconnect path re-enroll under the new account immediately instead of serving remote
-    /// clients from a stale identity until the relay drops the socket.
+    /// normal reconnect path re-enroll under the new root identity immediately instead of serving
+    /// remote clients from a stale identity until the relay drops the socket.
+    ///
+    /// Multi-account pool rotations do not trigger this: app-server pins remote control to a
+    /// root-only AuthManager that never receives `AccountPoolExternalAuth`.
     AccountChanged,
 }
 
@@ -891,10 +894,11 @@ impl RemoteControlWebsocket {
         connection_end_reason
     }
 
-    /// Resolves only when the active auth identity moves to a different ChatGPT account than the
-    /// one this connection enrolled under. Routine token refreshes on the same account and
-    /// transient auth-load failures keep the connection untouched; the existing 401 handling
-    /// covers genuinely broken credentials.
+    /// Resolves only when the AuthManager given to remote control moves to a different ChatGPT
+    /// account than the one this connection enrolled under. Routine token refreshes on the same
+    /// account and transient auth-load failures keep the connection untouched; the existing 401
+    /// handling covers genuinely broken credentials. Pool rotations do not surface here because
+    /// remote control is wired to a root-pinned AuthManager.
     async fn wait_for_enrolled_account_change(
         auth_change_rx: &mut watch::Receiver<u64>,
         auth_manager: &Arc<AuthManager>,
@@ -912,7 +916,7 @@ impl RemoteControlWebsocket {
                     info!(
                         previous_account_id = %enrolled_account_id,
                         current_account_id = %auth.account_id,
-                        "ending remote control connection to re-enroll under the new active account"
+                        "ending remote control connection to re-enroll under the new root account"
                     );
                     return ConnectionEndReason::AccountChanged;
                 }
