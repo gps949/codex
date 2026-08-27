@@ -104,6 +104,8 @@ fi
 # --- Stale managed app-server daemon: an old daemon does not know this
 # build's API. Stop it if it is daemon-managed; foreign app-servers (owned by
 # other tools) are left alone — this build refuses to reuse mismatched ones.
+# Also stop the official packages/standalone hourly updater if it is running;
+# that loop would reinstall upstream Codex and steal the control socket.
 daemon_output="$("$INSTALL_DIR/codex" app-server daemon stop 2>&1 || true)"
 case "$daemon_output" in
   *"not managed"*)
@@ -111,9 +113,17 @@ case "$daemon_output" in
     ;;
   *stopped* | *Stopped*)
     say "Stopped a previously running managed app-server daemon."
-    say "If you use mobile remote control, start it again with: codex app-server daemon start"
+    say "If you use mobile remote control, start it again with: codex remote-control start"
     ;;
 esac
+updater_pid_file="${CODEX_HOME:-$HOME/.codex}/app-server-daemon/app-server-updater.pid"
+if [ -f "$updater_pid_file" ]; then
+  updater_pid="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$updater_pid_file" | head -n 1)"
+  if [ -n "${updater_pid:-}" ] && kill -0 "$updater_pid" 2>/dev/null; then
+    kill "$updater_pid" 2>/dev/null || true
+    say "Stopped the official standalone app-server updater (pid $updater_pid)."
+  fi
+fi
 
 say ""
 "$INSTALL_DIR/codex" --version

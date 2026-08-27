@@ -18,7 +18,8 @@ use codex_app_server_protocol::RemoteControlConnectionStatus;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_transport::app_server_control_socket_path;
 use codex_utils_home_dir::find_codex_home;
-use managed_install::managed_codex_bin;
+use managed_install::app_server_version_matches_cli;
+use managed_install::daemon_codex_bin;
 #[cfg(unix)]
 use managed_install::managed_codex_version;
 use serde::Serialize;
@@ -272,7 +273,9 @@ impl Daemon {
             update_pid_file: state_dir.join(UPDATE_PID_FILE_NAME),
             operation_lock_file: state_dir.join(OPERATION_LOCK_FILE_NAME),
             settings_file: state_dir.join(SETTINGS_FILE_NAME),
-            managed_codex_bin: managed_codex_bin(codex_home.as_path()),
+            // Prefer the invoking CLI so this fork never spawns the official
+            // packages/standalone install that Codex desktop keeps updating.
+            managed_codex_bin: daemon_codex_bin(codex_home.as_path()),
         })
     }
 
@@ -296,30 +299,50 @@ impl Daemon {
 
     async fn start(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
+        self.stop_updater_best_effort(&settings).await;
+
         if let Ok(info) = client::probe(&self.socket_path).await {
-            return Ok(self
-                .output(
-                    LifecycleStatus::AlreadyRunning,
-                    self.running_backend(&settings).await?,
-                    /*pid*/ None,
-                    Some(info.app_server_version),
+            if app_server_version_matches_cli(&info.app_server_version) {
+                return Ok(self
+                    .output(
+                        LifecycleStatus::AlreadyRunning,
+                        self.running_backend(&settings).await?,
+                        /*pid*/ None,
+                        Some(info.app_server_version),
+                    )
+                    .await);
+            }
+            return self
+                .replace_running_app_server(
+                    &settings,
+                    &info.app_server_version,
+                    /*status_if_started*/ LifecycleStatus::Restarted,
                 )
-                .await);
+                .await;
         }
 
         if self.running_backend_instance(&settings).await?.is_some() {
             let info = self.wait_until_ready().await?;
-            return Ok(self
-                .output(
-                    LifecycleStatus::AlreadyRunning,
-                    Some(BackendKind::Pid),
-                    /*pid*/ None,
-                    Some(info.app_server_version),
+            if app_server_version_matches_cli(&info.app_server_version) {
+                return Ok(self
+                    .output(
+                        LifecycleStatus::AlreadyRunning,
+                        Some(BackendKind::Pid),
+                        /*pid*/ None,
+                        Some(info.app_server_version),
+                    )
+                    .await);
+            }
+            return self
+                .replace_running_app_server(
+                    &settings,
+                    &info.app_server_version,
+                    /*status_if_started*/ LifecycleStatus::Restarted,
                 )
-                .await);
+                .await;
         }
 
-        self.ensure_managed_codex_bin()?;
+        self.ensure_daemon_codex_bin()?;
         let pid = self.start_managed_backend(&settings).await?;
         let info = self.wait_until_ready().await?;
         Ok(self
@@ -334,6 +357,7 @@ impl Daemon {
 
     async fn restart(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
+        self.stop_updater_best_effort(&settings).await;
         if client::probe(&self.socket_path).await.is_ok()
             && self.running_backend(&settings).await?.is_none()
         {
@@ -342,7 +366,7 @@ impl Daemon {
             ));
         }
 
-        self.ensure_managed_codex_bin()?;
+        self.ensure_daemon_codex_bin()?;
         if let Some(backend) = self.running_backend_instance(&settings).await? {
             backend.stop().await?;
         }
@@ -494,20 +518,14 @@ impl Daemon {
     async fn ensure_remote_control_started(&self) -> Result<RemoteControlStartOutput> {
         let _operation_lock = self.acquire_operation_lock().await?;
         let settings = self.load_settings().await?;
-        if self.is_bootstrapped(&settings).await? {
-            let _ = self
-                .set_remote_control_locked(RemoteControlMode::Enabled)
-                .await?;
-            let output = self.start().await?;
-            return Ok(RemoteControlStartOutput::Start(output));
-        }
-
-        let output = self
-            .bootstrap_locked(BootstrapOptions {
-                remote_control_enabled: true,
-            })
+        // Never keep the official standalone updater alive: it reinstalls
+        // chatgpt.com's binary into packages/standalone and steals the daemon.
+        self.stop_updater_best_effort(&settings).await;
+        let _ = self
+            .set_remote_control_locked(RemoteControlMode::Enabled)
             .await?;
-        Ok(RemoteControlStartOutput::Bootstrap(output))
+        let output = self.start().await?;
+        Ok(RemoteControlStartOutput::Start(output))
     }
 
     async fn ensure_remote_control_ready(&self) -> Result<RemoteControlReadyOutput> {
@@ -568,7 +586,7 @@ impl Daemon {
         settings.save(&self.settings_file).await?;
 
         let app_server_version = if let Some(backend) = backend {
-            self.ensure_managed_codex_bin()?;
+            self.ensure_daemon_codex_bin()?;
             backend.stop().await?;
             let _ = self.start_managed_backend(&settings).await?;
             Some(self.wait_until_ready().await?.app_server_version)
@@ -585,7 +603,7 @@ impl Daemon {
     }
 
     async fn bootstrap_locked(&self, options: BootstrapOptions) -> Result<BootstrapOutput> {
-        self.ensure_managed_codex_bin()?;
+        self.ensure_daemon_codex_bin()?;
 
         let settings = DaemonSettings {
             remote_control_enabled: options.remote_control_enabled,
@@ -602,21 +620,19 @@ impl Daemon {
         if let Some(backend) = self.running_backend_instance(&settings).await? {
             backend.stop().await?;
         }
+        // Fork builds never start the official chatgpt.com install.sh updater.
+        // It would overwrite packages/standalone and steal this daemon back.
+        self.stop_updater_best_effort(&settings).await;
 
         let backend = backend::pid_backend(self.backend_paths(&settings));
         backend.start().await?;
-        let updater = backend::pid_update_loop_backend(self.backend_paths(&settings));
-        if updater.is_starting_or_running().await? {
-            updater.stop().await?;
-        }
-        updater.start().await?;
 
         let info = self.wait_until_ready().await?;
         let managed_codex_version = self.managed_codex_version_best_effort().await;
         Ok(BootstrapOutput {
             status: BootstrapStatus::Bootstrapped,
             backend: BackendKind::Pid,
-            auto_update_enabled: true,
+            auto_update_enabled: false,
             remote_control_enabled: settings.remote_control_enabled,
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
@@ -659,23 +675,55 @@ impl Daemon {
         backend.start().await
     }
 
-    async fn is_bootstrapped(&self, settings: &DaemonSettings) -> Result<bool> {
-        let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
-        updater.is_starting_or_running().await
+    /// Stops a version-mismatched app-server and starts this CLI's binary instead.
+    async fn replace_running_app_server(
+        &self,
+        settings: &DaemonSettings,
+        running_version: &str,
+        status_if_started: LifecycleStatus,
+    ) -> Result<LifecycleOutput> {
+        self.ensure_daemon_codex_bin()?;
+        if let Some(backend) = self.running_backend_instance(settings).await? {
+            backend.stop().await?;
+        } else if client::probe(&self.socket_path).await.is_ok() {
+            return Err(anyhow!(
+                "local app-server is running version {running_version} (this CLI is {}), \
+                 but it is not managed by this daemon.\n\n\
+                 Stop the foreign app-server first (Codex desktop remote-control / another tool), \
+                 then retry:\n  codex app-server daemon stop\n  codex remote-control start",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+
+        let pid = self.start_managed_backend(settings).await?;
+        let info = self.wait_until_ready().await?;
+        Ok(self
+            .output(
+                status_if_started,
+                Some(BackendKind::Pid),
+                pid,
+                Some(info.app_server_version),
+            )
+            .await)
     }
 
-    fn ensure_managed_codex_bin(&self) -> Result<()> {
+    async fn stop_updater_best_effort(&self, settings: &DaemonSettings) {
+        let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
+        if let Ok(true) = updater.is_starting_or_running().await {
+            let _ = updater.stop().await;
+        }
+    }
+
+    fn ensure_daemon_codex_bin(&self) -> Result<()> {
         if self.managed_codex_bin.is_file() {
             return Ok(());
         }
 
         let managed_codex_path = self.managed_codex_bin.display();
         Err(anyhow!(
-            "managed standalone Codex install not found at {managed_codex_path}\n\n\
-             This command requires the standalone install managed by the Codex installer, because \
-             the daemon starts and updates app-server from that fixed path.\n\n\
-             Install it with:\n  curl -fsSL https://chatgpt.com/codex/install.sh | sh\n\n\
-             Then rerun the command you just tried."
+            "Codex binary for the app-server daemon was not found at {managed_codex_path}\n\n\
+             This fork starts app-server from the invoking CLI binary. Reinstall the fork:\n  \
+             curl -fsSL https://raw.githubusercontent.com/gps949/codex/feature/native-multi-account/install.sh | bash"
         ))
     }
 

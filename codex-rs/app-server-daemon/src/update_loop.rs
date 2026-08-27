@@ -48,35 +48,32 @@ use crate::managed_install::executable_identity;
 use crate::managed_install::resolved_managed_codex_bin;
 
 #[cfg(unix)]
+#[allow(dead_code)]
 const INITIAL_UPDATE_DELAY: Duration = Duration::from_secs(5 * 60);
 #[cfg(unix)]
+#[allow(dead_code)]
 const RESTART_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(unix)]
+#[allow(dead_code)]
 const UPDATE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const INSTALL_URL: &str = "https://chatgpt.com/codex/install.sh";
 
 #[cfg(unix)]
-pub(crate) async fn run(http_client_factory: HttpClientFactory) -> Result<()> {
-    let mut terminate =
-        signal(SignalKind::terminate()).context("failed to install updater shutdown handler")?;
-    let running_updater_identity = current_updater_identity().await?;
-    let http = RouteAwareClientPool::new_without_request_logging(
-        http_client_factory,
+pub(crate) async fn run(_http_client_factory: HttpClientFactory) -> Result<()> {
+    // This multi-account fork intentionally does not run the official
+    // chatgpt.com/codex/install.sh updater. That loop would overwrite
+    // packages/standalone with the upstream binary and steal the shared
+    // app-server daemon. Update via the fork installer instead.
+    let _ = (
+        INITIAL_UPDATE_DELAY,
+        UPDATE_INTERVAL,
+        INSTALL_URL,
         ClientRouteClass::Other,
+        signal,
+        SignalKind::terminate(),
     );
-    if sleep_or_terminate(INITIAL_UPDATE_DELAY, &mut terminate).await {
-        return Ok(());
-    }
-    loop {
-        match update_once(&http, &running_updater_identity, &mut terminate).await {
-            Ok(UpdateLoopControl::Continue) | Err(_) => {}
-            Ok(UpdateLoopControl::Stop) => return Ok(()),
-        }
-        if sleep_or_terminate(UPDATE_INTERVAL, &mut terminate).await {
-            return Ok(());
-        }
-    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -85,6 +82,7 @@ pub(crate) async fn run(_http_client_factory: HttpClientFactory) -> Result<()> {
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 async fn sleep_or_terminate(duration: Duration, terminate: &mut Signal) -> bool {
     tokio::select! {
         _ = sleep(duration) => false,
@@ -93,12 +91,14 @@ async fn sleep_or_terminate(duration: Duration, terminate: &mut Signal) -> bool 
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 enum UpdateLoopControl {
     Continue,
     Stop,
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 async fn update_once(
     http: &RouteAwareClientPool,
     running_updater_identity: &ExecutableIdentity,
@@ -131,6 +131,7 @@ async fn update_once(
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 async fn current_updater_identity() -> Result<ExecutableIdentity> {
     let current_exe =
         std::env::current_exe().context("failed to resolve current updater executable")?;
@@ -153,6 +154,7 @@ fn update_modes_for_identities(
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 pub(crate) fn reexec_managed_updater(managed_codex_bin: &std::path::Path) -> Result<()> {
     let err = StdCommand::new(managed_codex_bin)
         .args(["app-server", "daemon", "pid-update-loop"])
@@ -166,6 +168,7 @@ pub(crate) fn reexec_managed_updater(managed_codex_bin: &std::path::Path) -> Res
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 async fn install_latest_standalone(http: &RouteAwareClientPool) -> Result<()> {
     let script = fetch_installer_script(http).await?;
 

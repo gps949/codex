@@ -149,8 +149,8 @@ Verified safe by design — no user action needed:
 | Sessions/rollouts              | Official builds ignore the fork's provenance metadata; items they write are genuinely root-account items, so pool attribution stays correct |
 | Sibling helper binaries        | Each installation resolves helpers next to its own executable                                                                               |
 | Self-update                    | The fork checks its own releases; npm/brew updates of the official build never touch the fork's install dir                                 |
-| Daemon socket                  | The fork only reuses a daemon whose version matches; the installer stops stale managed daemons                                              |
-| Remote control                 | Enrollment uses a root-only AuthManager; pool rotation never re-pairs the remote identity                                                   |
+| Daemon socket                  | The fork only reuses a daemon whose version matches; mismatch replaces the managed daemon with this CLI                                     |
+| Remote control                 | Enrollment uses a root-only AuthManager; pool rotation never re-pairs the remote identity; daemon spawns this CLI, not packages/standalone  |
 
 Remaining edge cases (documented, not auto-fixable):
 
@@ -167,6 +167,14 @@ Remaining edge cases (documented, not auto-fixable):
   left behind by the official binary (or an older fork build) does not know
   the `accountPool/*` methods, so `/account` fails with "accountPool/read
   failed". Run `codex app-server daemon stop` (fork binary) and relaunch.
+- **Remote-control / app-server daemon uses this CLI, not `packages/standalone`**:
+  official Codex desktop / `chatgpt.com/codex/install.sh` keep a managed install
+  under `~/.codex/packages/standalone/current`. This fork's
+  `codex remote-control start` and `codex app-server daemon *` spawn
+  **the invoking CLI binary** instead, refuse the official hourly updater, and
+  replace a running daemon when its version does not match this CLI. Do not run
+  official `app-server daemon bootstrap` beside the fork; it would fight for the
+  same control socket.
 - **Self-update is intentionally disabled** in this fork: `codex update` and
   the TUI upgrade prompt would otherwise reinstall the official binary over
   the fork. Update checks point at this fork's releases; `codex update` prints

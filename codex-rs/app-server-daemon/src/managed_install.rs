@@ -24,6 +24,24 @@ pub(crate) fn managed_codex_bin(codex_home: &Path) -> PathBuf {
         .join(managed_codex_file_name())
 }
 
+/// Binary the app-server daemon should spawn for lifecycle / remote-control.
+///
+/// Prefer the invoking CLI (`current_exe`) so a multi-account fork never silently
+/// starts the official `packages/standalone` install that Codex desktop / the
+/// official installer may keep updating beside it. Fall back to the standalone
+/// path only when `current_exe` is unavailable (for example some test harnesses).
+pub(crate) fn daemon_codex_bin(codex_home: &Path) -> PathBuf {
+    match std::env::current_exe() {
+        Ok(current_exe) if current_exe.is_file() => current_exe,
+        _ => managed_codex_bin(codex_home),
+    }
+}
+
+/// Whether a probed app-server version is the same build as this CLI.
+pub(crate) fn app_server_version_matches_cli(app_server_version: &str) -> bool {
+    app_server_version == env!("CARGO_PKG_VERSION")
+}
+
 #[cfg(unix)]
 pub(crate) async fn resolved_managed_codex_bin(codex_bin: &Path) -> Result<PathBuf> {
     fs::canonicalize(codex_bin).await.with_context(|| {
