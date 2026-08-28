@@ -500,6 +500,31 @@ impl ModelClient {
         }
     }
 
+    /// Creates a session that must not reuse a websocket from a previous execution identity.
+    ///
+    /// Native account-pool rotation changes the AuthManager identity underneath an existing
+    /// `ModelClient`. A cached Responses websocket is still authenticated as the previous
+    /// account; reusing it after a switch marks the *new* profile exhausted with the *old*
+    /// account's usage-limit reset timestamp.
+    pub fn new_session_for_execution_identity_change(&self) -> ModelClientSession {
+        self.store_cached_websocket_session(WebsocketSession::default());
+        ModelClientSession {
+            client: self.clone(),
+            websocket_session: WebsocketSession::default(),
+            turn_state: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Replaces `session` after the pool selected a different execution account.
+    ///
+    /// Clears the current session's websocket before drop so Drop cannot re-cache a connection
+    /// bound to the previous account for the next `new_session()` call.
+    pub fn replace_session_for_execution_identity_change(&self, session: &mut ModelClientSession) {
+        session.reset_websocket_session();
+        self.store_cached_websocket_session(WebsocketSession::default());
+        *session = self.new_session_for_execution_identity_change();
+    }
+
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.state.provider.auth_manager()
     }

@@ -1,4 +1,5 @@
 pub mod account_external_auth;
+pub mod account_identity;
 pub mod account_login;
 pub mod account_pool;
 pub mod account_runtime;
@@ -17,7 +18,10 @@ mod server;
 mod success_page;
 
 pub use account_external_auth::AccountPoolExternalAuth;
+pub use account_identity::AccountLoginIdentity;
 pub use account_login::AccountLoginFlowError;
+pub use account_login::AccountLoginOutcome;
+pub use account_login::AccountLoginOutcomeKind;
 pub use account_login::PendingAccountBrowserLogin;
 pub use account_login::PendingAccountDeviceLogin;
 pub use account_login::begin_account_browser_login;

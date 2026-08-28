@@ -1,4 +1,8 @@
+use chrono::DateTime;
+use chrono::Utc;
+use codex_login::AccountAvailability;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::UsageLimitReachedError;
 
 use crate::execution_auth::ExecutionAuth;
 use crate::execution_auth::ExecutionAuthLease;
@@ -114,21 +118,25 @@ pub(crate) fn account_switch_message(
     ))
 }
 
-/// Builds the user-facing message shown when every configured account is unavailable.
-pub(crate) fn pool_exhausted_message(execution_auth: &ExecutionAuth) -> String {
-    let earliest_reset = execution_auth
+/// Earliest known cooldown end across exhausted pool profiles.
+pub(crate) fn earliest_exhausted_reset(execution_auth: &ExecutionAuth) -> Option<DateTime<Utc>> {
+    execution_auth
         .account_pool()
         .map(|pool| pool.snapshots())
         .unwrap_or_default()
         .into_iter()
         .filter_map(|snapshot| match snapshot.availability {
-            codex_login::AccountAvailability::Exhausted { resets_at } => resets_at,
-            codex_login::AccountAvailability::Available
-            | codex_login::AccountAvailability::AuthenticationUnavailable { .. }
-            | codex_login::AccountAvailability::Disabled => None,
+            AccountAvailability::Exhausted { resets_at } => resets_at,
+            AccountAvailability::Available
+            | AccountAvailability::AuthenticationUnavailable { .. }
+            | AccountAvailability::Disabled => None,
         })
-        .min();
-    match earliest_reset {
+        .min()
+}
+
+/// Builds the user-facing message shown when every configured account is unavailable.
+pub(crate) fn pool_exhausted_message(execution_auth: &ExecutionAuth) -> String {
+    match earliest_exhausted_reset(execution_auth) {
         Some(resets_at) => format!(
             "All configured Codex accounts have hit their usage limits. The earliest cooldown ends at {}. If a plan has earned rate-limit reset credits, redeeming one (for example from /status in the TUI or the app) unblocks that account immediately.",
             resets_at.format("%Y-%m-%d %H:%M UTC")
@@ -137,15 +145,20 @@ pub(crate) fn pool_exhausted_message(execution_auth: &ExecutionAuth) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn non_account_failure_directive_is_stable() {
-        assert!(matches!(
-            SamplingFailoverDirective::NotHandled,
-            SamplingFailoverDirective::NotHandled
-        ));
-    }
+/// Error returned when a new sampling request cannot obtain any pool lease.
+///
+/// Must be [`CodexErr::UsageLimitReached`] (not UnsupportedOperation) so clients map it to
+/// `UsageLimitExceeded` and can show the normal cooldown UI instead of a hard BadRequest.
+pub(crate) fn pool_unavailable_error(execution_auth: &ExecutionAuth) -> CodexErr {
+    CodexErr::UsageLimitReached(UsageLimitReachedError {
+        plan_type: None,
+        resets_at: earliest_exhausted_reset(execution_auth),
+        rate_limits: None,
+        promo_message: None,
+        rate_limit_reached_type: None,
+    })
 }
+
+#[cfg(test)]
+#[path = "failover_turn_tests.rs"]
+mod tests;

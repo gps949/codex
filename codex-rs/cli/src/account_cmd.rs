@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use codex_core::config::Config;
+use codex_login::AccountLoginOutcomeKind;
 use codex_login::AccountProfileId;
 use codex_login::AccountProfileState;
 use codex_login::AccountProfileStore;
@@ -87,24 +88,39 @@ pub(crate) async fn run_account_add(
     };
 
     match result {
-        Ok(profile) => {
-            eprintln!(
-                "Added Codex account {}{} with priority {}.",
-                profile.id,
-                profile
-                    .label
-                    .as_deref()
-                    .map(|label| format!(" ({label})"))
-                    .unwrap_or_default(),
-                profile.priority
-            );
-            std::process::exit(0);
-        }
+        Ok(outcome) => match outcome.kind {
+            AccountLoginOutcomeKind::Added => {
+                eprintln!(
+                    "Added Codex account {}{} with priority {}.",
+                    outcome.profile.id,
+                    outcome
+                        .profile
+                        .label
+                        .as_deref()
+                        .map(|label| format!(" ({label})"))
+                        .unwrap_or_default(),
+                    outcome.profile.priority
+                );
+            }
+            AccountLoginOutcomeKind::RefreshedExistingDuplicate => {
+                eprintln!(
+                    "This ChatGPT user is already configured as {}{}. Refreshed that profile's login instead of creating a duplicate.",
+                    outcome.profile.id,
+                    outcome
+                        .profile
+                        .label
+                        .as_deref()
+                        .map(|label| format!(" ({label})"))
+                        .unwrap_or_default(),
+                );
+            }
+        },
         Err(error) => {
             eprintln!("Error adding Codex account: {error}");
             std::process::exit(1);
         }
     }
+    std::process::exit(0);
 }
 
 pub(crate) async fn run_account_relogin(
@@ -157,8 +173,8 @@ pub(crate) async fn run_account_relogin(
     };
 
     match result {
-        Ok(profile) => {
-            eprintln!("Re-authenticated Codex account {}.", profile.id);
+        Ok(outcome) => {
+            eprintln!("Re-authenticated Codex account {}.", outcome.profile.id);
             std::process::exit(0);
         }
         Err(error) => {

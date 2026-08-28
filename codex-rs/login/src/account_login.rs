@@ -9,9 +9,30 @@ use crate::AccountProfileStoreError;
 use crate::DeviceCode;
 use crate::LoginServer;
 use crate::ServerOptions;
+use crate::account_identity::reconcile_duplicate_new_login;
 use crate::complete_device_code_login;
 use crate::request_device_code;
 use crate::run_login_server;
+
+/// Result of a completed account login flow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountLoginOutcome {
+    pub profile: AccountProfile,
+    pub kind: AccountLoginOutcomeKind,
+}
+
+/// Whether a login added a new profile or refreshed an existing one for the same ChatGPT user.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountLoginOutcomeKind {
+    Added,
+    RefreshedExistingDuplicate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AuthPersistenceConfig {
+    auth_credentials_store_mode: codex_config::types::AuthCredentialsStoreMode,
+    auth_keyring_backend_kind: crate::auth::AuthKeyringBackendKind,
+}
 
 /// Starts an official browser OAuth flow for a new account profile.
 ///
@@ -28,12 +49,16 @@ pub fn begin_account_browser_login(
     let profile = store.allocate_profile(label, priority)?;
     options.codex_home = profile.credential_home.clone();
 
-    match run_login_server(options) {
+    match run_login_server(options.clone()) {
         Ok(server) => Ok(PendingAccountBrowserLogin {
             store,
             profile,
             server: Some(server),
             mode: AccountLoginMode::NewProfile,
+            auth: AuthPersistenceConfig {
+                auth_credentials_store_mode: options.cli_auth_credentials_store_mode,
+                auth_keyring_backend_kind: options.auth_keyring_backend_kind,
+            },
         }),
         Err(error) => {
             abandon_after_failed_login(&store, &profile.id);
@@ -55,12 +80,16 @@ pub fn begin_account_browser_relogin(
     let profile = existing_profile(&store, profile_id)?;
     options.codex_home = profile.credential_home.clone();
 
-    let server = run_login_server(options)?;
+    let server = run_login_server(options.clone())?;
     Ok(PendingAccountBrowserLogin {
         store,
         profile,
         server: Some(server),
         mode: AccountLoginMode::Relogin,
+        auth: AuthPersistenceConfig {
+            auth_credentials_store_mode: options.cli_auth_credentials_store_mode,
+            auth_keyring_backend_kind: options.auth_keyring_backend_kind,
+        },
     })
 }
 
@@ -142,6 +171,7 @@ pub struct PendingAccountBrowserLogin {
     profile: AccountProfile,
     server: Option<LoginServer>,
     mode: AccountLoginMode,
+    auth: AuthPersistenceConfig,
 }
 
 impl PendingAccountBrowserLogin {
@@ -162,16 +192,13 @@ impl PendingAccountBrowserLogin {
     /// If OAuth fails, the still-pending profile is removed. If OAuth succeeds but manifest
     /// promotion fails, the credential directory is deliberately preserved in `pending_login`
     /// state so credentials are recoverable instead of being deleted after a successful login.
-    pub async fn complete(mut self) -> Result<AccountProfile, AccountLoginFlowError> {
+    pub async fn complete(mut self) -> Result<AccountLoginOutcome, AccountLoginFlowError> {
         let server = self
             .server
             .take()
             .ok_or(AccountLoginFlowError::FlowAlreadyConsumed)?;
         match server.block_until_done().await {
-            Ok(()) => self
-                .store
-                .complete_profile(&self.profile.id)
-                .map_err(AccountLoginFlowError::from),
+            Ok(()) => finish_successful_login(&self.store, &self.profile, self.mode, self.auth),
             Err(error) => {
                 if self.mode == AccountLoginMode::NewProfile {
                     abandon_after_failed_login(&self.store, &self.profile.id);
@@ -232,7 +259,7 @@ impl PendingAccountDeviceLogin {
             .map(|device_code| device_code.user_code.as_str())
     }
 
-    pub async fn complete(mut self) -> Result<AccountProfile, AccountLoginFlowError> {
+    pub async fn complete(mut self) -> Result<AccountLoginOutcome, AccountLoginFlowError> {
         let options = self
             .options
             .take()
@@ -241,12 +268,13 @@ impl PendingAccountDeviceLogin {
             .device_code
             .take()
             .ok_or(AccountLoginFlowError::FlowAlreadyConsumed)?;
+        let auth = AuthPersistenceConfig {
+            auth_credentials_store_mode: options.cli_auth_credentials_store_mode,
+            auth_keyring_backend_kind: options.auth_keyring_backend_kind,
+        };
 
         match complete_device_code_login(options, device_code).await {
-            Ok(()) => self
-                .store
-                .complete_profile(&self.profile.id)
-                .map_err(AccountLoginFlowError::from),
+            Ok(()) => finish_successful_login(&self.store, &self.profile, self.mode, auth),
             Err(error) => {
                 if self.mode == AccountLoginMode::NewProfile {
                     abandon_after_failed_login(&self.store, &self.profile.id);
@@ -274,6 +302,33 @@ fn abandon_after_failed_login(store: &AccountProfileStore, profile_id: &AccountP
             "failed to clean up pending account profile after login failure"
         );
     }
+}
+
+fn finish_successful_login(
+    store: &AccountProfileStore,
+    profile: &AccountProfile,
+    mode: AccountLoginMode,
+    auth: AuthPersistenceConfig,
+) -> Result<AccountLoginOutcome, AccountLoginFlowError> {
+    if mode == AccountLoginMode::NewProfile
+        && let Some(existing) = reconcile_duplicate_new_login(
+            store,
+            profile,
+            auth.auth_credentials_store_mode,
+            auth.auth_keyring_backend_kind,
+        )?
+    {
+        return Ok(AccountLoginOutcome {
+            profile: existing,
+            kind: AccountLoginOutcomeKind::RefreshedExistingDuplicate,
+        });
+    }
+
+    let profile = store.complete_profile(&profile.id)?;
+    Ok(AccountLoginOutcome {
+        profile,
+        kind: AccountLoginOutcomeKind::Added,
+    })
 }
 
 #[derive(Debug, Error)]

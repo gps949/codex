@@ -24,6 +24,7 @@ use crate::failover_turn::SamplingFailoverDirective;
 use crate::failover_turn::account_switch_message;
 use crate::failover_turn::handle_sampling_failover;
 use crate::failover_turn::pool_exhausted_message;
+use crate::failover_turn::pool_unavailable_error;
 use crate::feedback_tags;
 use crate::hook_runtime::drain_async_hook_results;
 use crate::hook_runtime::inspect_pending_input;
@@ -210,7 +211,11 @@ pub(crate) async fn run_turn(
         .await;
     }
     let mut client_session = if multi_account_enabled {
-        sess.services.model_client.new_session()
+        // Cached websockets are bound to the previous turn's account; after pool rotation they
+        // would keep sending as the exhausted identity and poison sibling profiles.
+        sess.services
+            .model_client
+            .new_session_for_execution_identity_change()
     } else {
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session())
     };
@@ -1436,11 +1441,22 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
-        let execution_lease = execution_auth.active_lease().ok_or_else(|| {
-            CodexErr::UnsupportedOperation(
-                "no schedulable Codex execution account is available".to_string(),
-            )
-        })?;
+        // After every pool account is cooling down, the next turn still reaches sampling.
+        // Surface UsageLimitExceeded (not UnsupportedOperation/BadRequest) so remote clients
+        // keep the normal cooldown UX instead of a hard "unsupported operation" failure.
+        let execution_lease = match execution_auth.active_lease() {
+            Some(lease) => lease,
+            None => {
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: pool_exhausted_message(execution_auth.as_ref()),
+                    }),
+                )
+                .await;
+                return Err(pool_unavailable_error(execution_auth.as_ref()));
+            }
+        };
         set_sampling_execution_provenance(&turn_context, execution_lease.clone());
 
         let history_before = sess.clone_history().await;
@@ -1558,9 +1574,11 @@ async fn run_sampling_request(
                                 )
                                 .await;
                             }
-                            // A new turn-scoped session drops the old WebSocket, previous-response
-                            // state and x-codex-turn-state before the next account sends anything.
-                            *client_session = sess.services.model_client.new_session();
+                            // Drop any websocket/turn-state bound to the exhausted account before
+                            // the next profile sends — cached reuse would keep the old identity.
+                            sess.services
+                                .model_client
+                                .replace_session_for_execution_identity_change(client_session);
                             retry_state = ResponsesStreamRetryState::default();
                             initial_input = None;
                             sess.refresh_mcp_if_dirty().await;
@@ -1612,7 +1630,9 @@ async fn run_sampling_request(
                                     }),
                                 )
                                 .await;
-                                *client_session = sess.services.model_client.new_session();
+                                sess.services
+                                    .model_client
+                                    .replace_session_for_execution_identity_change(client_session);
                                 retry_state = ResponsesStreamRetryState::default();
                                 initial_input = None;
                                 sess.refresh_mcp_if_dirty().await;
