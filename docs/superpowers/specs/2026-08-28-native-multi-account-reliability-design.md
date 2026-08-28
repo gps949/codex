@@ -104,10 +104,11 @@ Size limits:
 ### Existing opaque compactions
 
 An opaque compaction remains usable only by its owning profile. When that profile is active and
-usable, the next pool-aware compaction converts the thread to a portable plaintext checkpoint
-before another profile is selected. A user-directed switch or automatic switch that encounters an
-unmigrated opaque checkpoint is blocked before changing identity and reports the owning profile and
-the migration command/action.
+usable, the next pool-aware compaction converts the thread to a portable plaintext checkpoint.
+`accountPool/use` sets a process-wide scheduler preference and cannot inspect every dormant rollout;
+therefore each thread preflights its own history before authenticating a request under the preferred
+profile. A thread that encounters an unmigrated opaque checkpoint sends no target-authenticated
+request and reports the owning profile and the migration command/action.
 
 If the owner is already unavailable, the fork fails closed and preserves the rollout unchanged.
 There is no honest way to reconstruct encrypted-only content under another account. This is exposed
@@ -232,4 +233,3 @@ Every behavior change follows red-green-refactor. Required coverage includes:
   mutation step; tests are not rerun after those commands per repository policy.
 - The complete `just test` suite is run only after explicit permission, as required by `AGENTS.md`.
 - Independent reviewers find no unresolved critical or important issue in the final diff.
-

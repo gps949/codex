@@ -247,7 +247,7 @@ Run: `just test -p codex-core -E 'test(compact) or test(account_transition)'`
 
 Commit: `fix(core): make account-pool compaction portable`
 
-### Task 5: Define opaque-history migration and safe failover preflight
+### Task 5: Define opaque-history migration and request-bound transition preflight
 
 **Files:**
 - Modify: `codex-rs/core/src/account_transition.rs`
@@ -263,24 +263,26 @@ Commit: `fix(core): make account-pool compaction portable`
 - Produces: `preflight_account_transition(history, target_profile) -> AccountTransitionReadiness`.
 - Produces: an actionable protocol warning/error that preserves the original history.
 
-- [ ] **Step 1: Write failing user-directed-switch preflight test**
+- [ ] **Step 1: Write failing user-directed-switch request-preflight test**
 
 Create a legacy opaque compaction owned by root and attempt to select B. Assert the active profile
-does not change and the error names root as the required migration owner.
+preference changes, but the next turn sends no B-authenticated request and the error names root as
+the required migration owner.
 
 - [ ] **Step 2: Write failing automatic-failover preflight test**
 
 Have A return 429 while history contains an A opaque checkpoint. Assert the scheduler records A's
-cooldown but does not bind the turn to B or send A's blob to B.
+cooldown but sends no B-authenticated request and never sends A's blob to B.
 
 - [ ] **Step 3: Run RED**
 
 Run: `just test -p codex-core opaque_history_transition`
 
-- [ ] **Step 4: Implement preflight before identity mutation**
+- [ ] **Step 4: Implement preflight before target-authenticated request construction**
 
-Separate “mark source unavailable” from “activate target”. Evaluate target readiness using cloned
-annotated history, then commit the transition only when ready.
+Evaluate target readiness using cloned annotated history after scheduler selection but before
+building client auth or transport. Return the typed migration-required state without opening a
+target-authenticated HTTP or WebSocket connection.
 
 - [ ] **Step 5: Add owner-active migration coverage**
 
@@ -328,4 +330,3 @@ failure/timeout never reports success.
 Run: `just test -p codex-core -E 'test(account_failover) or test(account_transition) or test(preemptive) or test(reset_credit)'`
 
 Commit: `test(core): cover multi-account recovery boundaries`
-
