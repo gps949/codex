@@ -72,6 +72,9 @@ coverage/
 # personal files
 personal/
 
+# local development worktrees
+.worktrees/
+
 # os
 .DS_Store
 Thumbs.db
