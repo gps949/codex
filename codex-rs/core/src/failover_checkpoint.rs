@@ -94,7 +94,9 @@ impl SamplingHistoryCursor {
                 }
                 ResponseItem::FunctionCallOutput { call_id, .. } => {
                     checkpoint.mark_tool_result_committed();
-                    pending_tool_calls.remove(call_id);
+                    if let Some(call_id) = call_id {
+                        pending_tool_calls.remove(call_id);
+                    }
                 }
                 ResponseItem::ToolSearchOutput { call_id, .. } => {
                     checkpoint.mark_tool_result_committed();

@@ -350,7 +350,9 @@ mod tests {
         let mut stats = AccountHistoryTransitionStats::default();
         let item = ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: "call-1".to_string(),
+            call_id: Some("call-1".to_string()),
+            name: None,
+            namespace: None,
             output: codex_protocol::models::FunctionCallOutputPayload::from_content_items(vec![
                 FunctionCallOutputContentItem::EncryptedContent {
                     encrypted_content: "opaque-tool-output".to_string(),
