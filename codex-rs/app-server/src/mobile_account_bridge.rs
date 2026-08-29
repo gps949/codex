@@ -509,11 +509,13 @@ mod tests {
             rate_limit_reset_credits: None,
         };
         overlay_get_account_rate_limits_for_remote_client(&mut response, &pool);
-        assert!(response
-            .rate_limits
-            .limit_name
-            .as_deref()
-            .is_some_and(|name| name.contains("primary")));
+        assert!(
+            response
+                .rate_limits
+                .limit_name
+                .as_deref()
+                .is_some_and(|name| name.contains("primary"))
+        );
     }
 
     #[test]
