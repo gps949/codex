@@ -528,8 +528,7 @@ async fn start_app_server(
                        codex --remote unix://\n\
                      or quit the other Codex app first.",
                     socket_path.display()
-                )
-                .into());
+                ));
             }
         }
     }

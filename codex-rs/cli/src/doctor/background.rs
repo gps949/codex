@@ -65,9 +65,10 @@ pub(super) async fn background_server_check(config: &Config) -> DoctorCheck {
         let cli_version = env!("CARGO_PKG_VERSION");
         details.push(format!("cli version: {cli_version}"));
         if server_version != cli_version {
-            details.push(format!(
+              details.push(
                 "version mismatch: attached clients may miss newer RPC features until versions match"
-            ));
+                    .to_string(),
+            );
         }
         let pid_file = state_dir.join(PID_FILE_NAME);
         if !pid_file.is_file() {
