@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use codex_core::TurnInputRequest;
+use codex_login::CodexAuth;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
@@ -84,6 +85,62 @@ fn write_account_pool_fixture(codex_home: &Path) {
         .unwrap(),
     )
     .unwrap();
+}
+
+#[expect(clippy::unwrap_used)]
+fn write_malformed_account_pool_fixture(codex_home: &Path) {
+    std::fs::write(
+        codex_home.join("account-profiles.json"),
+        "not valid account profile json",
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_account_pool_fails_closed_before_sampling() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let unexpected_sampling = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("unexpected-response"),
+            ev_assistant_message("unexpected-message", "request should not be sent"),
+            ev_completed("unexpected-response"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(write_malformed_account_pool_fixture);
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    let terminal = wait_for_event(&fixture.codex, |msg| {
+        matches!(msg, EventMsg::Error(_) | EventMsg::TurnComplete(_))
+    })
+    .await;
+    let EventMsg::Error(error) = terminal else {
+        panic!("malformed configured account pool must fail the turn");
+    };
+    assert!(
+        error
+            .message
+            .contains("failed to initialize native multi-account execution"),
+        "unexpected pool initialization error: {}",
+        error.message,
+    );
+    assert!(
+        unexpected_sampling.requests().is_empty(),
+        "malformed configured account pool must not send a /responses request",
+    );
+
+    Ok(())
 }
 
 /// End-to-end: a usage-limit rejection on the preferred account rotates the pool to the backup

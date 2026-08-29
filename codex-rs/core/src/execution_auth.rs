@@ -16,7 +16,9 @@ use codex_login::AccountProfileId;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AuthManager;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use tokio::sync::OnceCell;
@@ -54,6 +56,27 @@ pub(crate) struct ExecutionAuth {
 enum RuntimeInitError {
     NotConfigured,
     Failed(AccountPoolRuntimeError),
+}
+
+/// Authentication mode selected for one turn after applying provider and credential policy.
+pub(crate) enum ExecutionAuthMode {
+    Stock,
+    Pooled(Arc<AccountPoolRuntime>),
+}
+
+impl ExecutionAuthMode {
+    pub(crate) fn multi_account_enabled(&self) -> bool {
+        match self {
+            Self::Stock => false,
+            Self::Pooled(runtime) => runtime.pool().snapshots().len() > 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PoolEligibility {
+    Eligible,
+    Ineligible,
 }
 
 /// Immutable execution identity captured by one account-bound model client/request path.
@@ -117,6 +140,33 @@ impl ExecutionAuth {
         }
     }
 
+    /// Resolves stock versus pooled authentication for one turn.
+    ///
+    /// Provider and credential gating happens before the account manifest is inspected, so custom,
+    /// API-key, Bedrock, workload-identity, and host-supplied auth paths retain stock behavior even
+    /// when a ChatGPT account manifest exists in the shared Codex home.
+    pub(crate) async fn mode_for_turn(
+        &self,
+        config: &Config,
+        provider: &ModelProviderInfo,
+    ) -> Result<ExecutionAuthMode, AccountPoolRuntimeError> {
+        if pool_eligibility(
+            &config.model_provider_id,
+            provider,
+            self.legacy_manager.get_api_auth_mode(),
+            self.legacy_manager.is_workload_identity_selected(),
+        ) == PoolEligibility::Ineligible
+        {
+            return Ok(ExecutionAuthMode::Stock);
+        }
+
+        self.install_runtime_from_config(config).await?;
+        Ok(match self.runtime() {
+            Some(runtime) => ExecutionAuthMode::Pooled(runtime),
+            None => ExecutionAuthMode::Stock,
+        })
+    }
+
     /// Installs native account pooling once a profile manifest exists. Repeated calls are cheap and
     /// safe, and a process that started in stock single-account mode can enable pooling later after
     /// `account add` creates the manifest without requiring a restart.
@@ -124,15 +174,20 @@ impl ExecutionAuth {
         &self,
         config: &Config,
     ) -> Result<bool, AccountPoolRuntimeError> {
-        if !supports_native_account_pool(config) {
-            return Ok(false);
-        }
+        self.mode_for_turn(config, &config.model_provider)
+            .await
+            .map(|mode| matches!(mode, ExecutionAuthMode::Pooled(_)))
+    }
 
+    async fn install_runtime_from_config(
+        &self,
+        config: &Config,
+    ) -> Result<(), AccountPoolRuntimeError> {
         if let Some(runtime) = self.runtime() {
             let pool = runtime.pool();
             pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
             pool.set_rotation_strategy(config.account_pool.effective_rotation_strategy());
-            return Ok(true);
+            return Ok(());
         }
 
         // OnceCell serializes concurrent initializers without holding a guard across await.
@@ -166,9 +221,9 @@ impl ExecutionAuth {
                     self.notify_change();
                     self.spawn_pool_change_bridge(pool);
                 }
-                Ok(true)
+                Ok(())
             }
-            Err(RuntimeInitError::NotConfigured) => Ok(false),
+            Err(RuntimeInitError::NotConfigured) => Ok(()),
             Err(RuntimeInitError::Failed(error)) => Err(error),
         }
     }
@@ -345,10 +400,26 @@ impl ExecutionAuth {
     }
 }
 
-fn supports_native_account_pool(config: &Config) -> bool {
-    config.model_provider_id == OPENAI_PROVIDER_ID
-        && config.model_provider.is_openai()
-        && config.model_provider.requires_openai_auth
+fn pool_eligibility(
+    provider_id: &str,
+    provider: &ModelProviderInfo,
+    auth_mode: Option<AuthMode>,
+    workload_identity_selected: bool,
+) -> PoolEligibility {
+    if provider_id == OPENAI_PROVIDER_ID
+        && provider.is_openai()
+        && provider.requires_openai_auth
+        && provider.env_key.is_none()
+        && provider.experimental_bearer_token.is_none()
+        && provider.auth.is_none()
+        && provider.aws.is_none()
+        && auth_mode == Some(AuthMode::Chatgpt)
+        && !workload_identity_selected
+    {
+        PoolEligibility::Eligible
+    } else {
+        PoolEligibility::Ineligible
+    }
 }
 
 impl ExecutionAuthLease {

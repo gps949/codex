@@ -178,16 +178,15 @@ pub(crate) async fn run_turn(
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
     let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
-    let multi_account_enabled = match execution_auth
-        .ensure_runtime_from_config(turn_context.config.as_ref())
+    let execution_auth_mode = execution_auth
+        .mode_for_turn(turn_context.config.as_ref(), turn_context.provider.info())
         .await
-    {
-        Ok(_) => execution_auth.multi_account_enabled(),
-        Err(err) => {
-            warn!(%err, "failed to initialize native multi-account execution; using stock auth");
-            false
-        }
-    };
+        .map_err(|err| {
+            CodexErr::UnsupportedOperation(format!(
+                "failed to initialize native multi-account execution: {err}"
+            ))
+        })?;
+    let multi_account_enabled = execution_auth_mode.multi_account_enabled();
     // Rotate away from a nearly exhausted account at the turn boundary, before any transport or
     // step state exists, so the switch costs nothing and the turn cannot hit the limit mid-response.
     if multi_account_enabled
