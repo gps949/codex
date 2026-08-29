@@ -601,10 +601,7 @@ fn remove_generated_type_files(
     extension: &str,
 ) -> Result<()> {
     for type_name in type_names {
-        if EXPERIMENTAL_TYPES_PROMOTED_TO_STABLE
-            .iter()
-            .any(|keep| *keep == type_name.as_str())
-        {
+        if EXPERIMENTAL_TYPES_PROMOTED_TO_STABLE.contains(&type_name.as_str()) {
             continue;
         }
         for subdir in ["", "v1", "v2"] {
@@ -630,10 +627,7 @@ fn remove_generated_type_entries(
     extension: &str,
 ) {
     for type_name in type_names {
-        if EXPERIMENTAL_TYPES_PROMOTED_TO_STABLE
-            .iter()
-            .any(|keep| *keep == type_name.as_str())
-        {
+        if EXPERIMENTAL_TYPES_PROMOTED_TO_STABLE.contains(&type_name.as_str()) {
             continue;
         }
         for subdir in ["", "v1", "v2"] {
