@@ -13,6 +13,7 @@ use chrono::Duration as ChronoDuration;
 use chrono::Utc;
 use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AccountLoginCompletedNotification;
+use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::CancelLoginAccountParams;
@@ -189,6 +190,15 @@ region = "us-west-2"
     }
 }
 
+fn disabled_account_pool_snapshot() -> AccountPoolReadResponse {
+    AccountPoolReadResponse {
+        enabled: false,
+        active_profile_id: None,
+        active_generation: None,
+        accounts: Vec::new(),
+    }
+}
+
 async fn read_account(mcp: &mut TestAppServer) -> Result<GetAccountResponse> {
     let request_id = mcp
         .send_get_account_request(GetAccountParams {
@@ -212,6 +222,7 @@ async fn assert_account_updated(
         AccountUpdatedNotification {
             auth_mode,
             plan_type: None,
+            account_pool: None,
         }
     );
     Ok(())
@@ -470,6 +481,7 @@ async fn set_auth_token_updates_account_and_notifies() -> Result<()> {
                 plan_type: AccountPlanType::Pro,
             }),
             requires_openai_auth: true,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
 
@@ -546,6 +558,7 @@ async fn account_read_refresh_token_is_noop_in_external_mode() -> Result<()> {
                 plan_type: AccountPlanType::Pro,
             }),
             requires_openai_auth: true,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
 
@@ -1229,6 +1242,7 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
                 uses_codex_managed_credentials: true,
             }),
             requires_openai_auth: false,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
 
@@ -1257,6 +1271,7 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
             GetAccountResponse {
                 account: None,
                 requires_openai_auth: true,
+                account_pool: Some(disabled_account_pool_snapshot()),
             }
         );
     }
@@ -1472,6 +1487,7 @@ async fn logout_managed_bedrock_restores_default_account(
                 uses_codex_managed_credentials: true,
             }),
             requires_openai_auth: false,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
 
@@ -1520,6 +1536,7 @@ async fn logout_managed_bedrock_restores_default_account(
         GetAccountResponse {
             account: None,
             requires_openai_auth: true,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
     Ok(())
@@ -1586,6 +1603,7 @@ async fn logout_aws_managed_bedrock_clears_provider_and_restores_default_account
                     uses_codex_managed_credentials: false,
                 }),
                 requires_openai_auth: false,
+                account_pool: Some(disabled_account_pool_snapshot()),
             }
         );
         let mut expected_config = read_config_toml(codex_home.path())?;
@@ -1622,6 +1640,7 @@ async fn logout_aws_managed_bedrock_clears_provider_and_restores_default_account
             GetAccountResponse {
                 account: None,
                 requires_openai_auth: true,
+                account_pool: Some(disabled_account_pool_snapshot()),
             }
         );
     }
@@ -1690,6 +1709,7 @@ async fn logout_managed_bedrock_preserves_changed_provider_without_experimental_
         GetAccountResponse {
             account: None,
             requires_openai_auth: false,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
     Ok(())
@@ -1771,6 +1791,7 @@ async fn login_managed_bedrock_updates_active_bedrock_account() -> Result<()> {
                 uses_codex_managed_credentials: true,
             }),
             requires_openai_auth: false,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
 
@@ -2676,6 +2697,7 @@ async fn get_account_with_api_key() -> Result<()> {
     let expected = GetAccountResponse {
         account: Some(Account::ApiKey {}),
         requires_openai_auth: true,
+        account_pool: Some(disabled_account_pool_snapshot()),
     };
     assert_eq!(received, expected);
     Ok(())
@@ -2709,6 +2731,7 @@ async fn get_account_when_auth_not_required() -> Result<()> {
     let expected = GetAccountResponse {
         account: None,
         requires_openai_auth: false,
+        account_pool: Some(disabled_account_pool_snapshot()),
     };
     assert_eq!(received, expected);
     Ok(())
@@ -2751,6 +2774,7 @@ region = "us-west-2"
             uses_codex_managed_credentials: false,
         }),
         requires_openai_auth: false,
+        account_pool: Some(disabled_account_pool_snapshot()),
     };
     assert_eq!(received, expected);
     Ok(())
@@ -2789,6 +2813,7 @@ command = "print-token"
                 uses_codex_managed_credentials: false,
             }),
             requires_openai_auth: false,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
     Ok(())
@@ -2827,6 +2852,7 @@ region = "us-west-2"
                 uses_codex_managed_credentials: false,
             }),
             requires_openai_auth: false,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
 
@@ -2892,6 +2918,7 @@ async fn get_account_with_managed_bedrock_provider() -> Result<()> {
                 uses_codex_managed_credentials: true,
             }),
             requires_openai_auth: false,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
     Ok(())
@@ -2936,6 +2963,7 @@ async fn get_account_with_chatgpt() -> Result<()> {
             plan_type: AccountPlanType::Pro,
         }),
         requires_openai_auth: true,
+        account_pool: Some(disabled_account_pool_snapshot()),
     };
     assert_eq!(received, expected);
     Ok(())
@@ -2988,6 +3016,7 @@ async fn get_account_with_chatgpt_plan_variants_returns_plan_type(
                 plan_type: expected_plan,
             }),
             requires_openai_auth: true,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
     Ok(())
@@ -3032,6 +3061,7 @@ async fn get_account_with_chatgpt_without_email() -> Result<()> {
                 plan_type: AccountPlanType::Pro,
             }),
             requires_openai_auth: true,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
     Ok(())
@@ -3110,6 +3140,7 @@ async fn get_account_omits_chatgpt_after_permanent_refresh_failure() -> Result<(
         GetAccountResponse {
             account: None,
             requires_openai_auth: true,
+            account_pool: Some(disabled_account_pool_snapshot()),
         }
     );
     server.verify().await;
@@ -3153,6 +3184,7 @@ async fn get_account_with_chatgpt_missing_plan_claim_returns_unknown() -> Result
             plan_type: AccountPlanType::Unknown,
         }),
         requires_openai_auth: true,
+        account_pool: Some(disabled_account_pool_snapshot()),
     };
     assert_eq!(received, expected);
     Ok(())

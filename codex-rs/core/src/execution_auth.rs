@@ -16,6 +16,7 @@ use codex_login::AccountProfileId;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AuthManager;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use tokio::sync::OnceCell;
@@ -123,10 +124,14 @@ impl ExecutionAuth {
         &self,
         config: &Config,
     ) -> Result<bool, AccountPoolRuntimeError> {
+        if !supports_native_account_pool(config) {
+            return Ok(false);
+        }
+
         if let Some(runtime) = self.runtime() {
-            runtime
-                .pool()
-                .set_return_to_preferred(config.account_pool.effective_return_to_preferred());
+            let pool = runtime.pool();
+            pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
+            pool.set_rotation_strategy(config.account_pool.effective_rotation_strategy());
             return Ok(true);
         }
 
@@ -156,6 +161,7 @@ impl ExecutionAuth {
             Ok(runtime) => {
                 let pool = runtime.pool();
                 pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
+                pool.set_rotation_strategy(config.account_pool.effective_rotation_strategy());
                 if newly_installed.load(Ordering::Acquire) {
                     self.notify_change();
                     self.spawn_pool_change_bridge(pool);
@@ -339,6 +345,12 @@ impl ExecutionAuth {
     }
 }
 
+fn supports_native_account_pool(config: &Config) -> bool {
+    config.model_provider_id == OPENAI_PROVIDER_ID
+        && config.model_provider.is_openai()
+        && config.model_provider.requires_openai_auth
+}
+
 impl ExecutionAuthLease {
     fn legacy() -> Self {
         Self { account: None }
@@ -371,3 +383,7 @@ fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
     }
 }
+
+#[cfg(test)]
+#[path = "execution_auth_tests.rs"]
+mod tests;

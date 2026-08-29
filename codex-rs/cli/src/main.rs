@@ -45,6 +45,7 @@ use std::sync::Arc;
 use supports_color::Stream;
 
 mod account_cmd;
+mod account_config;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
 mod cloud_config;
@@ -634,6 +635,37 @@ enum AccountSubcommand {
         /// Keep the stored credentials instead of revoking and deleting them.
         #[arg(long)]
         keep_credentials: bool,
+    },
+
+    /// Show the live multi-account scheduler state (availability, cooldowns, active profile).
+    Pool,
+
+    /// Show or update native account-pool settings in config.toml.
+    #[command(subcommand)]
+    Config(AccountConfigSubcommand),
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum AccountConfigSubcommand {
+    /// Print `[account_pool]` settings from config.toml.
+    Show,
+
+    /// Set automatic account selection strategy (`fill_first` or `earliest_reset`).
+    SetRotationStrategy {
+        /// Rotation strategy name.
+        strategy: String,
+    },
+
+    /// Set whether to return to the preferred account when its cooldown expires.
+    SetReturnToPreferred {
+        /// Enable or disable return-to-preferred behavior.
+        enabled: bool,
+    },
+
+    /// Set preemptive switch threshold (0–100). Pass `0` to disable.
+    SetPreemptiveSwitchPercent {
+        /// Usage percentage that triggers preemptive rotation.
+        percent: f64,
     },
 }
 
@@ -1768,6 +1800,35 @@ async fn cli_main(
                     )
                     .await;
                 }
+                AccountSubcommand::Pool => {
+                    account_cmd::run_account_pool(account_cli.config_overrides).await;
+                }
+                AccountSubcommand::Config(action) => match action {
+                    AccountConfigSubcommand::Show => {
+                        account_cmd::run_account_config_show(account_cli.config_overrides).await;
+                    }
+                    AccountConfigSubcommand::SetRotationStrategy { strategy } => {
+                        account_cmd::run_account_config_set_rotation_strategy(
+                            account_cli.config_overrides,
+                            strategy,
+                        )
+                        .await;
+                    }
+                    AccountConfigSubcommand::SetReturnToPreferred { enabled } => {
+                        account_cmd::run_account_config_set_return_to_preferred(
+                            account_cli.config_overrides,
+                            enabled,
+                        )
+                        .await;
+                    }
+                    AccountConfigSubcommand::SetPreemptiveSwitchPercent { percent } => {
+                        account_cmd::run_account_config_set_preemptive_switch_percent(
+                            account_cli.config_overrides,
+                            percent,
+                        )
+                        .await;
+                    }
+                },
             }
         }
         Some(Subcommand::Completion(completion_cli)) => {

@@ -86,6 +86,17 @@
     }
   },
   "properties": {
+    "accountPool": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/definitions/AccountPoolReadResponse"
+        }
+      ],
+      "description": "Full native account-pool snapshot when `[account_pool]` is configured.\n\nStable remote clients (including mobile) can render multi-profile status from this notification without calling experimental `accountPool/read`."
+    },
     "authMode": {
       "anyOf": [
         {
@@ -107,6 +118,9 @@
       ]
     }
   },
+  "required": [
+    "accountPool"
+  ],
   "title": "AccountUpdatedNotification",
   "type": "object"
 }

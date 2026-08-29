@@ -17,6 +17,7 @@ mod failover;
 mod failover_checkpoint;
 mod failover_turn;
 mod portable_compaction;
+mod quota_exhaustion;
 mod realtime_context;
 mod realtime_conversation;
 mod realtime_prompt;

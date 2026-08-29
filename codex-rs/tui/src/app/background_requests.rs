@@ -137,6 +137,21 @@ impl App {
         });
     }
 
+    pub(super) fn update_account_pool_rotation_strategy(
+        &mut self,
+        app_server: &AppServerSession,
+        strategy: codex_config::AccountPoolRotationStrategy,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = update_account_pool_rotation_strategy(request_handle, strategy)
+                .await
+                .map_err(|err| format!("{err:#}"));
+            app_event_tx.send(AppEvent::AccountPoolRotationStrategyUpdated { result });
+        });
+    }
+
     pub(super) fn refresh_token_activity(
         &mut self,
         app_server: &AppServerSession,
@@ -827,6 +842,24 @@ pub(super) async fn fetch_account_rate_limits(
 pub(super) async fn fetch_account_pool(
     request_handle: AppServerRequestHandle,
 ) -> Result<codex_app_server_protocol::AccountPoolReadResponse> {
+    use codex_app_server_protocol::ClientRequest;
+    use codex_app_server_protocol::GetAccountParams;
+    use codex_app_server_protocol::GetAccountResponse;
+
+    let request_id = RequestId::String(format!("account-read-pool-{}", Uuid::new_v4()));
+    let account: GetAccountResponse = request_handle
+        .request_typed(ClientRequest::GetAccount {
+            request_id,
+            params: GetAccountParams {
+                refresh_token: false,
+            },
+        })
+        .await
+        .wrap_err("account/read failed in TUI")?;
+    if let Some(pool) = account.account_pool {
+        return Ok(pool);
+    }
+
     let request_id = RequestId::String(format!("account-pool-read-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::AccountPoolRead {
@@ -835,6 +868,16 @@ pub(super) async fn fetch_account_pool(
         })
         .await
         .wrap_err("accountPool/read failed in TUI")
+}
+
+async fn update_account_pool_rotation_strategy(
+    request_handle: AppServerRequestHandle,
+    strategy: codex_config::AccountPoolRotationStrategy,
+) -> Result<()> {
+    let edits = crate::config_update::build_account_pool_rotation_strategy_edits(strategy);
+    crate::config_update::write_config_batch(request_handle, edits)
+        .await
+        .map(|_| ())
 }
 
 pub(super) async fn use_account_pool_profile(

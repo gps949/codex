@@ -9,6 +9,8 @@ use codex_app_server_protocol::AccountPoolAccount;
 use codex_app_server_protocol::AccountPoolAvailability;
 use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::AccountPoolUseResponse;
+use codex_config::AccountPoolRotationStrategy;
+use codex_login::format_exhausted_reset_unix;
 
 use super::*;
 use crate::bottom_pane::SelectionAction;
@@ -36,14 +38,30 @@ impl ChatWidget {
             return;
         }
 
-        let mut items: Vec<SelectionItem> = Vec::with_capacity(pool.accounts.len() + 1);
+        let rotation_strategy = self.config_ref().account_pool.effective_rotation_strategy();
+        let mut items: Vec<SelectionItem> =
+            Vec::with_capacity(pool.accounts.len() + rotation_strategy_items().len() + 1);
+        for (strategy, name, description) in rotation_strategy_items() {
+            let is_current = rotation_strategy == strategy;
+            items.push(SelectionItem {
+                name,
+                description: Some(description),
+                is_current,
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::UpdateAccountPoolRotationStrategy { strategy });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
         let automatic_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
             tx.send(AppEvent::ActivateAccountPoolProfile { profile_id: None });
         })];
         items.push(SelectionItem {
             name: "Automatic".to_string(),
             description: Some(
-                "Fill-first scheduling: prefer the lowest-priority eligible account".to_string(),
+                "Let the scheduler pick the next eligible profile using the rotation strategy above."
+                    .to_string(),
             ),
             actions: automatic_actions,
             dismiss_on_select: true,
@@ -85,6 +103,12 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn apply_account_pool_read_response(&mut self, pool: &AccountPoolReadResponse) {
+        if pool.enabled {
+            self.update_account_pool_identity(active_pool_profile_label(pool));
+        }
+    }
+
     pub(crate) fn on_account_pool_activated(
         &mut self,
         result: Result<AccountPoolUseResponse, String>,
@@ -122,7 +146,10 @@ fn account_description(account: &AccountPoolAccount) -> String {
     parts.push(match &account.availability {
         AccountPoolAvailability::Available => "available".to_string(),
         AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
-            Some(resets_at) => format!("cooling down until {resets_at}"),
+            Some(resets_at) => format!(
+                "cooling down until {}",
+                format_exhausted_reset_unix(*resets_at)
+            ),
             None => "cooling down".to_string(),
         },
         AccountPoolAvailability::AuthenticationUnavailable { .. } => {
@@ -140,4 +167,31 @@ fn account_description(account: &AccountPoolAccount) -> String {
         ));
     }
     parts.join(" · ")
+}
+
+fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 2] {
+    [
+        (
+            AccountPoolRotationStrategy::FillFirst,
+            "Rotation: fill-first".to_string(),
+            "Prefer the lowest priority among eligible profiles.".to_string(),
+        ),
+        (
+            AccountPoolRotationStrategy::EarliestReset,
+            "Rotation: earliest-reset".to_string(),
+            "Prefer the profile whose rate-limit window resets soonest.".to_string(),
+        ),
+    ]
+}
+
+pub(crate) fn active_pool_profile_label(pool: &AccountPoolReadResponse) -> Option<String> {
+    pool.accounts
+        .iter()
+        .find(|account| account.is_active)
+        .map(|account| {
+            account
+                .label
+                .clone()
+                .unwrap_or_else(|| account.profile_id.clone())
+        })
 }

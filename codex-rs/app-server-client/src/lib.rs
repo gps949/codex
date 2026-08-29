@@ -1270,6 +1270,7 @@ mod tests {
                     result: serde_json::to_value(GetAccountResponse {
                         account: None,
                         requires_openai_auth: false,
+                        account_pool: None,
                     })
                     .expect("response should serialize"),
                 }),
@@ -1324,6 +1325,7 @@ mod tests {
                     result: serde_json::to_value(GetAccountResponse {
                         account: None,
                         requires_openai_auth: false,
+                        account_pool: None,
                     })
                     .expect("response should serialize"),
                 }),
@@ -1400,6 +1402,7 @@ mod tests {
             GetAccountResponse {
                 account: None,
                 requires_openai_auth: false,
+                account_pool: None,
             }
         );
 
@@ -1503,6 +1506,7 @@ mod tests {
                     result: serde_json::to_value(GetAccountResponse {
                         account: None,
                         requires_openai_auth: false,
+                        account_pool: None,
                     })
                     .expect("response should serialize"),
                 }),
@@ -1556,6 +1560,7 @@ mod tests {
             GetAccountResponse {
                 account: None,
                 requires_openai_auth: false,
+                account_pool: None,
             }
         );
 
@@ -1574,6 +1579,7 @@ mod tests {
                             AccountUpdatedNotification {
                                 auth_mode: None,
                                 plan_type: None,
+                                account_pool: None,
                             },
                         ))
                         .expect("notification should serialize"),

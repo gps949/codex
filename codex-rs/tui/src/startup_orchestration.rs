@@ -175,7 +175,7 @@ pub(super) async fn run_main_inner(
     };
     let mut startup_draft = startup_draft::StartupDraft::new(initial_screen, session_action)?;
 
-    let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
+    let default_daemon = if explicit_remote_endpoint.is_none() && !workload_identity_selected {
         startup_draft
             .run_until(maybe_probe_default_daemon_socket(&codex_home))
             .await?

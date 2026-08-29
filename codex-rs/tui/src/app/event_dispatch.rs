@@ -1233,6 +1233,35 @@ impl App {
                     );
                 }
             }
+            AppEvent::UpdateAccountPoolRotationStrategy { strategy } => {
+                self.update_account_pool_rotation_strategy(app_server, strategy);
+            }
+            AppEvent::AccountPoolRotationStrategyUpdated { result } => {
+                match result {
+                    Ok(()) => {
+                        self.refresh_in_memory_config_from_disk_best_effort(
+                            "updating account pool rotation strategy",
+                        )
+                        .await;
+                        let strategy = self.config.account_pool.effective_rotation_strategy();
+                        let label = match strategy {
+                            codex_config::AccountPoolRotationStrategy::FillFirst => "fill-first",
+                            codex_config::AccountPoolRotationStrategy::EarliestReset => {
+                                "earliest-reset"
+                            }
+                        };
+                        self.chat_widget.add_info_message(
+                            format!("Account rotation strategy set to {label}."),
+                            /*hint*/ None,
+                        );
+                    }
+                    Err(error) => {
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to save account rotation strategy: {error}"
+                        ));
+                    }
+                }
+            }
             AppEvent::RefreshTokenActivity { request_id } => {
                 self.refresh_token_activity(app_server, request_id);
             }

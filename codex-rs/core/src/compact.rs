@@ -7,6 +7,7 @@ use crate::client_common::ResponseEvent;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
+use crate::execution_auth::ExecutionAuth;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -262,7 +263,24 @@ async fn run_compact_task_inner_impl(
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
-    let mut client_session = sess.services.model_client.new_session();
+    let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
+    let multi_account_enabled = match execution_auth
+        .ensure_runtime_from_config(turn_context.config.as_ref())
+        .await
+    {
+        Ok(_) => execution_auth.multi_account_enabled(),
+        Err(err) => {
+            tracing::warn!(%err, "failed to initialize native multi-account execution for compaction");
+            false
+        }
+    };
+    let mut client_session = if multi_account_enabled {
+        sess.services
+            .model_client
+            .new_session_for_execution_identity_change()
+    } else {
+        sess.services.model_client.new_session()
+    };
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
     // survives retries within this compact turn.

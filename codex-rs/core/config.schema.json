@@ -31,9 +31,36 @@
         "return_to_preferred": {
           "description": "Return to the most preferred (lowest priority value) account when its quota cooldown expires instead of staying on the currently active account. Defaults to true.",
           "type": "boolean"
+        },
+        "rotation_strategy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AccountPoolRotationStrategy"
+            }
+          ],
+          "description": "Automatic account selection strategy when failover or `/account` automatic mode runs. Defaults to `fill_first`."
         }
       },
       "type": "object"
+    },
+    "AccountPoolRotationStrategy": {
+      "description": "How the scheduler picks the next eligible account when the active profile is unavailable or the user selects automatic scheduling.",
+      "oneOf": [
+        {
+          "description": "Prefer the lowest `priority` value among eligible profiles (default).",
+          "enum": [
+            "fill_first"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Prefer the eligible profile whose observed rate-limit window resets soonest.",
+          "enum": [
+            "earliest_reset"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "AgentRoleToml": {
       "additionalProperties": false,

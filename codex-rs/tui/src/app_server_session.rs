@@ -2301,6 +2301,7 @@ mod tests {
                 plan_type: codex_protocol::account::PlanType::Plus,
             }),
             requires_openai_auth: true,
+            account_pool: None,
         };
 
         let bootstrap = app_server.bootstrap_with_account(&config, account).await?;

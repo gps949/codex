@@ -117,6 +117,7 @@ mod image_url;
 pub mod in_process;
 mod mcp_refresh;
 mod message_processor;
+mod mobile_account_bridge;
 mod models;
 mod models_refresh_worker;
 mod otel_reloader;

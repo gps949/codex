@@ -55,6 +55,15 @@ const EXPERIMENTAL_CLIENT_METHOD_DEPENDENCY_TYPES: &[&str] = &[
     "ThreadSearchOccurrence",
     "ThreadSearchTextRange",
 ];
+/// Experimental RPC payload types that are also referenced by stable APIs and must remain in the
+/// non-experimental schema bundle.
+const EXPERIMENTAL_TYPES_PROMOTED_TO_STABLE: &[&str] = &[
+    "AccountPoolAccount",
+    "AccountPoolAvailability",
+    "AccountPoolRateLimitWindow",
+    "AccountPoolRateLimits",
+    "AccountPoolReadResponse",
+];
 const SPECIAL_DEFINITIONS: &[&str] = &[
     "ClientNotification",
     "ClientRequest",
@@ -592,6 +601,9 @@ fn remove_generated_type_files(
     extension: &str,
 ) -> Result<()> {
     for type_name in type_names {
+        if EXPERIMENTAL_TYPES_PROMOTED_TO_STABLE.contains(&type_name.as_str()) {
+            continue;
+        }
         for subdir in ["", "v1", "v2"] {
             let path = if subdir.is_empty() {
                 out_dir.join(format!("{type_name}.{extension}"))
@@ -615,6 +627,9 @@ fn remove_generated_type_entries(
     extension: &str,
 ) {
     for type_name in type_names {
+        if EXPERIMENTAL_TYPES_PROMOTED_TO_STABLE.contains(&type_name.as_str()) {
+            continue;
+        }
         for subdir in ["", "v1", "v2"] {
             let path = if subdir.is_empty() {
                 PathBuf::from(format!("{type_name}.{extension}"))
@@ -644,6 +659,9 @@ fn remove_experimental_method_type_definitions_map(
             experimental_type_names
                 .iter()
                 .any(|type_name| definition_matches_type(def_name, type_name))
+                && !EXPERIMENTAL_TYPES_PROMOTED_TO_STABLE
+                    .iter()
+                    .any(|type_name| definition_matches_type(def_name, type_name))
         })
         .cloned()
         .collect();

@@ -1567,10 +1567,14 @@ async fn run_sampling_request(
                         checkpoint,
                         &err,
                     )
+                    .await
                     .map_err(CodexErr::from)?
                     {
                         SamplingFailoverDirective::ReplayCurrentSamplingRequest
                         | SamplingFailoverDirective::ContinueFromDurableHistory => {
+                            if let Some(account) = execution_lease.account_lease() {
+                                let _ = account.auth_manager().auth().await;
+                            }
                             // Make the outer provider observe the selected pool identity now rather
                             // than racing the background auth-sync task.
                             execution_auth.compatibility_auth_manager().reload().await;
