@@ -6,6 +6,7 @@ export type { AccountPoolAccount } from "./AccountPoolAccount";
 export type { AccountPoolAvailability } from "./AccountPoolAvailability";
 export type { AccountPoolRateLimitWindow } from "./AccountPoolRateLimitWindow";
 export type { AccountPoolRateLimits } from "./AccountPoolRateLimits";
+export type { AccountPoolReadResponse } from "./AccountPoolReadResponse";
 export type { AccountPoolUpdatedNotification } from "./AccountPoolUpdatedNotification";
 export type { AccountRateLimitsUpdatedNotification } from "./AccountRateLimitsUpdatedNotification";
 export type { AccountTokenUsageDailyBucket } from "./AccountTokenUsageDailyBucket";

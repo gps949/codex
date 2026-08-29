@@ -24,6 +24,18 @@ pub enum AutoResetCredits {
     WhenPoolExhausted,
 }
 
+/// How the scheduler picks the next eligible account when the active profile is unavailable
+/// or the user selects automatic scheduling.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountPoolRotationStrategy {
+    /// Prefer the lowest `priority` value among eligible profiles (default).
+    #[default]
+    FillFirst,
+    /// Prefer the eligible profile whose observed rate-limit window resets soonest.
+    EarliestReset,
+}
+
 /// Scheduling knobs for the native multi-account execution pool.
 ///
 /// The pool itself is enabled by the account-profile manifest created with `codex account add`;
@@ -38,6 +50,9 @@ pub struct AccountPoolConfigToml {
     /// Return to the most preferred (lowest priority value) account when its quota cooldown
     /// expires instead of staying on the currently active account. Defaults to true.
     pub return_to_preferred: Option<bool>,
+    /// Automatic account selection strategy when failover or `/account` automatic mode runs.
+    /// Defaults to `fill_first`.
+    pub rotation_strategy: Option<AccountPoolRotationStrategy>,
     /// When the scheduler may automatically redeem an earned rate-limit reset credit.
     /// Defaults to `never`: some users prefer waiting out a nearby natural reset or saving
     /// credits for a broader account-wide reset.
@@ -61,6 +76,10 @@ impl AccountPoolConfigToml {
         self.return_to_preferred.unwrap_or(true)
     }
 
+    pub fn effective_rotation_strategy(&self) -> AccountPoolRotationStrategy {
+        self.rotation_strategy.unwrap_or_default()
+    }
+
     pub fn effective_auto_reset_credits(&self) -> AutoResetCredits {
         self.auto_reset_credits.unwrap_or_default()
     }
@@ -76,6 +95,14 @@ impl AccountPoolConfigToml {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn rotation_strategy_defaults_to_fill_first() {
+        assert_eq!(
+            AccountPoolConfigToml::default().effective_rotation_strategy(),
+            AccountPoolRotationStrategy::FillFirst
+        );
+    }
 
     #[test]
     fn preemptive_switch_defaults_to_95_percent() {

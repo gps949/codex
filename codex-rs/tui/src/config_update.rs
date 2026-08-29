@@ -17,6 +17,7 @@ use codex_app_server_protocol::MergeStrategy;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SkillsConfigWriteParams;
 use codex_app_server_protocol::SkillsConfigWriteResponse;
+use codex_config::AccountPoolRotationStrategy;
 use codex_config::loader::project_trust_key;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_features::FEATURES;
@@ -149,6 +150,18 @@ pub(crate) fn build_memory_settings_edits(
             serde_json::json!(generate_memories),
         ),
     ]
+}
+
+pub(crate) fn build_account_pool_rotation_strategy_edits(
+    strategy: AccountPoolRotationStrategy,
+) -> Vec<ConfigEdit> {
+    vec![replace_config_value(
+        "account_pool.rotation_strategy",
+        serde_json::json!(match strategy {
+            AccountPoolRotationStrategy::FillFirst => "fill_first",
+            AccountPoolRotationStrategy::EarliestReset => "earliest_reset",
+        }),
+    )]
 }
 
 pub(crate) fn build_oss_provider_edit(provider: &str) -> ConfigEdit {

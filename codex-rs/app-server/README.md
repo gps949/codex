@@ -2292,14 +2292,14 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 
 ### API Overview
 
-- `account/read` — fetch current account info; optionally refresh tokens.
+- `account/read` — fetch current account info; optionally refresh tokens. When the native multi-account pool is configured, the stable `accountPool` field includes the same snapshot as experimental `accountPool/read` (enabled flag, active profile, per-profile availability, plan, email, and observed rate-limit windows).
 - `account/login/start` — begin login (`apiKey`, `chatgpt`, `chatgptDeviceCode`, `amazonBedrock`, `amazonBedrockAccessKeys`).
 - `account/bedrock/discover` — experimental; list available AWS profiles and identify AWS access keys or Amazon Bedrock API keys visible in the app-server environment.
 - `account/bedrock/setup` — experimental; validate a selected AWS profile or existing environment credentials, then persist the Amazon Bedrock provider configuration.
 - `account/login/completed` (notify) — emitted when a login attempt finishes (success or error).
 - `account/login/cancel` — cancel a pending managed ChatGPT login by `loginId`.
 - `account/logout` — sign out; triggers `account/updated` on success.
-- `account/updated` (notify) — emitted whenever auth mode changes (`authMode`: `apikey`, `bedrockApiKey`, `bedrockAccessKeys`, `chatgpt`, `personalAccessToken`, or `null`) and includes the current ChatGPT `planType` when available.
+- `account/updated` (notify) — emitted whenever auth mode changes (`authMode`: `apikey`, `bedrockApiKey`, `bedrockAccessKeys`, `chatgpt`, `personalAccessToken`, or `null`) and includes the current ChatGPT `planType` when available. When the native multi-account pool is configured, `accountPool` carries the full pool snapshot so stable clients (including mobile) can render per-profile availability without calling experimental `accountPool/read`.
 - `account/rateLimits/read` — fetch ChatGPT rate limits, an optional effective monthly credit limit, whether spend control has been reached, and the earned rate-limit resets currently available, including expiry details when provided by the backend. Rate-limit updates arrive via `account/rateLimits/updated` (notify); reset-credit data is snapshot-only.
 - `account/rateLimitResetCredit/consume` — consume one earned reset using a caller-provided idempotency key, optionally selecting a reset-credit ID returned by `account/rateLimits/read`.
 - `account/usage/read` — fetch ChatGPT account token-activity summary and daily buckets, or pass a valid thread UUID as `threadId` to read estimated credits, optional cost, and usage breakdowns for one thread using the app-server's active account. The optional `threadUsage` response field is absent on older servers and `null` when the billing route is unavailable.
@@ -2307,9 +2307,21 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `account/rateLimits/updated` (notify) — emitted whenever a user's ChatGPT rate limits change. This is a sparse rolling update; merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot.
   `spendControlReached` is `true` or `false` when the backend reports spend-control state; `null` means unavailable and must not clear a previously observed value in a sparse update.
 - `account/sendAddCreditsNudgeEmail` — ask ChatGPT to email the workspace owner about depleted credits or a reached usage limit.
-- `accountPool/read` — experimental; report whether the native multi-account pool is enabled, the active profile and scheduler generation, and per-profile availability, plan, email, and observed rate-limit windows.
-- `accountPool/use` — experimental; activate a specific account profile (`profileId`, optionally `force` to clear a quota cooldown) or, when `profileId` is omitted, re-enter fill-first scheduling so the lowest-priority eligible profile becomes active.
-- `accountPool/updated` (experimental, notify) — pushed whenever the pool's scheduling state changes (activation, automatic failover, exhaustion, recovery, or observed rate limits). Per-account `planType`/`email` are omitted here; fetch them with `accountPool/read`.
+- `accountPool/read` — experimental; report whether the native multi-account pool is enabled, the active profile and scheduler generation, and per-profile availability, plan, email, and observed rate-limit windows. Prefer the stable `accountPool` field on `account/read` and `account/updated` for new clients.
+- `accountPool/use` — experimental; activate a specific account profile (`profileId`, optionally `force` to clear a quota cooldown) or, when `profileId` is omitted, re-enter automatic scheduling using `[account_pool].rotation_strategy` (`fill_first` or `earliest_reset`).
+- `accountPool/updated` (notify) — pushed whenever the pool's scheduling state changes (activation, automatic failover, exhaustion, recovery, or observed rate limits). Stable clients can rely on `account/updated.accountPool` instead; this slimmer notification remains for incremental UI updates.
+
+#### Mobile remote clients without `accountPool` parsing
+
+ChatGPT iOS/Android remote clients (`codex_chatgpt_ios_remote`, `codex_chatgpt_android_remote`) that have not yet been updated to read `accountPool` still receive account-pool status through stable surfaces they already render:
+
+- `account/read` — when authenticated as ChatGPT, `account.email` is temporarily overlaid with a multi-line pool summary (active profile, per-profile availability, cooldowns).
+- `account/workspaceMessages/read` — a local `Headline` workspace message (`messageId: codex-local-account-pool`) is prepended with the same summary.
+- `warning` (notify) — pool changes push a concise text update to connected mobile remote clients only.
+- `account/rateLimits/read` — when the iOS/Android status panel refreshes limits, `rateLimits.limitName` is overlaid with the same pool summary so account-pool state appears beside usage meters without parsing new JSON fields.
+- `turn/start` — when the user sends `/account` or `/status` in chat, the server completes a synthetic turn that streams the pool summary as an `agentMessage` instead of calling the model. Profile switching still requires `codex account use` on the host.
+
+These bridges are server-side only; they do not require App Store updates. Prefer the structured `accountPool` fields for new clients.
 - `mcpServer/oauthLogin/completed` (notify) — emitted after a `mcpServer/oauth/login` flow finishes for a server; payload includes `{ name, threadId, success, error? }`.
 - `mcpServer/startupStatus/updated` (notify) — emitted when a configured MCP server's startup status changes; payload includes `{ threadId, name, status, error, failureReason }`, where `threadId` is the owning thread when startup is thread-scoped and `null` when it is app-scoped, and `status` is `starting`, `ready`, `failed`, or `cancelled`. `failureReason` is `reauthenticationRequired` when stored OAuth credentials have expired and cannot be refreshed, so clients can prompt the user to reconnect the named server.
 - `mcpServer/event/stream/notification` (experimental, notify) — forwards `{ subscriptionId, notification: { method, params } }` to the connection that owns the subscription.
@@ -2334,6 +2346,7 @@ Field notes:
 - `refreshToken` (bool): set `true` to force a token refresh.
 - `email` is `null` when the ChatGPT account does not have an email address.
 - `requiresOpenaiAuth` reflects the active provider; when `false`, Codex can run without OpenAI credentials.
+- `accountPool` is `null` when the pool is not configured; otherwise it mirrors `accountPool/read` (including `enabled`, `activeProfileId`, and per-profile availability/cooldowns). Mobile clients that only subscribe to stable notifications can render the pool from `account/updated.accountPool` without enabling experimental APIs.
 - Amazon Bedrock reports `usesCodexManagedCredentials: true` when it uses a Bedrock API key or AWS access keys managed by Codex. It reports `false` for external credential paths, including the AWS credential chain and configured command auth. This identifies whether Codex-managed credentials are selected; it does not validate that the credential source can resolve credentials.
 
 ### 2) Log in with an API key

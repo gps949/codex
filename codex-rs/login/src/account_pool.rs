@@ -9,6 +9,7 @@ use std::time::UNIX_EPOCH;
 
 use chrono::DateTime;
 use chrono::Utc;
+use codex_config::AccountPoolRotationStrategy;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
@@ -190,6 +191,7 @@ struct AccountPoolState {
     /// When true, the pool returns to the most preferred profile at the moment
     /// a quota cooldown expires instead of staying on the current account.
     return_to_preferred: bool,
+    rotation_strategy: AccountPoolRotationStrategy,
 }
 
 impl Default for AccountPoolState {
@@ -199,6 +201,7 @@ impl Default for AccountPoolState {
             active_profile: None,
             generation: 1,
             return_to_preferred: true,
+            rotation_strategy: AccountPoolRotationStrategy::FillFirst,
         }
     }
 }
@@ -272,8 +275,13 @@ impl AccountPool {
         state.return_to_preferred = return_to_preferred;
     }
 
+    pub fn set_rotation_strategy(&self, rotation_strategy: AccountPoolRotationStrategy) {
+        let mut state = self.lock_state();
+        state.rotation_strategy = rotation_strategy;
+    }
+
     /// Returns a lease for the currently active eligible account. If there is no eligible active
-    /// account, fill-first selection chooses the lowest-priority available profile.
+    /// account, automatic selection chooses the next profile using the configured rotation strategy.
     pub fn lease(&self) -> Result<AccountLease, AccountPoolError> {
         let mut state = self.lock_state();
         let refreshed = refresh_expired_exhaustion(&mut state);
@@ -290,7 +298,7 @@ impl AccountPool {
             // Return to a more preferred profile only at the exact moment a cooldown expired;
             // otherwise stay sticky so transport reuse and prompt caching are preserved.
             let preferred = (refreshed && state.return_to_preferred)
-                .then(|| select_fill_first(&state, &now))
+                .then(|| select_eligible_account(&state, &now))
                 .flatten()
                 .filter(|preferred_id| {
                     preferred_id != &active_id
@@ -314,7 +322,7 @@ impl AccountPool {
         }
 
         let selected_id =
-            select_fill_first(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
+            select_eligible_account(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
         let active_changed = set_active_profile(&mut state, &selected_id);
         let account = state
             .accounts
@@ -358,14 +366,14 @@ impl AccountPool {
         Ok(lease)
     }
 
-    /// Explicitly re-enters fill-first scheduling, selecting the lowest-priority eligible
-    /// profile even if another profile is currently active.
+    /// Explicitly re-enters automatic scheduling, selecting the next eligible profile even if
+    /// another profile is currently active.
     pub fn activate_fill_first(&self) -> Result<AccountLease, AccountPoolError> {
         let mut state = self.lock_state();
         let refreshed = refresh_expired_exhaustion(&mut state);
         let now = Utc::now();
         let selected_id =
-            select_fill_first(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
+            select_eligible_account(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
         let active_changed = set_active_profile(&mut state, &selected_id);
         let account = state
             .accounts
@@ -452,7 +460,7 @@ impl AccountPool {
                 resets_at: Some(resets_at),
             };
             state.active_profile = None;
-            let Some(selected_id) = select_fill_first(&state, &now) else {
+            let Some(selected_id) = select_eligible_account(&state, &now) else {
                 break 'rotation None;
             };
             set_active_profile(&mut state, &selected_id);
@@ -619,7 +627,7 @@ impl AccountPool {
         state.active_profile = None;
 
         let now = Utc::now();
-        let next = if let Some(selected_id) = select_fill_first(&state, &now) {
+        let next = if let Some(selected_id) = select_eligible_account(&state, &now) {
             set_active_profile(&mut state, &selected_id);
             let account = state
                 .accounts
@@ -665,6 +673,16 @@ fn refresh_expired_exhaustion(state: &mut AccountPoolState) -> bool {
     changed
 }
 
+fn select_eligible_account(
+    state: &AccountPoolState,
+    now: &DateTime<Utc>,
+) -> Option<AccountProfileId> {
+    match state.rotation_strategy {
+        AccountPoolRotationStrategy::FillFirst => select_fill_first(state, now),
+        AccountPoolRotationStrategy::EarliestReset => select_earliest_reset(state, now),
+    }
+}
+
 fn select_fill_first(state: &AccountPoolState, now: &DateTime<Utc>) -> Option<AccountProfileId> {
     state
         .accounts
@@ -677,6 +695,44 @@ fn select_fill_first(state: &AccountPoolState, now: &DateTime<Utc>) -> Option<Ac
                 .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
         })
         .map(|account| account.profile.id.clone())
+}
+
+fn select_earliest_reset(
+    state: &AccountPoolState,
+    now: &DateTime<Utc>,
+) -> Option<AccountProfileId> {
+    state
+        .accounts
+        .values()
+        .filter(|account| account.availability.is_eligible(now))
+        .min_by(|left, right| {
+            earliest_reset_key(left, now)
+                .cmp(&earliest_reset_key(right, now))
+                .then_with(|| left.profile.priority.cmp(&right.profile.priority))
+                .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
+        })
+        .map(|account| account.profile.id.clone())
+}
+
+fn earliest_reset_key(account: &ManagedAccount, now: &DateTime<Utc>) -> i64 {
+    let mut upcoming = Vec::new();
+    if let Some(primary) = account.rate_limits.primary.as_ref()
+        && let Some(resets_at) = primary.resets_at
+        && resets_at > *now
+    {
+        upcoming.push(resets_at);
+    }
+    if let Some(secondary) = account.rate_limits.secondary.as_ref()
+        && let Some(resets_at) = secondary.resets_at
+        && resets_at > *now
+    {
+        upcoming.push(resets_at);
+    }
+    upcoming
+        .into_iter()
+        .min()
+        .map(|reset| reset.timestamp())
+        .unwrap_or_else(|| now.timestamp())
 }
 
 fn set_active_profile(state: &mut AccountPoolState, profile_id: &AccountProfileId) -> bool {
@@ -707,6 +763,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
+    use codex_config::AccountPoolRotationStrategy;
     use codex_config::types::AuthCredentialsStoreMode;
 
     use super::*;
@@ -894,6 +951,48 @@ mod tests {
             pool.lease(),
             Err(AccountPoolError::NoEligibleAccount)
         ));
+    }
+
+    #[tokio::test]
+    async fn earliest_reset_prefers_soonest_rate_limit_window() {
+        let pool = AccountPool::new();
+        pool.set_rotation_strategy(AccountPoolRotationStrategy::EarliestReset);
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let later = Utc::now() + chrono::Duration::hours(4);
+        let sooner = Utc::now() + chrono::Duration::minutes(30);
+        pool.update_rate_limits(
+            &first.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 10.0,
+                    resets_at: Some(later),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("first rate limits");
+        pool.update_rate_limits(
+            &second.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 10.0,
+                    resets_at: Some(sooner),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("second rate limits");
+
+        let lease = pool.lease().expect("earliest-reset lease");
+        assert_eq!(lease.profile().id, second.id);
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+pub mod account_display;
 pub mod account_external_auth;
 pub mod account_identity;
 pub mod account_login;
@@ -17,6 +18,8 @@ mod pkce;
 mod server;
 mod success_page;
 
+pub use account_display::format_exhausted_reset;
+pub use account_display::format_exhausted_reset_unix;
 pub use account_external_auth::AccountPoolExternalAuth;
 pub use account_identity::AccountLoginIdentity;
 pub use account_login::AccountLoginFlowError;

@@ -540,6 +540,16 @@ pub(crate) enum AppEvent {
         result: Result<codex_app_server_protocol::AccountPoolUseResponse, String>,
     },
 
+    /// Persist a new `[account_pool].rotation_strategy` value via app-server config writes.
+    UpdateAccountPoolRotationStrategy {
+        strategy: codex_config::AccountPoolRotationStrategy,
+    },
+
+    /// Result of updating the account-pool rotation strategy.
+    AccountPoolRotationStrategyUpdated {
+        result: Result<(), String>,
+    },
+
     /// Open the default token-activity view selected from the `/usage` menu.
     OpenTokenActivity,
 

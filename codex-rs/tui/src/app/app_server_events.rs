@@ -224,6 +224,9 @@ impl App {
                 // the newly authenticated identity, even when both accounts share one thread.
                 self.last_thread_usage_status_cell = None;
                 self.pending_thread_usage_history_refresh = false;
+                if let Some(pool) = notification.account_pool.as_ref() {
+                    self.chat_widget.apply_account_pool_read_response(pool);
+                }
                 let has_codex_backend_auth = matches!(
                     notification.auth_mode,
                     Some(

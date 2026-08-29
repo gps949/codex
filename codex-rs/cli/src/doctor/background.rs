@@ -61,6 +61,21 @@ pub(super) async fn background_server_check(config: &Config) -> DoctorCheck {
         details.push(version_detail);
     }
     details.push(format!("mode: {}", server_mode(&state_dir)));
+    if let SocketStatus::Running(server_version) = &status {
+        let cli_version = env!("CARGO_PKG_VERSION");
+        details.push(format!("cli version: {cli_version}"));
+        if server_version != cli_version {
+            details.push(format!(
+                "version mismatch: attached clients may miss newer RPC features until versions match"
+            ));
+        }
+        let pid_file = state_dir.join(PID_FILE_NAME);
+        if !pid_file.is_file() {
+            details.push(
+                "foreign app-server: socket is live but not managed by `codex app-server daemon` (likely Codex Desktop remote control)".to_string(),
+            );
+        }
+    }
 
     let mut check = DoctorCheck::new(
         "app_server.status",
@@ -71,6 +86,13 @@ pub(super) async fn background_server_check(config: &Config) -> DoctorCheck {
     .details(details);
     if status.check_status() == CheckStatus::Warning {
         check = check.remediation("Run codex app-server daemon version for more details.");
+    } else if let SocketStatus::Running(_) = status {
+        let pid_file = state_dir.join(PID_FILE_NAME);
+        if !pid_file.is_file() {
+            check = check.remediation(
+                "A local app-server is already running (often Codex Desktop). CLI/TUI will attach via unix:// instead of starting a second instance. Use `codex --remote unix://` explicitly if needed.",
+            );
+        }
     }
     check
 }

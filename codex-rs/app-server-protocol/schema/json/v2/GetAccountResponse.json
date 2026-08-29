@@ -102,11 +102,23 @@
         }
       ]
     },
+    "accountPool": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/definitions/AccountPoolReadResponse"
+        }
+      ],
+      "description": "Native multi-account pool snapshot when `[account_pool]` is configured.\n\nStable clients (including mobile) can use this field from `account/read` instead of the experimental `accountPool/read` RPC to show per-profile availability and cooldowns."
+    },
     "requiresOpenaiAuth": {
       "type": "boolean"
     }
   },
   "required": [
+    "accountPool",
     "requiresOpenaiAuth"
   ],
   "title": "GetAccountResponse",

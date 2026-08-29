@@ -288,6 +288,40 @@
       },
       "type": "object"
     },
+    "AccountPoolReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/definitions/AccountPoolAccount"
+          },
+          "type": "array"
+        },
+        "activeGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "activeProfileId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "accounts",
+        "enabled"
+      ],
+      "title": "AccountPoolReadResponse",
+      "type": "object"
+    },
     "AccountPoolUpdatedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "Pushed whenever the account pool's scheduling state changes (active account, availability, or observed rate limits). Unlike `accountPool/read`, the per-account `planType`/`email` identity fields are omitted (`null`) to keep the notification cheap; fetch them on demand.",
@@ -392,6 +426,17 @@
     "AccountUpdatedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
+        "accountPool": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/AccountPoolReadResponse"
+            }
+          ],
+          "description": "Full native account-pool snapshot when `[account_pool]` is configured.\n\nStable remote clients (including mobile) can render multi-profile status from this notification without calling experimental `accountPool/read`."
+        },
         "authMode": {
           "anyOf": [
             {
@@ -413,6 +458,9 @@
           ]
         }
       },
+      "required": [
+        "accountPool"
+      ],
       "title": "AccountUpdatedNotification",
       "type": "object"
     },
@@ -8327,11 +8375,23 @@
             }
           ]
         },
+        "accountPool": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/AccountPoolReadResponse"
+            }
+          ],
+          "description": "Native multi-account pool snapshot when `[account_pool]` is configured.\n\nStable clients (including mobile) can use this field from `account/read` instead of the experimental `accountPool/read` RPC to show per-profile availability and cooldowns."
+        },
         "requiresOpenaiAuth": {
           "type": "boolean"
         }
       },
       "required": [
+        "accountPool",
         "requiresOpenaiAuth"
       ],
       "title": "GetAccountResponse",

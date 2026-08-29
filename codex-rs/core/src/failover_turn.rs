@@ -34,13 +34,13 @@ pub(crate) enum SamplingFailoverDirective {
 /// The coordinator owns execution-identity switching. This adapter owns replay semantics, keeping
 /// scheduling independent from the agent loop so the same failover machinery can serve subagents,
 /// review workers and other inference surfaces.
-pub(crate) fn handle_sampling_failover(
+pub(crate) async fn handle_sampling_failover(
     execution_auth: &ExecutionAuth,
     failed_lease: &ExecutionAuthLease,
     checkpoint: SamplingAttemptCheckpoint,
     error: &CodexErr,
 ) -> std::io::Result<SamplingFailoverDirective> {
-    match FailoverCoordinator::handle_inference_error(execution_auth, failed_lease, error)? {
+    match FailoverCoordinator::handle_inference_error(execution_auth, failed_lease, error).await? {
         FailoverOutcome::NotApplicable => Ok(SamplingFailoverDirective::NotHandled),
         FailoverOutcome::PoolExhausted { cause } => {
             tracing::warn!(
@@ -48,6 +48,13 @@ pub(crate) fn handle_sampling_failover(
                 "every configured Codex execution account is unavailable"
             );
             Ok(SamplingFailoverDirective::PoolExhausted)
+        }
+        FailoverOutcome::StaleIdentityQuotaRejection => {
+            tracing::info!(
+                profile_id = ?failed_lease.profile_id(),
+                "resyncing execution identity after a mismatched usage-limit rejection"
+            );
+            Ok(SamplingFailoverDirective::ReplayCurrentSamplingRequest)
         }
         FailoverOutcome::Rebound {
             cause,

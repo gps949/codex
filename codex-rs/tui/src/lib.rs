@@ -486,36 +486,52 @@ async fn start_app_server(
             return connect_remote_app_server(endpoint.clone()).await;
         }
         AppServerTarget::LocalDaemon { endpoint } => {
-            // The implicit local daemon is only reused when it runs the same version as this
-            // binary. A daemon left behind by the official build (or another fork build) does
-            // not know this fork's API surface, so silently reusing it breaks features like
-            // the account pool. Mismatches fall back to an embedded app server; the foreign
-            // daemon itself is left running for whichever tool owns it.
-            match connect_remote_app_server(endpoint.clone()).await {
-                Ok(client) => {
-                    let client_version = env!("CARGO_PKG_VERSION");
-                    let server_version = match &client {
-                        AppServerClient::Remote(remote) => remote.server_version(),
-                        AppServerClient::InProcess(_) => Some(client_version),
-                    };
-                    if server_version == Some(client_version) {
-                        return Ok(client);
-                    }
-                    tracing::info!(
-                        ?server_version,
-                        client_version,
-                        "local app-server daemon runs a different version; using an embedded app server"
-                    );
-                }
-                Err(err) => {
-                    tracing::info!(
-                        %err,
-                        "failed to connect to the local app-server daemon; using an embedded app server"
-                    );
-                }
+            // Always attach to an existing local app-server instead of starting a
+            // second embedded instance that would fight over SQLite and auth state.
+            let client = connect_remote_app_server(endpoint.clone())
+                .await
+                .wrap_err_with(|| {
+                    format!(
+                        "A local Codex app-server is already running at {}, but this CLI could not attach.\n\
+                         Quit the other Codex app (for example Desktop) or connect explicitly with:\n\
+                           codex --remote unix://",
+                        match &endpoint {
+                            RemoteAppServerEndpoint::UnixSocket { socket_path } => {
+                                socket_path.display().to_string()
+                            }
+                            RemoteAppServerEndpoint::WebSocket { websocket_url, .. } => {
+                                websocket_url.clone()
+                            }
+                        }
+                    )
+                })?;
+            let client_version = env!("CARGO_PKG_VERSION");
+            let server_version = match &client {
+                AppServerClient::Remote(remote) => remote.server_version(),
+                AppServerClient::InProcess(_) => Some(client_version),
+            };
+            if server_version != Some(client_version) {
+                tracing::warn!(
+                    ?server_version,
+                    client_version,
+                    "attached to a local app-server running a different version; \
+                     some fork features (for example account pool RPCs) may be unavailable until versions match"
+                );
+            }
+            return Ok(client);
+        }
+        AppServerTarget::Embedded => {
+            if let Some(socket_path) = maybe_probe_default_daemon_socket(&config.codex_home).await {
+                return Err(color_eyre::eyre::eyre!(
+                    "Refusing to start a second embedded app-server while another Codex instance is already listening at {}.\n\
+                     Attach to the existing server with:\n\
+                       codex --remote unix://\n\
+                     or quit the other Codex app first.",
+                    socket_path.display()
+                )
+                .into());
             }
         }
-        AppServerTarget::Embedded => {}
     }
 
     start_embedded_app_server(
@@ -886,7 +902,7 @@ fn latest_session_cwd_filter<'a>(
 fn app_server_target_for_launch(
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
     default_daemon_socket: Option<AbsolutePathBuf>,
-    can_reuse_implicit_local_daemon: bool,
+    _can_reuse_implicit_local_daemon: bool,
     workload_identity_selected: bool,
 ) -> std::io::Result<AppServerTarget> {
     if workload_identity_selected {
@@ -900,14 +916,12 @@ fn app_server_target_for_launch(
     }
     Ok(match explicit_remote_endpoint {
         Some(endpoint) => AppServerTarget::Remote { endpoint },
-        None if can_reuse_implicit_local_daemon => {
-            default_daemon_socket.map_or(AppServerTarget::Embedded, |socket_path| {
-                AppServerTarget::LocalDaemon {
-                    endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
-                }
-            })
-        }
-        None => AppServerTarget::Embedded,
+        None => match default_daemon_socket {
+            Some(socket_path) => AppServerTarget::LocalDaemon {
+                endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+            },
+            None => AppServerTarget::Embedded,
+        },
     })
 }
 
@@ -2539,12 +2553,17 @@ mod tests {
         let socket_path = AbsolutePathBuf::relative_to_current_dir("codex.sock")?;
         let target = app_server_target_for_launch(
             /*explicit_remote_endpoint*/ None,
-            Some(socket_path),
+            Some(socket_path.clone()),
             /*can_reuse_implicit_local_daemon*/ false,
             /*workload_identity_selected*/ false,
         )?;
 
-        assert_eq!(target, AppServerTarget::Embedded);
+        assert_eq!(
+            target,
+            AppServerTarget::LocalDaemon {
+                endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+            }
+        );
         Ok(())
     }
 

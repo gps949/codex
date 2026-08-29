@@ -7,6 +7,7 @@ use codex_protocol::error::CodexErrorDetails;
 
 use crate::execution_auth::ExecutionAuth;
 use crate::execution_auth::ExecutionAuthLease;
+use crate::quota_exhaustion::usage_limit_matches_profile;
 
 /// Backend credit-depletion responses do not always include a reset timestamp. Such an account
 /// must not become permanently unusable until process restart: credits may be replenished while
@@ -43,6 +44,9 @@ pub(crate) enum FailoverOutcome {
     },
     /// Native routing recognized the failure, but every configured account is unavailable.
     PoolExhausted { cause: FailoverCause },
+    /// A usage-limit rejection did not match the profile bound to the failed lease. The caller
+    /// should resync auth/transport and retry without marking the profile exhausted.
+    StaleIdentityQuotaRejection,
 }
 
 /// Coordinates account lifecycle changes without owning transport or turn replay semantics.
@@ -55,13 +59,24 @@ pub(crate) enum FailoverOutcome {
 pub(crate) struct FailoverCoordinator;
 
 impl FailoverCoordinator {
-    pub(crate) fn handle_inference_error(
+    pub(crate) async fn handle_inference_error(
         execution_auth: &ExecutionAuth,
         failed_lease: &ExecutionAuthLease,
         error: &CodexErr,
     ) -> std::io::Result<FailoverOutcome> {
         match error.details() {
             CodexErrorDetails::UsageLimitReached(limit) => {
+                if let Some(account_lease) = failed_lease.account_lease()
+                    && !usage_limit_matches_profile(account_lease, limit).await
+                {
+                    tracing::warn!(
+                        profile_id = %account_lease.profile().id,
+                        error_plan_type = ?limit.plan_type,
+                        rate_limit_reached_type = ?limit.rate_limit_reached_type,
+                        "usage-limit rejection does not match the bound execution profile; resyncing identity instead of marking exhausted"
+                    );
+                    return Ok(FailoverOutcome::StaleIdentityQuotaRejection);
+                }
                 if let Some(rate_limits) = limit.rate_limits.as_deref() {
                     execution_auth.observe_rate_limits(failed_lease, rate_limits)?;
                 }

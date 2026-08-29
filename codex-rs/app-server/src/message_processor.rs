@@ -402,6 +402,7 @@ impl MessageProcessor {
             outgoing.clone(),
             Arc::clone(&config),
             config_manager.clone(),
+            crate::mobile_account_bridge::shared_remote_client_registry(),
         );
         let apps_processor = AppsRequestProcessor::new(
             auth_manager.clone(),
@@ -806,6 +807,9 @@ impl MessageProcessor {
             );
         }
         self.outgoing.connection_closed(connection_id).await;
+        self.account_processor
+            .unregister_remote_client(connection_id)
+            .await;
         self.fs_processor.connection_closed(connection_id).await;
         self.command_exec_processor
             .connection_closed(connection_id)
@@ -864,6 +868,14 @@ impl MessageProcessor {
                         },
                     )
                     .await;
+                if let Some(client_name) = session.app_server_client_name() {
+                    self.account_processor
+                        .register_remote_client(connection_id, client_name)
+                        .await;
+                    self.account_processor
+                        .notify_remote_client_account_pool(connection_id, Some(client_name))
+                        .await;
+                }
             }
             return Ok(());
         }
@@ -1438,14 +1450,26 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::TurnStart { params, .. } => {
-                self.turn_processor
-                    .turn_start(
+                if let Some(response) = self
+                    .account_processor
+                    .try_handle_mobile_slash_turn(
                         request_id.clone(),
-                        params,
-                        app_server_client_name.clone(),
-                        client_version.clone(),
+                        params.clone(),
+                        app_server_client_name.as_deref(),
                     )
-                    .await
+                    .await?
+                {
+                    Ok(Some(response.into()))
+                } else {
+                    self.turn_processor
+                        .turn_start(
+                            request_id.clone(),
+                            params,
+                            app_server_client_name.clone(),
+                            client_version.clone(),
+                        )
+                        .await
+                }
             }
             ClientRequest::ThreadInjectItems { params, .. } => {
                 self.turn_processor
@@ -1561,7 +1585,9 @@ impl MessageProcessor {
                 self.account_processor.cancel_login_account(params).await
             }
             ClientRequest::GetAccount { params, .. } => {
-                self.account_processor.get_account(params).await
+                self.account_processor
+                    .get_account(params, session.app_server_client_name())
+                    .await
             }
             ClientRequest::GetAuthStatus { params, .. } => {
                 self.account_processor.get_auth_status(params).await
@@ -1573,7 +1599,9 @@ impl MessageProcessor {
                 self.account_processor.use_account_pool(params).await
             }
             ClientRequest::GetAccountRateLimits { .. } => {
-                self.account_processor.get_account_rate_limits().await
+                self.account_processor
+                    .get_account_rate_limits(app_server_client_name.as_deref())
+                    .await
             }
             ClientRequest::ConsumeAccountRateLimitResetCredit { params, .. } => {
                 self.account_processor
@@ -1584,7 +1612,9 @@ impl MessageProcessor {
                 self.account_processor.get_account_token_usage(params).await
             }
             ClientRequest::GetWorkspaceMessages { .. } => {
-                self.account_processor.get_workspace_messages().await
+                self.account_processor
+                    .get_workspace_messages(session.app_server_client_name())
+                    .await
             }
             ClientRequest::SendAddCreditsNudgeEmail { params, .. } => {
                 self.account_processor

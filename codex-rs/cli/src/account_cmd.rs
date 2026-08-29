@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
+use codex_core::ExecutionAccountPoolHandle;
 use codex_core::config::Config;
 use codex_login::AccountLoginOutcomeKind;
 use codex_login::AccountProfileId;
@@ -13,9 +14,14 @@ use codex_login::CLIENT_ID;
 use codex_login::ServerOptions;
 use codex_login::begin_account_browser_login;
 use codex_login::begin_account_device_login;
+use codex_login::format_exhausted_reset;
 use codex_login::logout_with_revoke;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_utils_cli::CliConfigOverrides;
+
+use crate::account_config::format_rotation_strategy;
+use crate::account_config::parse_rotation_strategy;
+use crate::account_config::patch_account_pool_config;
 
 const DEFAULT_PRIORITY_STEP: u32 = 10;
 
@@ -424,6 +430,188 @@ pub(crate) async fn run_account_remove(
     std::process::exit(0);
 }
 
+pub(crate) async fn run_account_pool(cli_config_overrides: CliConfigOverrides) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    let auth_manager =
+        match AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await {
+            Ok(manager) => manager,
+            Err(error) => {
+                eprintln!("Error loading auth manager: {error}");
+                std::process::exit(1);
+            }
+        };
+    let pool_handle = ExecutionAccountPoolHandle::shared(auth_manager);
+    let enabled = match pool_handle.ensure_from_config(&config).await {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            eprintln!("Error initializing account pool: {error}");
+            std::process::exit(1);
+        }
+    };
+    if !enabled {
+        eprintln!("No Codex account pool is configured. Add profiles with `codex account add`.");
+        std::process::exit(0);
+    }
+
+    let rotation = format_rotation_strategy(config.account_pool.effective_rotation_strategy());
+    let return_to_preferred = config.account_pool.effective_return_to_preferred();
+    let preemptive = config
+        .account_pool
+        .effective_preemptive_switch_percent()
+        .map(|percent| format!("{percent:.0}%"))
+        .unwrap_or_else(|| "disabled".to_string());
+    println!(
+        "rotation_strategy={rotation}\treturn_to_preferred={return_to_preferred}\tpreemptive_switch={preemptive}"
+    );
+    println!("ACTIVE\tPRIORITY\tPROFILE\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tLABEL");
+    for snapshot in pool_handle.snapshots() {
+        let (plan, email) = load_profile_identity(&config, &snapshot.profile).await;
+        let availability = match &snapshot.availability {
+            codex_login::AccountAvailability::Available => "available".to_string(),
+            codex_login::AccountAvailability::Exhausted { resets_at } => match resets_at {
+                Some(until) if *until > Utc::now() => {
+                    format!("cooldown until {}", format_exhausted_reset(*until))
+                }
+                _ => "available".to_string(),
+            },
+            codex_login::AccountAvailability::AuthenticationUnavailable { .. } => {
+                "auth unavailable".to_string()
+            }
+            codex_login::AccountAvailability::Disabled => "disabled".to_string(),
+        };
+        let primary = snapshot
+            .rate_limits
+            .primary
+            .map(|window| format!("{:.0}", window.used_percent))
+            .unwrap_or_else(|| "-".to_string());
+        let secondary = snapshot
+            .rate_limits
+            .secondary
+            .map(|window| format!("{:.0}", window.used_percent))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            if snapshot.is_active { "*" } else { "" },
+            snapshot.profile.priority,
+            snapshot.profile.id,
+            availability,
+            plan.unwrap_or_else(|| "-".to_string()),
+            email.unwrap_or_else(|| "-".to_string()),
+            primary,
+            secondary,
+            snapshot.profile.label.as_deref().unwrap_or("-"),
+        );
+    }
+    std::process::exit(0);
+}
+
+pub(crate) async fn run_account_config_show(cli_config_overrides: CliConfigOverrides) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    let pool = &config.account_pool;
+    println!(
+        "rotation_strategy={}",
+        format_rotation_strategy(pool.effective_rotation_strategy())
+    );
+    println!(
+        "return_to_preferred={}",
+        pool.effective_return_to_preferred()
+    );
+    match pool.effective_preemptive_switch_percent() {
+        Some(percent) => println!("preemptive_switch_percent={percent:.0}"),
+        None => println!("preemptive_switch_percent=disabled"),
+    }
+    println!(
+        "auto_reset_credits={:?}",
+        pool.auto_reset_credits.unwrap_or_default()
+    );
+    if let Some(minutes) = pool.auto_reset_credit_min_wait_minutes {
+        println!("auto_reset_credit_min_wait_minutes={minutes}");
+    }
+    std::process::exit(0);
+}
+
+pub(crate) async fn run_account_config_set_rotation_strategy(
+    cli_config_overrides: CliConfigOverrides,
+    strategy: String,
+) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    let strategy = match parse_rotation_strategy(&strategy) {
+        Ok(strategy) => strategy,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    match patch_account_pool_config(&config.codex_home, |pool| {
+        pool.rotation_strategy = Some(strategy);
+    }) {
+        Ok(pool) => {
+            eprintln!(
+                "Updated rotation_strategy to {} in config.toml.",
+                format_rotation_strategy(pool.effective_rotation_strategy())
+            );
+            eprintln!("Running Codex processes pick up the change on their next restart.");
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("Error updating config.toml: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub(crate) async fn run_account_config_set_return_to_preferred(
+    cli_config_overrides: CliConfigOverrides,
+    enabled: bool,
+) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    match patch_account_pool_config(&config.codex_home, |pool| {
+        pool.return_to_preferred = Some(enabled);
+    }) {
+        Ok(pool) => {
+            eprintln!(
+                "Updated return_to_preferred to {} in config.toml.",
+                pool.effective_return_to_preferred()
+            );
+            eprintln!("Running Codex processes pick up the change on their next restart.");
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("Error updating config.toml: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub(crate) async fn run_account_config_set_preemptive_switch_percent(
+    cli_config_overrides: CliConfigOverrides,
+    percent: f64,
+) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    match patch_account_pool_config(&config.codex_home, |pool| {
+        pool.preemptive_switch_percent = if percent > 0.0 && percent < 100.0 {
+            Some(percent)
+        } else {
+            None
+        };
+    }) {
+        Ok(pool) => {
+            match pool.effective_preemptive_switch_percent() {
+                Some(percent) => {
+                    eprintln!("Updated preemptive_switch_percent to {percent:.0} in config.toml.");
+                }
+                None => eprintln!("Disabled preemptive switching in config.toml."),
+            }
+            eprintln!("Running Codex processes pick up the change on their next restart.");
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("Error updating config.toml: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 async fn register_existing_root_login(
     config: &Config,
     store: &AccountProfileStore,
@@ -476,8 +664,8 @@ async fn load_profile_identity(
 fn format_cooldown(state: Option<&AccountRuntimeProfileState>) -> String {
     state
         .and_then(|state| state.exhausted_until.as_ref())
-        .filter(|reset| *reset > &Utc::now())
-        .map(ToString::to_string)
+        .filter(|reset| **reset > Utc::now())
+        .map(|reset| format_exhausted_reset(*reset))
         .unwrap_or_else(|| "-".to_string())
 }
 

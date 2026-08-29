@@ -7,6 +7,7 @@ use app_test_support::write_chatgpt_auth;
 use chrono::Duration;
 use chrono::Utc;
 use codex_app_server_protocol::Account;
+use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountResponse;
@@ -224,6 +225,12 @@ async fn personal_access_token_without_email_supports_auth_status_and_account_re
                 plan_type: AccountPlanType::EnterpriseCbpAutomation,
             }),
             requires_openai_auth: true,
+            account_pool: Some(AccountPoolReadResponse {
+                enabled: false,
+                active_profile_id: None,
+                active_generation: None,
+                accounts: Vec::new(),
+            }),
         }
     );
 

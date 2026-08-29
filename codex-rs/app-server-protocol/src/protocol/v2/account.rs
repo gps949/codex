@@ -1,4 +1,5 @@
 use super::ThreadUsage;
+use super::account_pool::AccountPoolReadResponse;
 use crate::JsonSchema;
 use crate::TS;
 use crate::protocol::common::AuthMode;
@@ -526,12 +527,20 @@ pub struct GetAccountParams {
     pub refresh_token: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct GetAccountResponse {
     pub account: Option<Account>,
     pub requires_openai_auth: bool,
+    /// Native multi-account pool snapshot when `[account_pool]` is configured.
+    ///
+    /// Stable clients (including mobile) can use this field from `account/read` instead of the
+    /// experimental `accountPool/read` RPC to show per-profile availability and cooldowns.
+    #[schemars(
+        schema_with = "crate::protocol::serde_helpers::optional_account_pool_read_response_schema"
+    )]
+    pub account_pool: Option<AccountPoolReadResponse>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -540,6 +549,14 @@ pub struct GetAccountResponse {
 pub struct AccountUpdatedNotification {
     pub auth_mode: Option<AuthMode>,
     pub plan_type: Option<PlanType>,
+    /// Full native account-pool snapshot when `[account_pool]` is configured.
+    ///
+    /// Stable remote clients (including mobile) can render multi-profile status from this
+    /// notification without calling experimental `accountPool/read`.
+    #[schemars(
+        schema_with = "crate::protocol::serde_helpers::optional_account_pool_read_response_schema"
+    )]
+    pub account_pool: Option<AccountPoolReadResponse>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
