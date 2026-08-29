@@ -305,3 +305,51 @@ Run: `just test -p codex-app-server-transport remote_control`
 
 Commit: `fix(remote-control): pin enrollment to a usable pool profile`
 
+### Task 7: Reconcile historical duplicate users and exact quota scopes
+
+**Files:**
+- Create: `codex-rs/login/src/account_identity_index.rs`
+- Create: `codex-rs/login/src/account_identity_index_tests.rs`
+- Modify: `codex-rs/login/src/account_runtime.rs`
+- Modify: `codex-rs/login/src/account_pool.rs`
+- Modify: `codex-rs/login/src/account_runtime_state.rs`
+- Modify: `codex-rs/cli/src/account_cmd.rs`
+
+**Interfaces:**
+- Produces: internal `AccountIdentityIndex` grouping exact ChatGPT user and quota-scope identities.
+- Produces: non-destructive duplicate-profile availability referring to the canonical profile id.
+- Consumes: request-bound workspace-wide depletion classification from the core plan.
+
+- [ ] **Step 1: Write failing historical duplicate tests**
+
+Persist `legacy-root` and a managed profile for the same `chatgpt_user_id`. Install the runtime and
+assert exactly one is schedulable, both remain visible, and neither credential home is deleted.
+
+- [ ] **Step 2: Write failing shared-workspace tests**
+
+Create two distinct Team users in one exact workspace and one Team user in another workspace.
+Assert a workspace-wide limit cools the first pair only. Consumer/individual limits affect only
+the request-bound profile.
+
+- [ ] **Step 3: Run RED**
+
+Run: `just test -p codex-login account_identity_index`
+
+- [ ] **Step 4: Implement deterministic non-destructive reconciliation**
+
+Prefer the lowest scheduling priority, then `legacy-root`, then lexical profile id as the canonical
+duplicate. Keep duplicate rows visible with an actionable reason. Never log raw ChatGPT user or
+workspace identifiers.
+
+- [ ] **Step 5: Surface diagnostics in CLI list/pool output**
+
+Show duplicate/shared-scope state without exposing identity values. Explain that shared workspace
+limits are expected to cool multiple seats together.
+
+- [ ] **Step 6: Run tests and commit**
+
+Run: `just test -p codex-login account_identity_index`
+
+Run: `just test -p codex-cli --test account`
+
+Commit: `fix(login): reconcile duplicate users and quota scopes`

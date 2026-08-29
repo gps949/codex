@@ -232,3 +232,49 @@ Run: `bash scripts/fork-release/upstream-sync-tests.sh`
 
 Commit: `test(ci): validate fork sync and release helpers`
 
+### Task 6: Complete platform bundles, version detection, and fork documentation
+
+**Files:**
+- Modify: `.github/workflows/fork-release.yml`
+- Modify: `codex-rs/tui/src/update_versions.rs`
+- Modify: `codex-rs/cli/src/doctor/updates.rs`
+- Modify: `codex-rs/linux-sandbox/src/bundled_bwrap.rs`
+- Modify: `README.md`
+- Modify: `FORK_MAINTENANCE.md`
+- Modify: `scripts/fork-release/verify-bundle-tests.sh`
+
+**Interfaces:**
+- Preserves: five release targets and fork `X.Y.Z+ma.N` version stamping.
+- Requires: every runtime-resolved sibling helper and embedded Linux bwrap digest.
+
+- [ ] **Step 1: Add failing bundle-completeness fixtures**
+
+Assert Linux builds embed the digest of the exact packaged bwrap and Windows bundles contain
+`codex-command-runner.exe` plus `codex-windows-sandbox-setup.exe` in addition to existing helpers.
+
+- [ ] **Step 2: Add failing same-baseline update tests**
+
+Assert `0.150.1+ma.1` upgrades to `0.150.1-ma.2`, does not downgrade to `ma.0`, and still upgrades
+to a newer upstream baseline. Doctor and TUI must share the same comparison semantics.
+
+- [ ] **Step 3: Run RED and implement release ordering/completeness**
+
+Build, strip, and hash bwrap before compiling Codex with `CODEX_BWRAP_SHA256`. Build/package every
+Windows helper resolved by the runtime. Feed the resulting expected-helper list to bundle tests.
+
+- [ ] **Step 4: Correct fork entry documentation**
+
+The root README starts with a clear unofficial-fork notice, supported platforms, verified install
+and update commands, and a link to upstream. Remove official install commands that would replace
+the fork. Reconcile merge/rebase, workflow enablement, and `auth-profiles/<id>` contradictions in
+`FORK_MAINTENANCE.md`.
+
+- [ ] **Step 5: Run validation and commit**
+
+Run: `just test -p codex-tui update_versions`
+
+Run: `just test -p codex-cli doctor::updates`
+
+Run: `bash scripts/fork-release/verify-bundle-tests.sh`
+
+Commit: `fix(release): ship complete fork bundles and updates`

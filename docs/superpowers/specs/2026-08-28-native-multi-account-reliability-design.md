@@ -38,6 +38,11 @@ code introduced or modified by this fork. It does not clean up unrelated upstrea
 8. Custom providers, Bedrock, local providers, and explicit API-key execution ignore the pool.
 9. Account-state writes are serialized across processes and cannot overwrite unseen newer state.
 10. A release is published only after fork checks pass for the exact source commit.
+11. A rate-limit observation never masquerades as an account-identity change.
+12. User-facing pool summaries are bounded, prefer labels over internal ids, and are never persisted
+    as synthetic conversation history.
+13. Duplicate ChatGPT users and shared workspace quota scopes are represented explicitly; profile
+    rows are not assumed to be independent quota buckets.
 
 ## 1. Request-bound execution authentication
 
@@ -45,6 +50,9 @@ code introduced or modified by this fork. It does not clean up unrelated upstrea
 request authentication source. The lease exposes the selected profile's `AuthManager` to core.
 `run_sampling_request` passes a request binding into `ModelClientSession`; `ModelClient` resolves
 ChatGPT auth and API auth from that binding instead of re-reading the mutable compatibility manager.
+The same binding remains authoritative across HTTP/WebSocket connection setup and unauthorized
+recovery. A 401 may refresh only the bound profile; it cannot resolve a different pool profile and
+retry the old prompt underneath the turn loop.
 
 The compatibility manager remains for upstream side systems that are not request scoped. It is not
 authoritative for inference, provenance, quota attribution, or reset-credit consumption.
@@ -116,6 +124,19 @@ as a defined migration-required state, not a generic unsupported-operation failu
 
 ## 4. Account lifecycle and persistence
 
+### Identity and quota scopes
+
+Every ready profile resolves a stable ChatGPT user identity and a quota-scope identity from its
+stored credentials without exposing either value through logs or UI. Profiles with the same
+ChatGPT user identity are historical duplicates: one deterministic canonical profile remains
+schedulable and the others remain visible as duplicate/non-schedulable entries until the user
+removes them. No credential is deleted automatically.
+
+Distinct Business/Team users may share a workspace quota scope. Workspace-wide depletion updates
+every profile in that exact scope, while individual or consumer limits update only the request-bound
+profile. Quota scopes are compared by exact internal identity, never merely by grouping plan names
+into broad consumer/workspace buckets.
+
 ### Transaction model
 
 `account-profiles.json` and `account-runtime-state.json` mutations use one account-pool lock in
@@ -169,6 +190,37 @@ processor into a dedicated fork-owned module. Tests use the public JSON-RPC boun
 The TUI picker tests cover selection actions, success/error messages, notification-driven status
 updates, disabled/auth-broken/cooldown states, and stale-daemon errors in addition to snapshots.
 
+### Typed pool changes and notification discipline
+
+The account pool publishes a typed change describing active identity, availability, rate limits,
+profile configuration, or restored cooldown state. App-server emits `account/updated` only when the
+effective authentication identity changes. `accountPool/updated` remains the state notification;
+rate-limit-only changes never trigger an identity reset, a generic warning, or another unconditional
+`account/rateLimits/read` request.
+
+TUI rate-limit threshold state is keyed by execution profile/generation. It resets when that
+identity changes, not when any pool snapshot changes. The reset-credit hint is emitted once when an
+identity's available count transitions from unknown/zero to positive and is not rediscovered on
+every pool update. Updating the rotation strategy synchronizes both `App.config` and the active
+`ChatWidget` config before the picker can be reopened.
+
+### Mobile presentation
+
+Mobile compatibility bridges use separate compact and detailed view models instead of reusing one
+full pool dump for every surface:
+
+- `/status` is at most six lines and 800 UTF-8 bytes: active display name, aggregate availability,
+  and the note that usage belongs to the active profile;
+- `/account` lists at most ten profiles and 2,000 UTF-8 bytes, with an overflow count;
+- a label is preferred, then email, and an internal profile id is shown only as the final fallback;
+- priority and generation are not shown on mobile;
+- account-email and rate-limit-name overlays stay single-line and at most 120 UTF-8 bytes;
+- generic warnings are reserved for actionable identity/availability transitions and stay under
+  240 UTF-8 bytes.
+
+Synthetic mobile slash-command lifecycle events remain ephemeral app-server output. They are not
+injected as ordinary user/assistant response items into durable thread history.
+
 ## 7. Module and API boundaries
 
 - Split the login scheduler into focused profile/domain, selection/generation, transition, and
@@ -201,11 +253,18 @@ and verifies the new bundle, preserves the current installation until validation
 prints the installed fork version. Network and process boundaries are dependency-injected for
 tests; no test contacts GitHub.
 
+Release bundles contain every helper the corresponding platform resolves at runtime. Linux embeds
+the checksum of the bundled `bwrap` built before the main binary; Windows includes command-runner
+and sandbox-setup helpers. Version comparison treats a larger `ma.N` on the same upstream baseline
+as an update. The root README identifies the fork and routes installation/update instructions only
+to verified fork assets.
+
 ## 9. Testing strategy
 
 Every behavior change follows red-green-refactor. Required coverage includes:
 
 - concurrent account selection between lease capture and HTTP/WebSocket send;
+- 401 recovery under a bound profile without cross-profile retry;
 - stale request failure attribution;
 - provider gating for ChatGPT, API key, Bedrock, local, and custom providers;
 - malformed manifest fail-closed behavior;
@@ -219,7 +278,10 @@ Every behavior change follows red-green-refactor. Required coverage includes:
 - daemon RPC live selection and next-start fallback;
 - Remote Control pinning, managed-only selection, token refresh, and identity replacement;
 - app-server public JSON-RPC and notification ordering;
-- TUI interaction plus snapshots;
+- typed rate-limit versus identity notification behavior and multi-connection fan-out;
+- TUI interaction, rotation-current synchronization, rate-limit warning dedupe, and snapshots;
+- bounded iOS/Android `/status` and `/account` output without durable-history pollution;
+- historical duplicate-user and exact shared-workspace quota behavior;
 - installer/update archive verification, atomic replacement, and failure rollback;
 - release gate behavior using workflow-level tests or actionlint plus executable helper tests.
 

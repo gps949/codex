@@ -125,7 +125,20 @@ Run: `just test -p codex-core websocket_execution_identity`
 Complete B after A was switched out, then deliver A's late 429. Assert B remains active and only A's
 availability changes when A was still the request owner.
 
-- [ ] **Step 7: Run scoped tests and commit**
+- [ ] **Step 7: Add bound 401 recovery coverage**
+
+Return 401 after A's lease is captured, make A refresh permanently fail while B remains usable, and
+assert the client does not retry the A-projected prompt with B auth. The turn loop must receive the
+profile failure, perform normal transition preflight, and only then build a B request.
+
+- [ ] **Step 8: Remove plan-family matching as an attribution authority**
+
+Use two Team profiles from different workspace ids and two consumer profiles from different users.
+Assert request auth and WebSocket reuse remain bound to the selected exact profile, so a stale
+connection cannot deliver another profile's same-plan error. Keep plan metadata only as a defensive
+mismatch signal; it must not be treated as proof that an error belongs to the lease.
+
+- [ ] **Step 9: Run scoped tests and commit**
 
 Run: `just test -p codex-core -E 'test(account_failover) or test(execution_request_auth)'`
 
