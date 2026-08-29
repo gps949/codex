@@ -80,13 +80,6 @@ pub(crate) fn mobile_slash_command(
     }
 }
 
-pub(crate) fn is_mobile_account_slash_command(
-    input: &[V2UserInput],
-    client_name: Option<&str>,
-) -> bool {
-    mobile_slash_command(input, client_name) == Some(MobileSlashCommand::Account)
-}
-
 fn single_text_input(input: &[V2UserInput]) -> Option<&str> {
     match input {
         [V2UserInput::Text { text, .. }] => Some(text.as_str()),
@@ -524,11 +517,11 @@ mod tests {
             text: "  /account  ".to_string(),
             text_elements: Vec::new(),
         }];
-        assert!(is_mobile_account_slash_command(
-            &input,
-            Some("codex_chatgpt_ios_remote")
-        ));
-        assert!(!is_mobile_account_slash_command(&input, Some("codex-tui")));
+        assert_eq!(
+            mobile_slash_command(&input, Some("codex_chatgpt_ios_remote")),
+            Some(MobileSlashCommand::Account)
+        );
+        assert_eq!(mobile_slash_command(&input, Some("codex-tui")), None);
     }
 
     #[test]
@@ -543,10 +536,10 @@ mod tests {
                 text_elements: Vec::new(),
             },
         ];
-        assert!(!is_mobile_account_slash_command(
-            &input,
-            Some("codex_chatgpt_ios_remote")
-        ));
+        assert_eq!(
+            mobile_slash_command(&input, Some("codex_chatgpt_ios_remote")),
+            None
+        );
     }
 
     #[test]

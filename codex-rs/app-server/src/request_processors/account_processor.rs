@@ -1251,10 +1251,10 @@ impl AccountRequestProcessor {
             requires_openai_auth: account_state.requires_openai_auth,
             account_pool,
         };
-        if is_chatgpt_remote_client(client_name) {
-            if let Some(pool) = response.account_pool.clone() {
-                overlay_get_account_for_remote_client(&mut response, &pool);
-            }
+        if is_chatgpt_remote_client(client_name)
+            && let Some(pool) = response.account_pool.clone()
+        {
+            overlay_get_account_for_remote_client(&mut response, &pool);
         }
         Ok(response)
     }
