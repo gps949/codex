@@ -29,6 +29,14 @@ fn only_managed_chatgpt_on_the_builtin_openai_provider_is_pool_eligible() {
             PoolEligibility::Eligible,
         ),
         (
+            "managed-only pool before profile resolution",
+            "openai",
+            &openai,
+            None,
+            false,
+            PoolEligibility::Eligible,
+        ),
+        (
             "API key",
             "openai",
             &openai,

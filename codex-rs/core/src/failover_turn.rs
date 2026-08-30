@@ -49,13 +49,6 @@ pub(crate) async fn handle_sampling_failover(
             );
             Ok(SamplingFailoverDirective::PoolExhausted)
         }
-        FailoverOutcome::StaleIdentityQuotaRejection => {
-            tracing::info!(
-                profile_id = ?failed_lease.profile_id(),
-                "resyncing execution identity after a mismatched usage-limit rejection"
-            );
-            Ok(SamplingFailoverDirective::ReplayCurrentSamplingRequest)
-        }
         FailoverOutcome::Rebound {
             cause,
             from_profile,

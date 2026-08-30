@@ -9,7 +9,6 @@ use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::sse;
-use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -147,10 +146,9 @@ async fn malformed_account_pool_fails_closed_before_sampling() -> anyhow::Result
 /// account, warns the user, and completes the same turn on the backup account's credentials.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
     let server = MockServer::start().await;
 
-    // First sampling request: authoritative plan usage-limit rejection.
+    // The request-bound token is authoritative even when advisory plan metadata disagrees.
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
         .respond_with(ResponseTemplate::new(429).set_body_json(json!({
@@ -158,7 +156,7 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::R
                 "type": "usage_limit_reached",
                 "message": "limit reached",
                 "resets_at": chrono::Utc::now().timestamp() + 3600,
-                "plan_type": "pro"
+                "plan_type": "team"
             }
         })))
         .up_to_n_times(1)
@@ -176,7 +174,9 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::R
     )
     .await;
 
-    let mut builder = test_codex().with_pre_build_hook(write_account_pool_fixture);
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(write_account_pool_fixture);
     let fixture = builder.build(&server).await?;
     let codex = fixture.codex.clone();
 
@@ -199,6 +199,29 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::R
 
     wait_for_event(&codex, |msg| matches!(msg, EventMsg::TurnComplete(_))).await;
 
+    let request_authorizations = server
+        .received_requests()
+        .await
+        .expect("captured response requests")
+        .into_iter()
+        .filter(|request| request.url.path() == "/v1/responses")
+        .map(|request| {
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        request_authorizations,
+        vec![
+            Some("Bearer access-primary".to_string()),
+            Some("Bearer access-backup".to_string()),
+        ],
+        "each request must use the token from its captured execution lease"
+    );
+
     // The replayed request must run on the backup account's credentials.
     let request = success.single_request();
     assert_eq!(
@@ -214,6 +237,19 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::R
         runtime_state["active_profile_id"],
         json!("backup-acct"),
         "unexpected runtime state: {runtime_state:#}"
+    );
+    assert_eq!(
+        runtime_state["profiles"][0]["profile_id"],
+        json!("primary-acct")
+    );
+    assert!(runtime_state["profiles"][0]["exhausted_until"].is_string());
+    assert_eq!(
+        runtime_state["profiles"][1]["profile_id"],
+        json!("backup-acct")
+    );
+    assert!(
+        runtime_state["profiles"][1]["exhausted_until"].is_null(),
+        "the backup profile must remain available: {runtime_state:#}"
     );
 
     Ok(())

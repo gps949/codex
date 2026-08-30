@@ -8,6 +8,7 @@ use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
 use crate::execution_auth::ExecutionAuth;
+use crate::failover_turn::pool_unavailable_error;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -281,6 +282,10 @@ async fn run_compact_task_inner_impl(
     } else {
         sess.services.model_client.new_session()
     };
+    let execution_lease = execution_auth
+        .active_lease()
+        .ok_or_else(|| pool_unavailable_error(execution_auth.as_ref()))?;
+    client_session.bind_execution_auth(execution_lease.request_auth());
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
     // survives retries within this compact turn.

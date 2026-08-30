@@ -1468,6 +1468,7 @@ async fn run_sampling_request(
             }
         };
         set_sampling_execution_provenance(&turn_context, execution_lease.clone());
+        client_session.bind_execution_auth(execution_lease.request_auth());
 
         let history_before = sess.clone_history().await;
         let history_cursor = pooled_execution.then(|| {

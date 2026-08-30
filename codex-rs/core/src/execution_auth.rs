@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use crate::config::Config;
+use crate::execution_request_auth::ExecutionRequestAuth;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_login::AccountLease;
@@ -83,6 +84,7 @@ enum PoolEligibility {
 #[derive(Clone)]
 pub(crate) struct ExecutionAuthLease {
     account: Option<AccountLease>,
+    auth_manager: Arc<AuthManager>,
 }
 
 /// A preemptive rotation lacking an authoritative reset timestamp re-probes the parked account
@@ -264,7 +266,7 @@ impl ExecutionAuth {
                 .lease()
                 .ok()
                 .map(ExecutionAuthLease::from_account_lease),
-            None => Some(ExecutionAuthLease::legacy()),
+            None => Some(ExecutionAuthLease::legacy(Arc::clone(&self.legacy_manager))),
         }
     }
 
@@ -413,7 +415,7 @@ fn pool_eligibility(
         && provider.experimental_bearer_token.is_none()
         && provider.auth.is_none()
         && provider.aws.is_none()
-        && auth_mode == Some(AuthMode::Chatgpt)
+        && matches!(auth_mode, None | Some(AuthMode::Chatgpt))
         && !workload_identity_selected
     {
         PoolEligibility::Eligible
@@ -423,13 +425,18 @@ fn pool_eligibility(
 }
 
 impl ExecutionAuthLease {
-    fn legacy() -> Self {
-        Self { account: None }
+    fn legacy(auth_manager: Arc<AuthManager>) -> Self {
+        Self {
+            account: None,
+            auth_manager,
+        }
     }
 
     fn from_account_lease(account: AccountLease) -> Self {
+        let auth_manager = account.auth_manager();
         Self {
             account: Some(account),
+            auth_manager,
         }
     }
 
@@ -443,6 +450,14 @@ impl ExecutionAuthLease {
 
     pub(crate) fn account_lease(&self) -> Option<&AccountLease> {
         self.account.as_ref()
+    }
+
+    pub(crate) fn request_auth(&self) -> ExecutionRequestAuth {
+        ExecutionRequestAuth::new(
+            self.profile_id().cloned(),
+            self.generation(),
+            Arc::clone(&self.auth_manager),
+        )
     }
 }
 

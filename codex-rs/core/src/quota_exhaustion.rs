@@ -1,19 +1,16 @@
-//! Validates that a backend usage-limit rejection belongs to the execution profile that
-//! actually sent the request.
+//! Compares advisory usage-limit metadata with the execution profile that sent the request.
 //!
-//! After account-pool rotation, a stale websocket or auth snapshot can still present the
-//! previous account's credentials. The backend then returns that account's quota error while
-//! the pool has already bound the turn to a different profile — incorrectly marking the new
-//! profile exhausted with the old account's reset timestamp.
+//! Request-bound authentication is the attribution authority. Plan metadata remains useful as a
+//! defensive mismatch signal, but multiple users and workspaces can share the same plan family,
+//! so it cannot prove which profile owns a rejection.
 
 use codex_login::AccountLease;
 use codex_protocol::account::PlanType;
 use codex_protocol::error::UsageLimitReachedError;
 use codex_protocol::protocol::RateLimitReachedType;
 
-/// Returns `false` when the usage-limit payload likely reflects a different ChatGPT identity
-/// than the profile bound to `lease`.
-pub(crate) async fn usage_limit_matches_profile(
+/// Returns `false` when advisory plan metadata disagrees with the bound profile.
+pub(crate) async fn usage_limit_metadata_matches_profile(
     lease: &AccountLease,
     limit: &UsageLimitReachedError,
 ) -> bool {

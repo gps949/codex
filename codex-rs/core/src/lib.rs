@@ -13,6 +13,7 @@ mod client_common;
 mod execution_account_pool;
 mod execution_auth;
 mod execution_provenance;
+mod execution_request_auth;
 mod failover;
 mod failover_checkpoint;
 mod failover_turn;

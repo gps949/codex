@@ -116,6 +116,8 @@ use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::context::BaseInstructionsFragment;
 use crate::context::ContextualUserFragment;
+use crate::execution_request_auth::ExecutionRequestAuth;
+use crate::execution_request_auth::ExecutionRequestIdentity;
 use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
@@ -277,6 +279,7 @@ pub struct ModelClient {
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
+    execution_request_auth: Option<ExecutionRequestAuth>,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -303,6 +306,7 @@ struct WebsocketSession {
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
     last_response_from_untraced_warmup: bool,
     connection_reused: StdMutex<bool>,
+    execution_identity: Option<ExecutionRequestIdentity>,
 }
 
 // This is intentionally not a `PartialEq` implementation: request equality includes `input` and
@@ -508,6 +512,7 @@ impl ModelClient {
         ModelClientSession {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
+            execution_request_auth: None,
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -523,6 +528,7 @@ impl ModelClient {
         ModelClientSession {
             client: self.clone(),
             websocket_session: WebsocketSession::default(),
+            execution_request_auth: None,
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -1015,11 +1021,17 @@ impl ModelClient {
     /// This centralizes setup used by both prewarm and normal request paths so they stay in
     /// lockstep when auth/provider resolution changes.
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
-        let auth = self.state.provider.auth().await;
-        let api_provider = self.state.provider.api_provider().await?;
-        let resolved_auth = self
-            .state
-            .provider
+        self.current_client_setup_for_provider(&self.state.provider)
+            .await
+    }
+
+    async fn current_client_setup_for_provider(
+        &self,
+        provider: &SharedModelProvider,
+    ) -> Result<CurrentClientSetup> {
+        let auth = provider.auth().await;
+        let api_provider = provider.api_provider().await?;
+        let resolved_auth = provider
             .api_auth_for_scope(ProviderAuthScope {
                 agent_identity_policy: self.agent_identity_policy,
                 session_source: self.state.session_source.clone(),
@@ -1218,6 +1230,33 @@ impl ModelClientSession {
         Arc::clone(&self.turn_state)
     }
 
+    pub(crate) fn bind_execution_auth(&mut self, request_auth: ExecutionRequestAuth) {
+        let identity = request_auth.identity();
+        if self.websocket_session.execution_identity.as_ref() != Some(&identity) {
+            self.reset_websocket_session();
+            self.turn_state = Arc::new(OnceLock::new());
+            self.websocket_session.execution_identity = Some(identity);
+        }
+        self.execution_request_auth = Some(request_auth);
+    }
+
+    fn request_provider(&self) -> SharedModelProvider {
+        match self.execution_request_auth.as_ref() {
+            Some(request_auth) => create_model_provider(
+                self.client.state.provider.info().clone(),
+                Some(request_auth.auth_manager()),
+            ),
+            None => Arc::clone(&self.client.state.provider),
+        }
+    }
+
+    async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
+        let provider = self.request_provider();
+        self.client
+            .current_client_setup_for_provider(&provider)
+            .await
+    }
+
     fn reset_websocket_session(&mut self) {
         self.websocket_session.connection = None;
         self.websocket_session.last_request = None;
@@ -1360,7 +1399,7 @@ impl ModelClientSession {
             return Ok(());
         }
 
-        let client_setup = self.client.current_client_setup().await.map_err(|err| {
+        let client_setup = self.current_client_setup().await.map_err(|err| {
             ApiError::Stream(format!(
                 "failed to build websocket prewarm client setup: {err}"
             ))
@@ -1496,14 +1535,15 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let provider = self.request_provider();
+        let auth_manager = provider.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
         let mut provider_auth_recovery_attempted = false;
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
-            let client_setup = self.client.current_client_setup().await?;
+            let client_setup = self.current_client_setup().await?;
             let transport = self
                 .client
                 .build_api_transport(&client_setup.api_provider, RESPONSES_ENDPOINT)?;
@@ -1566,16 +1606,12 @@ impl ModelClientSession {
                         stream,
                         request_session_telemetry,
                         inference_trace_attempt,
-                        Arc::clone(&self.client.state.provider),
+                        Arc::clone(&provider),
                     );
                     return Ok(stream);
                 }
                 Err(ApiError::Transport(unauthorized_transport))
-                    if self
-                        .client
-                        .state
-                        .provider
-                        .is_recoverable_auth_error(&unauthorized_transport) =>
+                    if provider.is_recoverable_auth_error(&unauthorized_transport) =>
                 {
                     let response_debug_context =
                         extract_response_debug_context(&unauthorized_transport);
@@ -1590,7 +1626,7 @@ impl ModelClientSession {
                             &mut auth_recovery,
                             &mut provider_auth_recovery_attempted,
                             session_telemetry,
-                            &self.client.state.provider,
+                            &provider,
                         )
                         .await?,
                     );
@@ -1599,7 +1635,7 @@ impl ModelClientSession {
                 Err(err) => {
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
-                    let err = self.client.state.provider.map_api_error(err);
+                    let err = provider.map_api_error(err);
                     inference_trace_attempt.record_failed(
                         &err,
                         response_debug_context.request_id.as_deref(),
@@ -1639,7 +1675,7 @@ impl ModelClientSession {
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<WebsocketStreamOutcome> {
-        let provider = Arc::clone(&self.client.state.provider);
+        let provider = self.request_provider();
         let auth_manager = provider.auth_manager();
 
         let mut auth_recovery = auth_manager
@@ -1648,7 +1684,7 @@ impl ModelClientSession {
         let mut provider_auth_recovery_attempted = false;
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
-            let client_setup = self.client.current_client_setup().await?;
+            let client_setup = self.current_client_setup().await?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -1770,7 +1806,7 @@ impl ModelClientSession {
 
             let websocket_connection =
                 self.websocket_session.connection.as_ref().ok_or_else(|| {
-                    self.client.state.provider.map_api_error(ApiError::Stream(
+                    provider.map_api_error(ApiError::Stream(
                         "websocket connection is unavailable".to_string(),
                     ))
                 })?;
@@ -1790,7 +1826,7 @@ impl ModelClientSession {
             self.websocket_session.last_response_from_untraced_warmup = warmup;
             let stream_result = stream_result.map_err(|err| {
                 let response_debug_context = extract_response_debug_context_from_api_error(&err);
-                let err = self.client.state.provider.map_api_error(err);
+                let err = provider.map_api_error(err);
                 inference_trace_attempt.record_failed(
                     &err,
                     response_debug_context.request_id.as_deref(),
@@ -1802,7 +1838,7 @@ impl ModelClientSession {
                 stream_result,
                 request_session_telemetry,
                 inference_trace_attempt,
-                Arc::clone(&self.client.state.provider),
+                Arc::clone(&provider),
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
