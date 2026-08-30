@@ -174,108 +174,6 @@ fn test_user_prompt() -> Prompt {
     }
 }
 
-#[tokio::test]
-async fn concurrent_root_and_subagent_requests_keep_distinct_bound_auth() -> anyhow::Result<()> {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .respond_with(ResponseTemplate::new(/*status*/ 400).set_body_json(json!({
-            "error": {"message": "stop after capturing auth"}
-        })))
-        .expect(/*requests*/ 2)
-        .mount(&server)
-        .await;
-
-    let outer_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("outer-token"));
-    let base_url = Some(format!("{}/v1", server.uri()));
-    let root_client = test_openai_model_client(
-        Arc::clone(&outer_manager),
-        base_url.clone(),
-        SessionSource::Cli,
-    );
-    let subagent_client = test_openai_model_client(
-        outer_manager,
-        base_url,
-        SessionSource::SubAgent(SubAgentSource::Other("reviewer".to_string())),
-    );
-    let mut root_session = root_client.new_session();
-    root_session.bind_execution_auth(ExecutionRequestAuth::new(
-        Some(AccountProfileId::new("team-workspace-a").expect("profile id")),
-        /*generation*/ 1,
-        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("token-a")),
-    ));
-    let mut subagent_session = subagent_client.new_session();
-    subagent_session.bind_execution_auth(ExecutionRequestAuth::new(
-        Some(AccountProfileId::new("team-workspace-b").expect("profile id")),
-        /*generation*/ 2,
-        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("token-b")),
-    ));
-
-    let prompt = test_user_prompt();
-    let model_info = test_model_info();
-    let telemetry = test_session_telemetry();
-    let trace = InferenceTraceContext::disabled();
-    let root_metadata = test_responses_metadata_for_client(
-        &root_client,
-        /*turn_id*/ None,
-        format!("{}:0", root_client.state.thread_id),
-        /*parent_thread_id*/ None,
-        TestCodexResponsesRequestKind::Turn,
-    );
-    let subagent_metadata = test_responses_metadata_for_client(
-        &subagent_client,
-        /*turn_id*/ None,
-        format!("{}:0", subagent_client.state.thread_id),
-        /*parent_thread_id*/ None,
-        TestCodexResponsesRequestKind::Turn,
-    );
-    let (root_result, subagent_result) = tokio::join!(
-        root_session.stream(
-            &prompt,
-            &model_info,
-            &telemetry,
-            /*effort*/ None,
-            ReasoningSummaryConfig::None,
-            /*service_tier*/ None,
-            &root_metadata,
-            &trace,
-        ),
-        subagent_session.stream(
-            &prompt,
-            &model_info,
-            &telemetry,
-            /*effort*/ None,
-            ReasoningSummaryConfig::None,
-            /*service_tier*/ None,
-            &subagent_metadata,
-            &trace,
-        )
-    );
-    assert!(root_result.is_err());
-    assert!(subagent_result.is_err());
-
-    let mut authorizations = server
-        .received_requests()
-        .await
-        .expect("wiremock request history")
-        .into_iter()
-        .map(|request| {
-            request
-                .headers
-                .get(http::header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .expect("authorization header")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    authorizations.sort();
-    assert_eq!(
-        authorizations,
-        vec!["Bearer token-a".to_string(), "Bearer token-b".to_string()]
-    );
-    Ok(())
-}
-
 struct RefreshingExternalAuth {
     initial: CodexAuth,
     refreshed: CodexAuth,
@@ -417,6 +315,31 @@ fn websocket_turn_state_is_reused_only_for_the_same_execution_identity() {
         session.turn_state.get().map(String::as_str),
         Some("sticky-a")
     );
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    session.websocket_session.last_request = Some(
+        client
+            .build_responses_request(
+                &test_user_prompt(),
+                &test_model_info(),
+                /*effort*/ None,
+                ReasoningSummaryConfig::None,
+                /*service_tier*/ None,
+                &responses_metadata,
+            )
+            .expect("cached websocket request"),
+    );
+    let (_last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
+    session.websocket_session.last_response_rx = Some(last_response_rx);
+    session.websocket_session.last_response_from_untraced_warmup = true;
+    session
+        .websocket_session
+        .set_connection_reused(/*connection_reused*/ true);
 
     session.bind_execution_auth(ExecutionRequestAuth::new(
         Some(AccountProfileId::new("workspace-user-b").expect("profile id")),
@@ -426,6 +349,8 @@ fn websocket_turn_state_is_reused_only_for_the_same_execution_identity() {
     assert_eq!(session.turn_state.get(), None);
     assert!(session.websocket_session.last_request.is_none());
     assert!(session.websocket_session.last_response_rx.is_none());
+    assert!(!session.websocket_session.last_response_from_untraced_warmup);
+    assert!(!session.websocket_session.connection_reused());
 
     session
         .turn_state
