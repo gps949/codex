@@ -5,6 +5,7 @@ use super::trim_function_call_history_to_fit_context_window;
 use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::execution_auth::ExecutionAuthBinding;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -24,6 +25,7 @@ pub(super) async fn run_remote_compact_attempt(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     turn_state: Option<Arc<OnceLock<String>>>,
+    execution_binding: &ExecutionAuthBinding,
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -74,9 +76,17 @@ pub(super) async fn run_remote_compact_attempt(
             CodexResponsesRequestKind::Compaction(compaction_metadata),
         )
         .await;
-    let new_history = sess
-        .services
-        .model_client
+    let mut client_session = match execution_binding {
+        ExecutionAuthBinding::Stock => sess.services.model_client.new_session(),
+        ExecutionAuthBinding::Pooled(_) => sess
+            .services
+            .model_client
+            .new_session_for_execution_identity_change(),
+    };
+    if let Some(request_auth) = execution_binding.request_auth() {
+        client_session.bind_execution_auth(request_auth);
+    }
+    let new_history = client_session
         .compact_conversation_history(
             &prompt,
             &turn_context.model_info,

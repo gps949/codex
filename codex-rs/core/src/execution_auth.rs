@@ -9,8 +9,10 @@ use crate::config::Config;
 use crate::execution_request_auth::ExecutionRequestAuth;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_login::AccountAvailabilityMutation;
 use codex_login::AccountLease;
 use codex_login::AccountPool;
+use codex_login::AccountPoolError;
 use codex_login::AccountPoolRuntime;
 use codex_login::AccountPoolRuntimeError;
 use codex_login::AccountProfileId;
@@ -70,6 +72,37 @@ impl ExecutionAuthMode {
         match self {
             Self::Stock => false,
             Self::Pooled(runtime) => runtime.pool().snapshots().len() > 1,
+        }
+    }
+
+    pub(crate) fn capture_binding(&self) -> Result<ExecutionAuthBinding, AccountPoolError> {
+        match self {
+            Self::Stock => Ok(ExecutionAuthBinding::Stock),
+            Self::Pooled(runtime) => runtime
+                .pool()
+                .lease()
+                .map(ExecutionAuthLease::from_account_lease)
+                .map(ExecutionAuthBinding::Pooled),
+        }
+    }
+
+    pub(crate) fn is_pooled(&self) -> bool {
+        matches!(self, Self::Pooled(_))
+    }
+}
+
+/// Authentication binding captured at one inference request boundary.
+#[derive(Clone)]
+pub(crate) enum ExecutionAuthBinding {
+    Stock,
+    Pooled(ExecutionAuthLease),
+}
+
+impl ExecutionAuthBinding {
+    pub(crate) fn request_auth(&self) -> Option<ExecutionRequestAuth> {
+        match self {
+            Self::Stock => None,
+            Self::Pooled(lease) => Some(lease.request_auth()),
         }
     }
 }
@@ -238,12 +271,6 @@ impl ExecutionAuth {
         self.runtime().map(|runtime| runtime.pool())
     }
 
-    /// Whether this logical session can move between more than one configured execution identity.
-    pub(crate) fn multi_account_enabled(&self) -> bool {
-        self.account_pool()
-            .is_some_and(|pool| pool.snapshots().len() > 1)
-    }
-
     /// Stable profile that owns rollout items created by stock Codex before execution provenance
     /// existed. The root profile remains meaningful even after another profile becomes active.
     pub(crate) fn legacy_unattributed_profile_id(&self) -> Option<AccountProfileId> {
@@ -343,15 +370,8 @@ impl ExecutionAuth {
         else {
             return Ok(());
         };
-        pool.update_rate_limits(
-            &account_lease.profile().id,
-            AccountRateLimits {
-                primary: snapshot.primary.as_ref().map(convert_rate_limit_window),
-                secondary: snapshot.secondary.as_ref().map(convert_rate_limit_window),
-                observed_at: Some(Utc::now()),
-            },
-        )
-        .map_err(std::io::Error::other)
+        pool.update_rate_limits_from_lease(account_lease, convert_rate_limits(snapshot))
+            .map_err(std::io::Error::other)
     }
 
     /// Marks only the lease that actually received the quota rejection as exhausted. Generation
@@ -360,29 +380,49 @@ impl ExecutionAuth {
         &self,
         failed_lease: &ExecutionAuthLease,
         resets_at: Option<DateTime<Utc>>,
-    ) -> std::io::Result<Option<ExecutionAuthLease>> {
+    ) -> std::io::Result<AccountAvailabilityMutation> {
         let (Some(pool), Some(account_lease)) =
             (self.account_pool(), failed_lease.account.as_ref())
         else {
-            return Ok(None);
+            return Ok(AccountAvailabilityMutation::PoolExhausted);
         };
         pool.mark_exhausted(account_lease, resets_at)
-            .map(|next| next.map(ExecutionAuthLease::from_account_lease))
             .map_err(std::io::Error::other)
+    }
+
+    pub(crate) fn failover_after_usage_limit(
+        &self,
+        failed_lease: &ExecutionAuthLease,
+        resets_at: DateTime<Utc>,
+        snapshot: Option<&RateLimitSnapshot>,
+    ) -> std::io::Result<AccountAvailabilityMutation> {
+        let (Some(pool), Some(account_lease)) =
+            (self.account_pool(), failed_lease.account.as_ref())
+        else {
+            return Ok(AccountAvailabilityMutation::PoolExhausted);
+        };
+        match snapshot {
+            Some(snapshot) => pool.mark_exhausted_with_rate_limits(
+                account_lease,
+                Some(resets_at),
+                convert_rate_limits(snapshot),
+            ),
+            None => pool.mark_exhausted(account_lease, Some(resets_at)),
+        }
+        .map_err(std::io::Error::other)
     }
 
     pub(crate) fn failover_after_auth_unavailable(
         &self,
         failed_lease: &ExecutionAuthLease,
         message: impl Into<String>,
-    ) -> std::io::Result<Option<ExecutionAuthLease>> {
+    ) -> std::io::Result<AccountAvailabilityMutation> {
         let (Some(pool), Some(account_lease)) =
             (self.account_pool(), failed_lease.account.as_ref())
         else {
-            return Ok(None);
+            return Ok(AccountAvailabilityMutation::PoolExhausted);
         };
         pool.mark_authentication_unavailable(account_lease, message)
-            .map(|next| next.map(ExecutionAuthLease::from_account_lease))
             .map_err(std::io::Error::other)
     }
 
@@ -467,6 +507,14 @@ fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow
         resets_at: window
             .resets_at
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+    }
+}
+
+fn convert_rate_limits(snapshot: &RateLimitSnapshot) -> AccountRateLimits {
+    AccountRateLimits {
+        primary: snapshot.primary.as_ref().map(convert_rate_limit_window),
+        secondary: snapshot.secondary.as_ref().map(convert_rate_limit_window),
+        observed_at: Some(Utc::now()),
     }
 }
 

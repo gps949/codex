@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
+use codex_login::AccountAvailabilityMutation;
 use codex_login::AccountProfileId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
@@ -42,6 +43,15 @@ pub(crate) enum FailoverOutcome {
         to_profile: Option<AccountProfileId>,
         to_generation: u64,
     },
+    /// The failed profile observation was recorded (or safely ignored as stale) while another
+    /// account was already active. No identity switch occurred as part of this mutation.
+    ActiveUnchanged {
+        cause: FailoverCause,
+        failed_profile: Option<AccountProfileId>,
+        failed_generation: u64,
+        active_profile: Option<AccountProfileId>,
+        active_generation: u64,
+    },
     /// Native routing recognized the failure, but every configured account is unavailable.
     PoolExhausted { cause: FailoverCause },
 }
@@ -72,15 +82,15 @@ impl FailoverCoordinator {
                         "usage-limit metadata does not match the bound execution profile; attributing the rejection to the request-bound profile"
                     );
                 }
-                if let Some(rate_limits) = limit.rate_limits.as_deref() {
-                    execution_auth.observe_rate_limits(failed_lease, rate_limits)?;
-                }
                 let reset_at = quota_reset_or_reprobe(limit.resets_at.as_ref());
-                let next =
-                    execution_auth.failover_after_quota_exhausted(failed_lease, Some(reset_at))?;
-                Ok(Self::finish_rotation(
+                let mutation = execution_auth.failover_after_usage_limit(
                     failed_lease,
-                    next,
+                    reset_at,
+                    limit.rate_limits.as_deref(),
+                )?;
+                Ok(Self::finish_mutation(
+                    failed_lease,
+                    mutation,
                     FailoverCause::UsageLimitReached,
                 ))
             }
@@ -88,20 +98,20 @@ impl FailoverCoordinator {
                 // SSE/API quota rejections carry no reset timestamp; park the account on the
                 // conservative reprobe delay so recovery stays automatic.
                 let reset_at = quota_reset_or_reprobe(/*resets_at*/ None);
-                let next =
+                let mutation =
                     execution_auth.failover_after_quota_exhausted(failed_lease, Some(reset_at))?;
-                Ok(Self::finish_rotation(
+                Ok(Self::finish_mutation(
                     failed_lease,
-                    next,
+                    mutation,
                     FailoverCause::UsageLimitReached,
                 ))
             }
             CodexErrorDetails::RefreshTokenFailed(refresh_error) => {
-                let next = execution_auth
+                let mutation = execution_auth
                     .failover_after_auth_unavailable(failed_lease, refresh_error.to_string())?;
-                Ok(Self::finish_rotation(
+                Ok(Self::finish_mutation(
                     failed_lease,
-                    next,
+                    mutation,
                     FailoverCause::AuthenticationUnavailable,
                 ))
             }
@@ -109,21 +119,36 @@ impl FailoverCoordinator {
         }
     }
 
-    fn finish_rotation(
+    fn finish_mutation(
         failed_lease: &ExecutionAuthLease,
-        next: Option<ExecutionAuthLease>,
+        mutation: AccountAvailabilityMutation,
         cause: FailoverCause,
     ) -> FailoverOutcome {
-        let Some(next_lease) = next else {
-            return FailoverOutcome::PoolExhausted { cause };
-        };
-
-        FailoverOutcome::Rebound {
-            cause,
-            from_profile: failed_lease.profile_id().cloned(),
-            from_generation: failed_lease.generation(),
-            to_profile: next_lease.profile_id().cloned(),
-            to_generation: next_lease.generation(),
+        match mutation {
+            AccountAvailabilityMutation::Rebound(next_lease) => FailoverOutcome::Rebound {
+                cause,
+                from_profile: failed_lease.profile_id().cloned(),
+                from_generation: failed_lease.generation(),
+                to_profile: Some(next_lease.profile().id.clone()),
+                to_generation: next_lease.generation(),
+            },
+            AccountAvailabilityMutation::InactiveProfileUpdated {
+                active: Some(active),
+            }
+            | AccountAvailabilityMutation::StaleIgnored {
+                active: Some(active),
+            } => FailoverOutcome::ActiveUnchanged {
+                cause,
+                failed_profile: failed_lease.profile_id().cloned(),
+                failed_generation: failed_lease.generation(),
+                active_profile: Some(active.profile().id.clone()),
+                active_generation: active.generation(),
+            },
+            AccountAvailabilityMutation::PoolExhausted
+            | AccountAvailabilityMutation::InactiveProfileUpdated { active: None }
+            | AccountAvailabilityMutation::StaleIgnored { active: None } => {
+                FailoverOutcome::PoolExhausted { cause }
+            }
         }
     }
 }

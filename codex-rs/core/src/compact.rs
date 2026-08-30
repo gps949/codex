@@ -8,6 +8,7 @@ use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
 use crate::execution_auth::ExecutionAuth;
+use crate::execution_auth::ExecutionAuthBinding;
 use crate::failover_turn::pool_unavailable_error;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
@@ -265,27 +266,33 @@ async fn run_compact_task_inner_impl(
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
-    let multi_account_enabled = match execution_auth
-        .ensure_runtime_from_config(turn_context.config.as_ref())
+    let execution_auth_mode = match execution_auth
+        .mode_for_turn(turn_context.config.as_ref(), turn_context.provider.info())
         .await
     {
-        Ok(_) => execution_auth.multi_account_enabled(),
+        Ok(mode) => mode,
         Err(err) => {
-            tracing::warn!(%err, "failed to initialize native multi-account execution for compaction");
-            false
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "failed to initialize native multi-account execution for compaction: {err}"
+            )));
         }
     };
-    let mut client_session = if multi_account_enabled {
+    let mut client_session = if execution_auth_mode.is_pooled() {
         sess.services
             .model_client
             .new_session_for_execution_identity_change()
     } else {
         sess.services.model_client.new_session()
     };
-    let execution_lease = execution_auth
-        .active_lease()
-        .ok_or_else(|| pool_unavailable_error(execution_auth.as_ref()))?;
-    client_session.bind_execution_auth(execution_lease.request_auth());
+    match execution_auth_mode
+        .capture_binding()
+        .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?
+    {
+        ExecutionAuthBinding::Stock => {}
+        ExecutionAuthBinding::Pooled(execution_lease) => {
+            client_session.bind_execution_auth(execution_lease.request_auth());
+        }
+    }
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
     // survives retries within this compact turn.

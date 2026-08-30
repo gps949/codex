@@ -593,8 +593,34 @@ impl ModelClient {
     /// The model selection and telemetry context are passed explicitly to keep `ModelClient`
     /// session-scoped.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) async fn compact_conversation_history(
         &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        turn_state: Option<Arc<OnceLock<String>>>,
+        settings: CompactConversationRequestSettings,
+        session_telemetry: &SessionTelemetry,
+        compaction_trace: &CompactionTraceContext,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> Result<Vec<ResponseItem>> {
+        self.compact_conversation_history_with_provider(
+            &self.state.provider,
+            prompt,
+            model_info,
+            turn_state,
+            settings,
+            session_telemetry,
+            compaction_trace,
+            responses_metadata,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn compact_conversation_history_with_provider(
+        &self,
+        provider: &SharedModelProvider,
         prompt: &Prompt,
         model_info: &ModelInfo,
         turn_state: Option<Arc<OnceLock<String>>>,
@@ -606,7 +632,7 @@ impl ModelClient {
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
-        let client_setup = self.current_client_setup().await?;
+        let client_setup = self.current_client_setup_for_provider(provider).await?;
         let transport =
             self.build_api_transport(&client_setup.api_provider, RESPONSES_COMPACT_ENDPOINT)?;
         let request_telemetry = Self::build_request_telemetry(
@@ -694,7 +720,7 @@ impl ModelClient {
                 turn_state.as_deref(),
             )
             .await
-            .map_err(|error| self.state.provider.map_api_error(error));
+            .map_err(|error| provider.map_api_error(error));
         trace_attempt.record_result(result.as_deref());
         result
     }
@@ -1254,6 +1280,32 @@ impl ModelClientSession {
         let provider = self.request_provider();
         self.client
             .current_client_setup_for_provider(&provider)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn compact_conversation_history(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        turn_state: Option<Arc<OnceLock<String>>>,
+        settings: CompactConversationRequestSettings,
+        session_telemetry: &SessionTelemetry,
+        compaction_trace: &CompactionTraceContext,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> Result<Vec<ResponseItem>> {
+        let provider = self.request_provider();
+        self.client
+            .compact_conversation_history_with_provider(
+                &provider,
+                prompt,
+                model_info,
+                turn_state,
+                settings,
+                session_telemetry,
+                compaction_trace,
+                responses_metadata,
+            )
             .await
     }
 

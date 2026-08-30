@@ -6,6 +6,7 @@ use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact_remote::trim_function_call_history_to_fit_context_window;
+use crate::execution_auth::ExecutionAuthBinding;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -33,6 +34,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     client_session: Option<&mut ModelClientSession>,
+    execution_binding: &ExecutionAuthBinding,
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -99,8 +101,17 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let mut owned_client_session = None;
     let client_session = match client_session {
         Some(client_session) => client_session,
-        None => owned_client_session.insert(sess.services.model_client.new_session()),
+        None => owned_client_session.insert(match execution_binding {
+            ExecutionAuthBinding::Stock => sess.services.model_client.new_session(),
+            ExecutionAuthBinding::Pooled(_) => sess
+                .services
+                .model_client
+                .new_session_for_execution_identity_change(),
+        }),
     };
+    if let Some(request_auth) = execution_binding.request_auth() {
+        client_session.bind_execution_auth(request_auth);
+    }
     let compaction_output_result = run_remote_compaction_request_v2(
         sess,
         turn_context.as_ref(),

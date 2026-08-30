@@ -1,4 +1,4 @@
-use crate::execution_auth::ExecutionAuth;
+use crate::execution_auth::ExecutionAuthMode;
 
 /// Returns true when compaction output must remain transferable between execution accounts.
 ///
@@ -6,6 +6,6 @@ use crate::execution_auth::ExecutionAuth;
 /// move between ChatGPT identities, making that blob the only surviving representation of old
 /// context would make later failover impossible. Native multi-account sessions therefore create
 /// portable local/plaintext compaction checkpoints instead.
-pub(crate) fn requires_portable_compaction(execution_auth: &ExecutionAuth) -> bool {
-    execution_auth.multi_account_enabled()
+pub(crate) fn requires_portable_compaction(execution_auth_mode: &ExecutionAuthMode) -> bool {
+    execution_auth_mode.is_pooled()
 }

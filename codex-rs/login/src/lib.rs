@@ -32,6 +32,7 @@ pub use account_login::begin_account_browser_relogin;
 pub use account_login::begin_account_device_login;
 pub use account_login::begin_account_device_relogin;
 pub use account_pool::AccountAvailability;
+pub use account_pool::AccountAvailabilityMutation;
 pub use account_pool::AccountLease;
 pub use account_pool::AccountPool;
 pub use account_pool::AccountPoolError;

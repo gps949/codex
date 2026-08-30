@@ -15,6 +15,10 @@ use crate::compact_remote_history::history_item_groups;
 use crate::context::world_state::WorldState;
 use crate::context_manager::ContextManager;
 use crate::context_manager::estimate_item_token_count;
+use crate::execution_auth::ExecutionAuth;
+use crate::execution_auth::ExecutionAuthBinding;
+use crate::execution_auth::ExecutionAuthMode;
+use crate::failover_turn::pool_unavailable_error;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -50,11 +54,13 @@ use request::run_remote_compact_attempt;
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
     "Output exceeded the available model context and was truncated";
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
     turn_state: Arc<OnceLock<String>>,
+    execution_auth_mode: &ExecutionAuthMode,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
@@ -70,6 +76,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         &step_context,
         fallback_step_context.as_ref(),
         Some(turn_state),
+        execution_auth_mode,
         initial_context_injection,
         compaction_metadata,
     )
@@ -100,11 +107,21 @@ pub(crate) async fn run_remote_compact_task(
         CompactionImplementation::ResponsesCompact,
         CompactionPhase::StandaloneTurn,
     );
+    let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
+    let execution_auth_mode = execution_auth
+        .mode_for_turn(turn_context.config.as_ref(), turn_context.provider.info())
+        .await
+        .map_err(|err| {
+            CodexErr::UnsupportedOperation(format!(
+                "failed to initialize native multi-account execution: {err}"
+            ))
+        })?;
     run_remote_compact_task_inner(
         &sess,
         &step_context,
         /*fallback_step_context*/ None,
         /*turn_state*/ None,
+        &execution_auth_mode,
         InitialContextInjection::DoNotInject,
         compaction_metadata,
     )
@@ -117,6 +134,7 @@ async fn run_remote_compact_task_inner(
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
     turn_state: Option<Arc<OnceLock<String>>>,
+    execution_auth_mode: &ExecutionAuthMode,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<()> {
@@ -154,11 +172,16 @@ async fn run_remote_compact_task_inner(
             return Err(error);
         }
     }
+    let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
+    let execution_binding = execution_auth_mode
+        .capture_binding()
+        .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
     let result = run_remote_compact_task_inner_impl(
         sess,
         step_context,
         fallback_step_context,
         turn_state,
+        &execution_binding,
         initial_context_injection,
         compaction_metadata,
         &mut analytics_details,
@@ -189,11 +212,13 @@ async fn run_remote_compact_task_inner(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_remote_compact_task_inner_impl(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
     turn_state: Option<Arc<OnceLock<String>>>,
+    execution_binding: &ExecutionAuthBinding,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -216,6 +241,7 @@ async fn run_remote_compact_task_inner_impl(
         sess,
         step_context,
         turn_state.clone(),
+        execution_binding,
         &compaction_trace,
         compaction_metadata,
         analytics_details,
@@ -242,6 +268,7 @@ async fn run_remote_compact_task_inner_impl(
                 sess,
                 fallback_step_context,
                 turn_state,
+                execution_binding,
                 &fallback_compaction_trace,
                 compaction_metadata,
                 analytics_details,
