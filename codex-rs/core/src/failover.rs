@@ -135,6 +135,9 @@ impl FailoverCoordinator {
             AccountAvailabilityMutation::InactiveProfileUpdated {
                 active: Some(active),
             }
+            | AccountAvailabilityMutation::AlreadyUnavailable {
+                active: Some(active),
+            }
             | AccountAvailabilityMutation::StaleIgnored {
                 active: Some(active),
             } => FailoverOutcome::ActiveUnchanged {
@@ -146,6 +149,7 @@ impl FailoverCoordinator {
             },
             AccountAvailabilityMutation::PoolExhausted
             | AccountAvailabilityMutation::InactiveProfileUpdated { active: None }
+            | AccountAvailabilityMutation::AlreadyUnavailable { active: None }
             | AccountAvailabilityMutation::StaleIgnored { active: None } => {
                 FailoverOutcome::PoolExhausted { cause }
             }

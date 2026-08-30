@@ -7,6 +7,8 @@ use codex_core::TurnInputRequest;
 use codex_login::AccountAvailability;
 use codex_login::CodexAuth;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -70,9 +72,12 @@ impl Respond for GatedProfileResponder {
 async fn concurrent_threads_share_the_pool_but_keep_request_auth_and_provenance_bound()
 -> anyhow::Result<()> {
     let primary_server = MockServer::start().await;
+    let second_primary_server = MockServer::start().await;
     let backup_server = MockServer::start().await;
     let (primary_started_tx, primary_started_rx) = mpsc::channel();
     let (primary_release_tx, primary_release_rx) = mpsc::channel();
+    let (second_primary_started_tx, second_primary_started_rx) = mpsc::channel();
+    let (second_primary_release_tx, second_primary_release_rx) = mpsc::channel();
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
         .respond_with(GatedProfileResponder {
@@ -81,6 +86,15 @@ async fn concurrent_threads_share_the_pool_but_keep_request_auth_and_provenance_
         })
         .expect(/*requests*/ 2)
         .mount(&primary_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(GatedProfileResponder {
+            primary_started: second_primary_started_tx,
+            primary_release: Mutex::new(Some(second_primary_release_rx)),
+        })
+        .expect(/*requests*/ 2)
+        .mount(&second_primary_server)
         .await;
     let backup_response = mount_sse_once(
         &backup_server,
@@ -103,7 +117,36 @@ async fn concurrent_threads_share_the_pool_but_keep_request_auth_and_provenance_
             text_elements: Vec::new(),
         }]))
         .await?;
-    tokio::task::spawn_blocking(move || primary_started_rx.recv()).await??;
+    let mut second_primary_config = fixture.config.clone();
+    second_primary_config.model_provider.base_url =
+        Some(format!("{}/v1", second_primary_server.uri()));
+    let second_primary_options = StartThreadOptions {
+        session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: fixture.session_configured.thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: Some("request-auth-test".to_string()),
+            agent_role: None,
+        })),
+        ..StartThreadOptions::new(second_primary_config)
+    };
+    let second_primary_thread = fixture
+        .thread_manager
+        .start_thread(second_primary_options)
+        .await?;
+    second_primary_thread
+        .thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "second primary concurrent turn".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    tokio::task::spawn_blocking(move || -> Result<(), mpsc::RecvError> {
+        primary_started_rx.recv()?;
+        second_primary_started_rx.recv()?;
+        Ok(())
+    })
+    .await??;
 
     let pool = ExecutionAccountPoolHandle::shared(fixture.thread_manager.auth_manager());
     assert_eq!(
@@ -133,6 +176,7 @@ async fn concurrent_threads_share_the_pool_but_keep_request_auth_and_provenance_
     })
     .await;
     primary_release_tx.send(())?;
+    second_primary_release_tx.send(())?;
     let mut switch_warnings = Vec::new();
     loop {
         match fixture.codex.next_event().await?.msg {
@@ -144,6 +188,17 @@ async fn concurrent_threads_share_the_pool_but_keep_request_auth_and_provenance_
         }
     }
     assert_eq!(switch_warnings, Vec::<String>::new());
+    let mut second_switch_warnings = Vec::new();
+    loop {
+        match second_primary_thread.thread.next_event().await?.msg {
+            EventMsg::Warning(warning) if warning.message.contains("switched to") => {
+                second_switch_warnings.push(warning.message);
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(second_switch_warnings, Vec::<String>::new());
 
     let primary_requests = primary_server
         .received_requests()
@@ -152,7 +207,17 @@ async fn concurrent_threads_share_the_pool_but_keep_request_auth_and_provenance_
         .into_iter()
         .filter(|request| request.url.path() == "/v1/responses")
         .collect::<Vec<_>>();
-    assert_eq!(primary_requests.len(), 2);
+    let second_primary_requests = second_primary_server
+        .received_requests()
+        .await
+        .expect("captured second primary request")
+        .into_iter()
+        .filter(|request| request.url.path() == "/v1/responses")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (primary_requests.len(), second_primary_requests.len()),
+        (2, 2)
+    );
     let backup_request = backup_response.single_request();
     assert_eq!(
         (
@@ -176,12 +241,48 @@ async fn concurrent_threads_share_the_pool_but_keep_request_auth_and_provenance_
                     .get("chatgpt-account-id")
                     .and_then(|value| value.to_str().ok()),
             ),
+            (
+                second_primary_requests[0]
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                second_primary_requests[0]
+                    .headers
+                    .get("chatgpt-account-id")
+                    .and_then(|value| value.to_str().ok()),
+            ),
+            (
+                second_primary_requests[1]
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                second_primary_requests[1]
+                    .headers
+                    .get("chatgpt-account-id")
+                    .and_then(|value| value.to_str().ok()),
+            ),
             backup_request.header("authorization"),
         ),
         (
             (Some("Bearer access-primary"), Some("account-primary-acct")),
             (Some("Bearer access-backup"), Some("account-backup-acct")),
+            (Some("Bearer access-primary"), Some("account-primary-acct")),
+            (Some("Bearer access-backup"), Some("account-backup-acct")),
             Some("Bearer access-backup".to_string()),
+        ),
+    );
+    assert_eq!(
+        assistant_execution_provenance(
+            second_primary_thread
+                .session_configured
+                .rollout_path
+                .as_deref()
+                .expect("second primary rollout path"),
+            "PRIMARY_CONTINUED_ON_BACKUP",
+        )?,
+        (
+            Some(backup_identity.profile_id.to_string()),
+            Some(backup_identity.generation),
         ),
     );
     assert_eq!(

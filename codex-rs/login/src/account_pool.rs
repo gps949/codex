@@ -176,6 +176,8 @@ pub enum AccountAvailabilityMutation {
     PoolExhausted,
     /// The observation updated its exact inactive profile without changing the active identity.
     InactiveProfileUpdated { active: Option<AccountLease> },
+    /// This generation already recorded the same unavailable state; no mutation was needed.
+    AlreadyUnavailable { active: Option<AccountLease> },
     /// The profile has since been activated under a newer generation, so the observation is stale.
     StaleIgnored { active: Option<AccountLease> },
 }
@@ -686,6 +688,19 @@ impl AccountPool {
             return Ok(AccountAvailabilityMutation::StaleIgnored { active });
         }
 
+        if state
+            .accounts
+            .get(&lease.profile.id)
+            .is_some_and(|account| account.availability == availability)
+        {
+            let active = active_lease(&state);
+            drop(state);
+            if refreshed {
+                self.notify_change();
+            }
+            return Ok(AccountAvailabilityMutation::AlreadyUnavailable { active });
+        }
+
         let account = state
             .accounts
             .get_mut(&lease.profile.id)
@@ -694,7 +709,6 @@ impl AccountPool {
             account.rate_limits = rate_limits;
         }
         account.availability = availability;
-        account.last_active_generation = None;
 
         if state.active_profile.as_ref() != Some(&lease.profile.id) {
             let active = active_lease(&state);
@@ -755,7 +769,10 @@ fn refresh_expired_exhaustion(state: &mut AccountPoolState) -> bool {
     let now = Utc::now();
     let mut changed = false;
     for account in state.accounts.values_mut() {
-        changed |= account.availability.refresh_for_time(&now);
+        if account.availability.refresh_for_time(&now) {
+            account.last_active_generation = None;
+            changed = true;
+        }
     }
     changed
 }
@@ -1257,6 +1274,42 @@ mod tests {
         assert_eq!(
             pool.lease().expect("current first lease").generation(),
             current_first_lease.generation(),
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_failure_from_the_same_generation_is_idempotent() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let first_lease = pool.lease().expect("first lease");
+        let first_outcome = pool
+            .mark_exhausted(&first_lease, /*resets_at*/ None)
+            .expect("first failure");
+        let AccountAvailabilityMutation::Rebound(second_lease) = first_outcome else {
+            panic!("first failure must select the second profile");
+        };
+
+        let repeated_outcome = pool
+            .mark_exhausted(&first_lease, /*resets_at*/ None)
+            .expect("repeated failure");
+        let AccountAvailabilityMutation::AlreadyUnavailable {
+            active: Some(active),
+        } = repeated_outcome
+        else {
+            panic!("same-generation repeated failure must be idempotent");
+        };
+        assert_eq!(
+            (active.profile().id.clone(), active.generation()),
+            (second.id, second_lease.generation()),
         );
     }
 
