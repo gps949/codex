@@ -13,6 +13,7 @@ use codex_login::ExternalAuth;
 use codex_login::ExternalAuthFuture;
 use codex_login::ExternalAuthRefreshContext;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -150,6 +151,121 @@ pub(super) fn assistant_execution_provenance(
         .metadata
         .ok_or_else(|| anyhow::anyhow!("assistant response is missing execution provenance"))?;
     Ok((metadata.execution_profile_id, metadata.execution_generation))
+}
+
+fn response_item_execution_provenance(
+    rollout_path: &Path,
+    predicate: impl Fn(&ResponseItem) -> bool,
+) -> anyhow::Result<(Option<String>, Option<u64>)> {
+    let envelope = std::fs::read_to_string(rollout_path)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find_map(|line| match line.item {
+            RolloutItem::ResponseItem(envelope) if predicate(&envelope.item) => Some(envelope),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("matching response item missing from rollout"))?;
+    let metadata = envelope
+        .metadata
+        .ok_or_else(|| anyhow::anyhow!("matching response item is missing execution provenance"))?;
+    Ok((metadata.execution_profile_id, metadata.execution_generation))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_transition_respond_to_model_output_keeps_execution_provenance()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    // The legacy RespondToModel output has an empty call id. Pair it with a completed local-shell
+    // item and use a raw responder so request-shape validation cannot mask the provenance check.
+    let bodies = [
+        sse(vec![
+            ev_response_created("malformed-tool-search-response"),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "local_shell_call",
+                    "call_id": "",
+                    "status": "completed",
+                    "action": {
+                        "type": "exec",
+                        "command": ["true"],
+                    },
+                },
+            }),
+            core_test_support::responses::ev_tool_search_call(
+                "malformed-search",
+                &json!({"limit": 1}),
+            ),
+            ev_completed("malformed-tool-search-response"),
+        ]),
+        sse(vec![
+            ev_response_created("follow-up-response"),
+            ev_assistant_message("follow-up-message", "completed after tool error"),
+            ev_completed("follow-up-response"),
+        ]),
+    ];
+    let next_response = std::sync::atomic::AtomicUsize::new(0);
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(move |_: &wiremock::Request| {
+            let index = next_response.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(bodies[index].clone())
+        })
+        .expect(/*requests*/ 2)
+        .mount(&server)
+        .await;
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(write_account_pool_fixture);
+    let fixture = builder.build_with_auto_env(&server).await?;
+
+    fixture
+        .submit_turn("exercise a rejected tool search")
+        .await?;
+
+    let rollout_path = fixture
+        .session_configured
+        .rollout_path
+        .as_deref()
+        .expect("account transition rollout path");
+    let tool_call_provenance = response_item_execution_provenance(rollout_path, |item| {
+        matches!(
+            item,
+            ResponseItem::ToolSearchCall {
+                call_id: Some(call_id),
+                ..
+            } if call_id == "malformed-search"
+        )
+    })?;
+    let synthesized_output_provenance = response_item_execution_provenance(rollout_path, |item| {
+        matches!(
+            item,
+            ResponseItem::FunctionCallOutput { output, .. }
+                if matches!(
+                    &output.body,
+                    FunctionCallOutputBody::Text(text)
+                        if text.contains("failed to parse tool_search arguments")
+                )
+        )
+    })?;
+    let active_identity = ExecutionAccountPoolHandle::shared(fixture.thread_manager.auth_manager())
+        .active_identity()
+        .expect("active execution identity");
+    let expected = (
+        Some(active_identity.profile_id.to_string()),
+        Some(active_identity.generation),
+    );
+
+    assert_eq!(
+        (tool_call_provenance, synthesized_output_provenance),
+        (expected.clone(), expected),
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

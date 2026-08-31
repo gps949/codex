@@ -1517,10 +1517,27 @@ async fn run_sampling_request(
             let annotated = history_before
                 .clone()
                 .for_prompt_annotated(&step_context.model_info.input_modalities);
-            transition
+            let (items, stats) = transition
                 .prepare_for_request(annotated)
-                .map(|(items, _stats)| items)
-                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
+                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
+            if stats != Default::default() {
+                tracing::info!(
+                    target: "codex_core::account_transition",
+                    target_profile_id = execution_lease
+                        .profile_id()
+                        .map(codex_login::AccountProfileId::as_str)
+                        .unwrap_or("<legacy>"),
+                    target_generation = execution_lease.generation(),
+                    cleared_response_ids = stats.cleared_response_ids,
+                    cleared_internal_metadata = stats.cleared_internal_metadata,
+                    stripped_reasoning_blobs = stats.stripped_reasoning_blobs,
+                    stripped_encrypted_function_args = stats.stripped_encrypted_function_args,
+                    stripped_encrypted_tool_outputs = stats.stripped_encrypted_tool_outputs,
+                    dropped_encrypted_agent_messages = stats.dropped_encrypted_agent_messages,
+                    "projected account-scoped history for execution"
+                );
+            }
+            items
         } else {
             history_before.for_prompt(&step_context.model_info.input_modalities)
         };

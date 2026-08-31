@@ -7,10 +7,9 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 
+use crate::context::AccountTransitionToolOutputNotice;
+use crate::context::ContextualUserFragment;
 use crate::execution_auth::ExecutionAuthLease;
-
-const OMITTED_ENCRYPTED_TOOL_OUTPUT: &str =
-    "[Encrypted tool output omitted after Codex execution-account switch.]";
 
 /// Stamps a history envelope with the execution identity that produced account-sensitive model
 /// state. The metadata is intentionally history-only and never sent to the Responses API.
@@ -50,9 +49,20 @@ pub(crate) struct AccountHistoryTransition {
     /// pool is bootstrapped from an existing login, those legacy opaque items belong to that root
     /// profile until proven otherwise.
     legacy_unattributed_profile_id: Option<String>,
-    /// False for ordinary same-account requests. True only after the logical session has changed
-    /// execution profile at least once and cross-account compatibility filtering is required.
-    cross_account: bool,
+}
+
+/// Request-side ownership of one persisted history item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum HistoryItemOwnership {
+    /// Locally authored harness context that is independent of execution credentials.
+    Portable,
+    /// Model or tool state stamped with the exact execution identity that produced it.
+    ExecutionScoped {
+        profile_id: String,
+        generation: Option<u64>,
+    },
+    /// Unattributed model or server state from before execution provenance existed.
+    LegacyRootScoped,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -95,7 +105,7 @@ impl fmt::Display for AccountHistoryTransitionError {
 impl std::error::Error for AccountHistoryTransitionError {}
 
 impl AccountHistoryTransition {
-    pub(crate) fn initial(
+    pub(crate) fn pooled(
         lease: &ExecutionAuthLease,
         legacy_unattributed_profile_id: Option<String>,
     ) -> Self {
@@ -103,17 +113,7 @@ impl AccountHistoryTransition {
             target_profile_id: lease.profile_id().map(|id| id.as_str().to_string()),
             target_generation: lease.generation(),
             legacy_unattributed_profile_id,
-            cross_account: false,
         }
-    }
-
-    pub(crate) fn pooled(
-        lease: &ExecutionAuthLease,
-        legacy_unattributed_profile_id: Option<String>,
-    ) -> Self {
-        let mut transition = Self::initial(lease, legacy_unattributed_profile_id);
-        transition.cross_account = true;
-        transition
     }
 
     /// Converts normalized, annotated history into a request-safe projection for the active
@@ -127,7 +127,7 @@ impl AccountHistoryTransition {
         history: Vec<ResponseItemEnvelope>,
     ) -> Result<(Vec<ResponseItem>, AccountHistoryTransitionStats), AccountHistoryTransitionError>
     {
-        if !self.cross_account {
+        if !self.history_requires_projection(&history) {
             return Ok((
                 history
                     .into_iter()
@@ -140,15 +140,19 @@ impl AccountHistoryTransition {
         let mut stats = AccountHistoryTransitionStats::default();
         let mut output = Vec::with_capacity(history.len());
         for envelope in history {
-            let source_profile_id = envelope
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.execution_profile_id.clone())
-                .or_else(|| self.legacy_unattributed_profile_id.clone());
-            let source_generation = envelope
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.execution_generation);
+            let (source_profile_id, source_generation) = match history_item_ownership(&envelope) {
+                HistoryItemOwnership::Portable => {
+                    output.push(envelope.into_item());
+                    continue;
+                }
+                HistoryItemOwnership::ExecutionScoped {
+                    profile_id,
+                    generation,
+                } => (Some(profile_id), generation),
+                HistoryItemOwnership::LegacyRootScoped => {
+                    (self.legacy_unattributed_profile_id.clone(), None)
+                }
+            };
 
             let same_profile = source_profile_id.as_deref() == self.target_profile_id.as_deref();
             if same_profile {
@@ -175,6 +179,68 @@ impl AccountHistoryTransition {
             }
         }
         Ok((output, stats))
+    }
+
+    pub(crate) fn history_requires_projection(&self, history: &[ResponseItemEnvelope]) -> bool {
+        history
+            .iter()
+            .any(|envelope| match history_item_ownership(envelope) {
+                HistoryItemOwnership::Portable => false,
+                HistoryItemOwnership::ExecutionScoped {
+                    profile_id,
+                    generation,
+                } => {
+                    Some(profile_id.as_str()) != self.target_profile_id.as_deref()
+                        || generation.is_some_and(|generation| generation != self.target_generation)
+                }
+                HistoryItemOwnership::LegacyRootScoped => {
+                    self.legacy_unattributed_profile_id.as_deref()
+                        != self.target_profile_id.as_deref()
+                }
+            })
+    }
+}
+
+fn history_item_ownership(envelope: &ResponseItemEnvelope) -> HistoryItemOwnership {
+    if let Some(profile_id) = envelope
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.execution_profile_id.as_ref())
+    {
+        return HistoryItemOwnership::ExecutionScoped {
+            profile_id: profile_id.clone(),
+            generation: envelope
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.execution_generation),
+        };
+    }
+
+    match &envelope.item {
+        ResponseItem::AdditionalTools { .. } | ResponseItem::CompactionTrigger { .. } => {
+            HistoryItemOwnership::Portable
+        }
+        ResponseItem::Message { role, .. } => {
+            if matches!(role.as_str(), "user" | "developer") {
+                HistoryItemOwnership::Portable
+            } else {
+                HistoryItemOwnership::LegacyRootScoped
+            }
+        }
+        ResponseItem::AgentMessage { .. }
+        | ResponseItem::Reasoning { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => HistoryItemOwnership::LegacyRootScoped,
     }
 }
 
@@ -292,128 +358,10 @@ fn sanitize_function_output(
         .saturating_add(removed);
 
     if items.is_empty() && removed > 0 {
-        output.body = FunctionCallOutputBody::Text(OMITTED_ENCRYPTED_TOOL_OUTPUT.to_string());
+        output.body = FunctionCallOutputBody::Text(AccountTransitionToolOutputNotice.render());
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use codex_login::AccountProfileId;
-    use codex_protocol::models::ReasoningItemReasoningSummary;
-
-    fn envelope(
-        item: ResponseItem,
-        profile: Option<&str>,
-        generation: Option<u64>,
-    ) -> ResponseItemEnvelope {
-        ResponseItemEnvelope {
-            item,
-            metadata: Some(CodexHarnessMetadata {
-                execution_profile_id: profile.map(str::to_string),
-                execution_generation: generation,
-                ..CodexHarnessMetadata::default()
-            }),
-        }
-    }
-
-    // The integration tests in codex-core construct real ExecutionAuthLease values. These unit
-    // helpers focus on the item sanitizer independently of AuthManager setup.
-    #[test]
-    fn foreign_reasoning_drops_opaque_blob_but_keeps_summary() {
-        let mut stats = AccountHistoryTransitionStats::default();
-        let item = ResponseItem::Reasoning {
-            id: None,
-            summary: vec![ReasoningItemReasoningSummary::SummaryText {
-                text: "portable summary".to_string(),
-            }],
-            content: None,
-            encrypted_content: Some("opaque-a".to_string()),
-            internal_chat_message_metadata_passthrough: None,
-        };
-        let sanitized =
-            sanitize_foreign_item(item, Some("account-a"), Some("account-b"), &mut stats)
-                .expect("foreign reasoning should be sanitizable")
-                .expect("summary should keep the reasoning item");
-        let ResponseItem::Reasoning {
-            encrypted_content, ..
-        } = sanitized
-        else {
-            panic!("expected reasoning item");
-        };
-        assert_eq!(encrypted_content, None);
-        assert_eq!(stats.stripped_reasoning_blobs, 1);
-    }
-
-    #[test]
-    fn foreign_encrypted_only_tool_output_keeps_call_pair_with_placeholder() {
-        let mut stats = AccountHistoryTransitionStats::default();
-        let item = ResponseItem::FunctionCallOutput {
-            id: None,
-            call_id: Some("call-1".to_string()),
-            name: None,
-            namespace: None,
-            output: codex_protocol::models::FunctionCallOutputPayload::from_content_items(vec![
-                FunctionCallOutputContentItem::EncryptedContent {
-                    encrypted_content: "opaque-tool-output".to_string(),
-                },
-            ]),
-            internal_chat_message_metadata_passthrough: None,
-        };
-        let sanitized =
-            sanitize_foreign_item(item, Some("account-a"), Some("account-b"), &mut stats)
-                .expect("tool output should be sanitizable")
-                .expect("tool output must remain paired");
-        let ResponseItem::FunctionCallOutput { output, .. } = sanitized else {
-            panic!("expected tool output");
-        };
-        assert_eq!(
-            output.body,
-            FunctionCallOutputBody::Text(OMITTED_ENCRYPTED_TOOL_OUTPUT.to_string())
-        );
-        assert_eq!(stats.stripped_encrypted_tool_outputs, 1);
-    }
-
-    #[test]
-    fn foreign_opaque_compaction_fails_closed() {
-        let mut stats = AccountHistoryTransitionStats::default();
-        let error = sanitize_foreign_item(
-            ResponseItem::Compaction {
-                id: None,
-                encrypted_content: "opaque-compaction".to_string(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            Some("account-a"),
-            Some("account-b"),
-            &mut stats,
-        )
-        .expect_err("opaque compaction must not be silently discarded");
-        assert!(matches!(
-            error,
-            AccountHistoryTransitionError::OpaqueCompaction { .. }
-        ));
-    }
-
-    #[test]
-    fn metadata_fixture_documents_history_wire_extension() {
-        let profile = AccountProfileId::new("account-a").expect("valid id");
-        let envelope = envelope(
-            ResponseItem::Message {
-                id: None,
-                role: "assistant".to_string(),
-                content: Vec::new(),
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            },
-            Some(profile.as_str()),
-            Some(7),
-        );
-        assert_eq!(
-            envelope
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.execution_profile_id.as_deref()),
-            Some("account-a")
-        );
-    }
-}
+#[path = "account_transition_tests.rs"]
+mod tests;

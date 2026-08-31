@@ -375,12 +375,12 @@ pub(crate) async fn handle_output_item_done(
             record_completed_response_item(ctx.sess.as_ref(), ctx.turn_context.as_ref(), &item)
                 .await;
             if let Some(response_item) = response_input_to_response_item(&response) {
-                ctx.sess
-                    .record_conversation_items(
-                        &ctx.turn_context,
-                        std::slice::from_ref(&response_item),
-                    )
-                    .await;
+                crate::execution_provenance::record_conversation_items_with_execution_provenance(
+                    ctx.sess.as_ref(),
+                    ctx.turn_context.as_ref(),
+                    std::slice::from_ref(&response_item),
+                )
+                .await;
             }
 
             output.needs_follow_up = true;
