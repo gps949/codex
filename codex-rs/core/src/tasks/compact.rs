@@ -3,12 +3,15 @@ use std::sync::Arc;
 use super::SessionTask;
 use super::SessionTaskResult;
 use super::emit_compact_metric;
+use crate::execution_auth::ExecutionAuth;
+use crate::portable_compaction::PortableCompactionPolicy;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
 use codex_features::Feature;
 use codex_model_provider::RemoteCompactionSupport;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
@@ -38,42 +41,54 @@ impl SessionTask for CompactTask {
             return Ok(None);
         }
 
-        let result = match ctx.provider.capabilities().remote_compaction {
-            RemoteCompactionSupport::V2
-                if ctx.config.features.enabled(Feature::RemoteCompactionV2) =>
-            {
-                emit_compact_metric(
-                    &session.services.session_telemetry,
-                    "remote_v2",
-                    /*manual*/ true,
-                );
-                crate::compact_remote_v2::run_remote_compact_task(session.clone(), ctx).await
-            }
-            RemoteCompactionSupport::V2 => {
-                emit_compact_metric(
-                    &session.services.session_telemetry,
-                    "remote",
-                    /*manual*/ true,
-                );
-                crate::compact_remote::run_remote_compact_task(session.clone(), ctx).await
-            }
-            RemoteCompactionSupport::Unsupported => {
-                emit_compact_metric(
-                    &session.services.session_telemetry,
-                    "local",
-                    /*manual*/ true,
-                );
-                let input = vec![UserInput::Text {
-                    text: ctx
-                        .config
-                        .compact_prompt
-                        .as_deref()
-                        .unwrap_or(crate::compact::SUMMARIZATION_PROMPT)
-                        .to_string(),
-                    // Compaction prompt is synthesized; no UI element ranges to preserve.
-                    text_elements: Vec::new(),
-                }];
-                crate::compact::run_compact_task(session.clone(), ctx, input).await
+        let execution_auth = ExecutionAuth::shared(Arc::clone(&session.services.auth_manager));
+        let execution_auth_mode = execution_auth
+            .mode_for_turn(ctx.config.as_ref(), ctx.provider.info())
+            .await
+            .map_err(|err| {
+                CodexErr::UnsupportedOperation(format!(
+                    "failed to initialize native multi-account execution for compaction: {err}"
+                ))
+            })?;
+        let history = session.clone_history().await;
+        let portable_policy =
+            PortableCompactionPolicy::for_history(&execution_auth_mode, history.annotated_items());
+
+        let result = if portable_policy == PortableCompactionPolicy::Portable {
+            emit_compact_metric(
+                &session.services.session_telemetry,
+                "local_multi_account",
+                /*manual*/ true,
+            );
+            run_local_compact(Arc::clone(&session), Arc::clone(&ctx)).await
+        } else {
+            match ctx.provider.capabilities().remote_compaction {
+                RemoteCompactionSupport::V2
+                    if ctx.config.features.enabled(Feature::RemoteCompactionV2) =>
+                {
+                    emit_compact_metric(
+                        &session.services.session_telemetry,
+                        "remote_v2",
+                        /*manual*/ true,
+                    );
+                    crate::compact_remote_v2::run_remote_compact_task(session.clone(), ctx).await
+                }
+                RemoteCompactionSupport::V2 => {
+                    emit_compact_metric(
+                        &session.services.session_telemetry,
+                        "remote",
+                        /*manual*/ true,
+                    );
+                    crate::compact_remote::run_remote_compact_task(session.clone(), ctx).await
+                }
+                RemoteCompactionSupport::Unsupported => {
+                    emit_compact_metric(
+                        &session.services.session_telemetry,
+                        "local",
+                        /*manual*/ true,
+                    );
+                    run_local_compact(Arc::clone(&session), Arc::clone(&ctx)).await
+                }
             }
         };
         if let Err(err) = result
@@ -83,4 +98,18 @@ impl SessionTask for CompactTask {
         }
         Ok(None)
     }
+}
+
+async fn run_local_compact(session: Arc<Session>, ctx: Arc<TurnContext>) -> Result<(), CodexErr> {
+    let input = vec![UserInput::Text {
+        text: ctx
+            .config
+            .compact_prompt
+            .as_deref()
+            .unwrap_or(crate::compact::SUMMARIZATION_PROMPT)
+            .to_string(),
+        // Compaction prompt is synthesized; no UI element ranges to preserve.
+        text_elements: Vec::new(),
+    }];
+    crate::compact::run_compact_task(session, ctx, input).await
 }

@@ -288,6 +288,41 @@ fn build_token_limited_compacted_history_appends_summary_message() {
 }
 
 #[test]
+fn portable_compaction_caps_each_user_and_summary_item() {
+    let older = compacted_user_message(&format!("older {} older-tail", "word ".repeat(20_000)));
+    let recent = compacted_user_message(&format!("recent {} recent-tail", "word ".repeat(20_000)));
+    let summary = format!("summary {} summary-tail", "word ".repeat(20_000));
+
+    let history = build_compacted_history(Vec::new(), &[older, recent], &summary);
+
+    assert!(history.len() >= 2);
+    let estimates = history
+        .iter()
+        .map(|envelope| crate::context_manager::estimate_item_token_count(&envelope.item))
+        .collect::<Vec<_>>();
+    assert!(
+        estimates
+            .iter()
+            .all(|tokens| *tokens <= MAX_PORTABLE_CONTEXT_ITEM_TOKENS as i64),
+        "portable item estimates exceeded the cap: {estimates:?}",
+    );
+    assert!(history.iter().any(|envelope| {
+        matches!(
+            &envelope.item,
+            ResponseItem::Message { content, .. }
+                if content_items_to_text(content)
+                    .is_some_and(|text| text.contains("recent-tail"))
+        )
+    }));
+    assert!(matches!(
+        history.last().map(|envelope| &envelope.item),
+        Some(ResponseItem::Message { content, .. })
+            if content_items_to_text(content)
+                .is_some_and(|text| text.contains("summary-tail"))
+    ));
+}
+
+#[test]
 fn build_compacted_history_preserves_user_message_passthrough_metadata() {
     let history = build_compacted_history(
         Vec::new(),

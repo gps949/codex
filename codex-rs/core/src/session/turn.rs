@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::account_transition::AccountHistoryTransition;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -41,6 +40,8 @@ use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
+use crate::portable_compaction::PortableCompactionPolicy;
+use crate::portable_compaction::project_history_for_execution;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -1286,7 +1287,10 @@ async fn run_auto_compact(
         return Ok(());
     }
 
-    if crate::portable_compaction::requires_portable_compaction(execution_auth_mode) {
+    let history = sess.clone_history().await;
+    if PortableCompactionPolicy::for_history(execution_auth_mode, history.annotated_items())
+        == PortableCompactionPolicy::Portable
+    {
         emit_compact_metric(
             &sess.services.session_telemetry,
             "local_multi_account",
@@ -1487,12 +1491,12 @@ async fn run_sampling_request(
                 return Err(pool_unavailable_error(execution_auth.as_ref()));
             }
         };
-        let execution_lease = match execution_binding {
+        let execution_lease = match &execution_binding {
             ExecutionAuthBinding::Stock => None,
             ExecutionAuthBinding::Pooled(lease) => {
                 set_sampling_execution_provenance(&turn_context, lease.clone());
                 client_session.bind_execution_auth(lease.request_auth());
-                Some(lease)
+                Some(lease.clone())
             }
         };
 
@@ -1507,41 +1511,12 @@ async fn run_sampling_request(
 
         let prompt_input = if let Some(input) = initial_input.take() {
             input
-        } else if let Some(execution_lease) = execution_lease.as_ref() {
-            let transition = AccountHistoryTransition::pooled(
-                execution_lease,
-                execution_auth
-                    .legacy_unattributed_profile_id()
-                    .map(|id| id.as_str().to_string()),
-            );
+        } else {
             let annotated = history_before
                 .clone()
                 .for_prompt_annotated(&step_context.model_info.input_modalities);
-            let (items, stats) = transition
-                .prepare_for_request(annotated)
-                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
-            if stats != Default::default() {
-                tracing::info!(
-                    target: "codex_core::account_transition",
-                    target_profile_id = execution_lease
-                        .profile_id()
-                        .map(codex_login::AccountProfileId::as_str)
-                        .unwrap_or("<legacy>"),
-                    target_generation = execution_lease.generation(),
-                    cleared_response_ids = stats.cleared_response_ids,
-                    cleared_internal_metadata = stats.cleared_internal_metadata,
-                    stripped_reasoning_blobs = stats.stripped_reasoning_blobs,
-                    stripped_encrypted_function_args = stats.stripped_encrypted_function_args,
-                    stripped_encrypted_tool_outputs = stats.stripped_encrypted_tool_outputs,
-                    stripped_encrypted_agent_message_parts = stats
-                        .stripped_encrypted_agent_message_parts,
-                    dropped_encrypted_agent_messages = stats.dropped_encrypted_agent_messages,
-                    "projected account-scoped history for execution"
-                );
-            }
-            items
-        } else {
-            history_before.for_prompt(&step_context.model_info.input_modalities)
+            project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
+                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
         };
         let mut prompt_input = prompt_input;
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use codex_core::ExecutionAccountPoolHandle;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
-use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
@@ -21,6 +20,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
@@ -223,6 +223,29 @@ fn response_item_execution_provenance(
     Ok((metadata.execution_profile_id, metadata.execution_generation))
 }
 
+fn latest_compaction_summary_execution_provenance(
+    rollout_path: &Path,
+) -> anyhow::Result<(Option<String>, Option<u64>)> {
+    let envelope = std::fs::read_to_string(rollout_path)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .rev()
+        .find_map(|line| match line.item {
+            RolloutItem::Compacted(compacted) => compacted
+                .replacement_history
+                .and_then(|history| history.into_iter().last()),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("compaction replacement history missing"))?;
+    let metadata = envelope
+        .metadata
+        .ok_or_else(|| anyhow::anyhow!("compaction summary provenance missing"))?;
+    Ok((metadata.execution_profile_id, metadata.execution_generation))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_transition_respond_to_model_output_keeps_execution_provenance()
 -> anyhow::Result<()> {
@@ -400,6 +423,171 @@ async fn account_transition_single_profile_resume_projects_foreign_model_state()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pool_compaction_manual_uses_local_projection_and_keeps_backup_turn_working()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let sampling = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("manual-profile-a"),
+                ev_reasoning_item("manual-reasoning-a", &["readable A summary"], &["opaque A"]),
+                ev_assistant_message("manual-message-a", "profile A response"),
+                ev_completed("manual-profile-a"),
+            ]),
+            sse(vec![
+                ev_response_created("manual-local-compact"),
+                ev_assistant_message("manual-summary", "portable local summary"),
+                ev_completed("manual-local-compact"),
+            ]),
+            sse(vec![
+                ev_response_created("manual-follow-up"),
+                ev_assistant_message("manual-follow-up-message", "backup follow-up completed"),
+                ev_completed("manual-follow-up"),
+            ]),
+        ],
+    )
+    .await;
+    let remote_compact = core_test_support::responses::mount_compact_json_once(
+        &server,
+        json!({
+            "output": [{
+                "type": "compaction",
+                "encrypted_content": "REMOTE_COMPACTION_MUST_NOT_RUN",
+            }],
+        }),
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(write_account_pool_fixture);
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture.submit_turn("seed profile A history").await?;
+
+    let pool = ExecutionAccountPoolHandle::shared(fixture.thread_manager.auth_manager());
+    let backup_identity = pool
+        .activate(
+            &codex_login::AccountProfileId::new("backup-acct")?,
+            /*force*/ false,
+        )
+        .await?;
+    fixture.codex.submit(Op::Compact).await?;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    fixture.submit_turn("continue after local compact").await?;
+
+    assert!(remote_compact.requests().is_empty());
+    let requests = sampling.requests();
+    assert_eq!(requests.len(), 3);
+    let compact_request = &requests[1];
+    assert_eq!(
+        compact_request.header("authorization"),
+        Some("Bearer access-backup".to_string()),
+    );
+    let reasoning = compact_request
+        .inputs_of_type("reasoning")
+        .into_iter()
+        .next()
+        .expect("projected reasoning in local compact request");
+    assert!(reasoning.get("id").is_none() || reasoning["id"].is_null());
+    assert!(
+        reasoning.get("encrypted_content").is_none() || reasoning["encrypted_content"].is_null()
+    );
+    assert!(reasoning.to_string().contains("readable A summary"));
+    assert_eq!(
+        requests[2].header("authorization"),
+        Some("Bearer access-backup".to_string()),
+    );
+    assert_eq!(
+        latest_compaction_summary_execution_provenance(
+            fixture
+                .session_configured
+                .rollout_path
+                .as_deref()
+                .expect("manual compact rollout path"),
+        )?,
+        (
+            Some(backup_identity.profile_id.to_string()),
+            Some(backup_identity.generation),
+        ),
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pool_compaction_automatic_projects_foreign_history() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let large_reasoning = "private A reasoning ".repeat(800);
+    let sampling = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("automatic-profile-a"),
+                ev_reasoning_item(
+                    "automatic-reasoning-a",
+                    &["readable automatic summary"],
+                    &[&large_reasoning],
+                ),
+                ev_assistant_message("automatic-message-a", "profile A automatic response"),
+                ev_completed_with_tokens("automatic-profile-a", /*total_tokens*/ 1_000),
+            ]),
+            sse(vec![
+                ev_response_created("automatic-local-compact"),
+                ev_assistant_message("automatic-summary", "portable automatic summary"),
+                ev_completed_with_tokens("automatic-local-compact", /*total_tokens*/ 20),
+            ]),
+            sse(vec![
+                ev_response_created("automatic-follow-up"),
+                ev_assistant_message("automatic-follow-up-message", "automatic follow-up"),
+                ev_completed("automatic-follow-up"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(write_account_pool_fixture)
+        .with_config(|config| {
+            config.model_auto_compact_token_limit = Some(300);
+        });
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .submit_turn("seed automatic profile A history")
+        .await?;
+
+    ExecutionAccountPoolHandle::shared(fixture.thread_manager.auth_manager())
+        .activate(
+            &codex_login::AccountProfileId::new("backup-acct")?,
+            /*force*/ false,
+        )
+        .await?;
+    fixture
+        .submit_turn("trigger B automatic compaction")
+        .await?;
+
+    let requests = sampling.requests();
+    assert_eq!(requests.len(), 3);
+    let compact_request = &requests[1];
+    assert_eq!(
+        compact_request.header("authorization"),
+        Some("Bearer access-backup".to_string()),
+    );
+    let reasoning = compact_request
+        .inputs_of_type("reasoning")
+        .into_iter()
+        .next()
+        .expect("projected reasoning in automatic compact request");
+    assert!(reasoning.get("id").is_none() || reasoning["id"].is_null());
+    assert!(
+        reasoning.get("encrypted_content").is_none() || reasoning["encrypted_content"].is_null()
+    );
+    assert!(reasoning.to_string().contains("readable automatic summary"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_account_pool_fails_closed_before_sampling() -> anyhow::Result<()> {
     let server = MockServer::start().await;
     let unexpected_sampling = mount_sse_once(
@@ -556,109 +744,6 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::R
         "the backup profile must remain available: {runtime_state:#}"
     );
 
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum RemoteCompactTransport {
-    Legacy,
-    V2,
-}
-
-#[test_case::test_case(RemoteCompactTransport::Legacy; "legacy")]
-#[test_case::test_case(RemoteCompactTransport::V2; "v2")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pooled_remote_compact_uses_the_captured_profile_auth(
-    transport: RemoteCompactTransport,
-) -> anyhow::Result<()> {
-    let server = MockServer::start().await;
-    let seed_response = sse(vec![
-        ev_response_created("seed-response"),
-        ev_assistant_message("seed-message", "seed history"),
-        ev_completed("seed-response"),
-    ]);
-    let compact = match transport {
-        RemoteCompactTransport::Legacy => {
-            mount_sse_once(&server, seed_response).await;
-            core_test_support::responses::mount_compact_json_once(
-                &server,
-                json!({
-                    "output": [{
-                        "type": "compaction",
-                        "encrypted_content": "BOUND_REMOTE_COMPACTION",
-                    }],
-                }),
-            )
-            .await
-        }
-        RemoteCompactTransport::V2 => {
-            core_test_support::responses::mount_sse_sequence(
-                &server,
-                vec![
-                    seed_response,
-                    sse(vec![
-                        json!({
-                            "type": "response.output_item.done",
-                            "item": {
-                                "type": "compaction",
-                                "encrypted_content": "BOUND_REMOTE_COMPACTION_V2",
-                            },
-                        }),
-                        ev_completed("compact-v2-response"),
-                    ]),
-                ],
-            )
-            .await
-        }
-    };
-    let mut builder = test_codex()
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_pre_build_hook(write_account_pool_fixture)
-        .with_config(move |config| {
-            let _ = config.features.set_enabled(
-                Feature::RemoteCompactionV2,
-                matches!(transport, RemoteCompactTransport::V2),
-            );
-        });
-    let fixture = builder.build_with_auto_env(&server).await?;
-
-    fixture
-        .codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "seed remote compaction".to_string(),
-            text_elements: Vec::new(),
-        }]))
-        .await?;
-    wait_for_event(&fixture.codex, |msg| {
-        matches!(msg, EventMsg::TurnComplete(_))
-    })
-    .await;
-    fixture
-        .thread_manager
-        .auth_manager()
-        .set_external_auth(Arc::new(StaticManagedAuth {
-            auth: CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-        }))
-        .await?;
-
-    fixture.codex.submit(Op::Compact).await?;
-    wait_for_event(&fixture.codex, |msg| {
-        matches!(msg, EventMsg::TurnComplete(_))
-    })
-    .await;
-
-    let requests = compact.requests();
-    let request = requests.last().expect("compact request");
-    assert_eq!(
-        (
-            request.header("authorization"),
-            request.header("chatgpt-account-id"),
-        ),
-        (
-            Some("Bearer access-primary".to_string()),
-            Some("account-primary-acct".to_string()),
-        ),
-    );
     Ok(())
 }
 

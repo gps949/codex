@@ -106,6 +106,14 @@ impl fmt::Display for AccountHistoryTransitionError {
 impl std::error::Error for AccountHistoryTransitionError {}
 
 impl AccountHistoryTransition {
+    pub(crate) fn stock() -> Self {
+        Self {
+            target_profile_id: None,
+            target_generation: 0,
+            legacy_unattributed_profile_id: None,
+        }
+    }
+
     pub(crate) fn pooled(
         lease: &ExecutionAuthLease,
         legacy_unattributed_profile_id: Option<String>,

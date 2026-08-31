@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::Prompt;
+use crate::account_transition::stamp_execution_provenance;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::context::CompactionSummary;
@@ -14,6 +15,7 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::portable_compaction::project_history_for_execution;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -63,6 +65,8 @@ use tracing::error;
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+pub(crate) const MAX_PORTABLE_CONTEXT_ITEM_TOKENS: usize = 8_000;
+const PORTABLE_ITEM_TRUNCATION_MARGIN_TOKENS: usize = 16;
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -284,14 +288,11 @@ async fn run_compact_task_inner_impl(
     } else {
         sess.services.model_client.new_session()
     };
-    match execution_auth_mode
+    let execution_binding = execution_auth_mode
         .capture_binding()
-        .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?
-    {
-        ExecutionAuthBinding::Stock => {}
-        ExecutionAuthBinding::Pooled(execution_lease) => {
-            client_session.bind_execution_auth(execution_lease.request_auth());
-        }
+        .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
+    if let Some(request_auth) = execution_binding.request_auth() {
+        client_session.bind_execution_auth(request_auth);
     }
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
@@ -305,9 +306,12 @@ async fn run_compact_task_inner_impl(
 
     loop {
         // Clone is required because of the loop
-        let turn_input = history
+        let annotated = history
             .clone()
-            .for_prompt(&turn_context.model_info.input_modalities);
+            .for_prompt_annotated(&turn_context.model_info.input_modalities);
+        let turn_input =
+            project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
+                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
         let turn_input_len = turn_input.len();
         let prompt = Prompt {
             input: turn_input,
@@ -391,6 +395,9 @@ async fn run_compact_task_inner_impl(
         // This replacement history skips `record_conversation_items`; only the appended summary
         // belongs to this compaction turn.
         summary_item.set_turn_id_if_missing(&turn_context.sub_id);
+        if let ExecutionAuthBinding::Pooled(lease) = &execution_binding {
+            stamp_execution_provenance(&mut summary_item.metadata, lease);
+        }
     }
     let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
@@ -697,13 +704,15 @@ fn build_compacted_history_with_limit(
             if remaining == 0 {
                 break;
             }
+            let item_text_limit = compacted_user_message_text_limit().min(remaining);
             let tokens = approx_token_count(&message.message);
-            if tokens <= remaining {
+            if tokens <= item_text_limit {
                 selected_messages.push(message.clone());
                 remaining = remaining.saturating_sub(tokens);
             } else {
                 let truncated =
-                    truncate_text(&message.message, TruncationPolicy::Tokens(remaining));
+                    truncate_text(&message.message, TruncationPolicy::Tokens(item_text_limit));
+                let truncated_tokens = approx_token_count(&truncated);
                 selected_messages.push(CompactedUserMessage {
                     message: truncated,
                     internal_chat_message_metadata_passthrough: message
@@ -711,7 +720,10 @@ fn build_compacted_history_with_limit(
                         .clone(),
                     harness_metadata: message.harness_metadata.clone(),
                 });
-                break;
+                remaining = remaining.saturating_sub(truncated_tokens);
+                if remaining == 0 {
+                    break;
+                }
             }
         }
         selected_messages.reverse();
@@ -755,11 +767,46 @@ fn build_compacted_history_with_limit(
         summary_text.to_string()
     };
 
-    history.push(ResponseItemEnvelope::new(ContextualUserFragment::into(
-        CompactionSummary::new(summary_text),
+    history.push(ResponseItemEnvelope::new(bounded_compaction_summary(
+        &summary_text,
     )));
 
     history
+}
+
+fn compacted_user_message_text_limit() -> usize {
+    let empty = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: String::new(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    MAX_PORTABLE_CONTEXT_ITEM_TOKENS.saturating_sub(
+        crate::context_manager::estimate_item_token_count(&empty)
+            .max(0)
+            .try_into()
+            .unwrap_or(MAX_PORTABLE_CONTEXT_ITEM_TOKENS)
+            .saturating_add(PORTABLE_ITEM_TRUNCATION_MARGIN_TOKENS),
+    )
+}
+
+fn bounded_compaction_summary(summary_text: &str) -> ResponseItem {
+    let empty: ResponseItem = ContextualUserFragment::into(CompactionSummary::new(String::new()));
+    let overhead: usize = crate::context_manager::estimate_item_token_count(&empty)
+        .max(0)
+        .try_into()
+        .unwrap_or(MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
+    let text_limit = MAX_PORTABLE_CONTEXT_ITEM_TOKENS
+        .saturating_sub(overhead.saturating_add(PORTABLE_ITEM_TRUNCATION_MARGIN_TOKENS));
+    let summary_text = if approx_token_count(summary_text) > text_limit {
+        truncate_text(summary_text, TruncationPolicy::Tokens(text_limit))
+    } else {
+        summary_text.to_string()
+    };
+    ContextualUserFragment::into(CompactionSummary::new(summary_text))
 }
 
 async fn drain_to_completed(
