@@ -325,6 +325,7 @@ async fn run_remote_compact_task_inner_impl(
             message: String::new(),
             window_number: new_window_number,
             window_ids: new_window_ids,
+            portable_policy: crate::portable_compaction::PortableCompactionPolicy::Stock,
         },
     )
     .await;

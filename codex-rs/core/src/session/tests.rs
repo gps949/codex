@@ -3412,6 +3412,107 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
 }
 
 #[tokio::test]
+async fn portable_compacted_history_bounds_assigned_ids_in_live_and_persisted_history() {
+    let (mut session, _turn_context) = make_session_and_context().await;
+    let rollout_path = attach_thread_persistence(&mut session).await;
+    let summary_text = format!(
+        "persisted-summary:{}:persisted-summary-tail",
+        "\\\"\n".repeat(20_000)
+    );
+    let retained_user_text = format!(
+        "persisted-user:{}:persisted-user-tail",
+        "\\\"\n".repeat(20_000)
+    );
+    let user_messages = compact::collect_user_messages(&[user_message(&retained_user_text)]);
+    let replacement_history =
+        compact::build_compacted_history(Vec::new(), &user_messages, &summary_text);
+    let pre_install_estimates = replacement_history
+        .iter()
+        .map(|envelope| crate::context_manager::estimate_item_token_count(&envelope.item))
+        .collect::<Vec<_>>();
+    assert!(
+        pre_install_estimates.iter().all(|estimate| {
+            *estimate > 7_990 && *estimate <= compact::MAX_PORTABLE_CONTEXT_ITEM_TOKENS as i64
+        }),
+        "fixture must produce id-less items near the portable cap: {pre_install_estimates:?}",
+    );
+
+    let (window_number, window_ids) = session.advance_auto_compact_window().await;
+    session
+        .replace_compacted_history(
+            replacement_history,
+            /*reference_context_item*/ None,
+            /*world_state_baseline*/ None,
+            CompactedHistoryMetadata {
+                message: summary_text,
+                window_number,
+                window_ids,
+                portable_policy: crate::portable_compaction::PortableCompactionPolicy::Portable,
+            },
+        )
+        .await;
+
+    let live_history = session.clone_history().await.annotated_items().to_vec();
+    assert_eq!(live_history.len(), 2);
+    assert!(
+        live_history
+            .iter()
+            .all(|envelope| envelope.item.id().is_some())
+    );
+    assert!(
+        live_history.iter().all(|envelope| {
+            crate::context_manager::estimate_item_token_count(&envelope.item)
+                <= compact::MAX_PORTABLE_CONTEXT_ITEM_TOKENS as i64
+        }),
+        "live compacted items exceeded the portable cap after ID assignment",
+    );
+    let live_texts = live_history
+        .iter()
+        .filter_map(|envelope| match &envelope.item {
+            ResponseItem::Message { content, .. } => compact::content_items_to_text(content),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        live_texts
+            .iter()
+            .any(|text| text.contains("persisted-user-tail"))
+    );
+    assert!(
+        live_texts
+            .iter()
+            .any(|text| text.contains("persisted-summary-tail"))
+    );
+
+    session.flush_rollout().await.expect("rollout should flush");
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let persisted_replacement_history = resumed.history.iter().rev().find_map(|item| match item {
+        RolloutItem::Compacted(compacted) => compacted.replacement_history.as_ref(),
+        RolloutItem::SessionMeta(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::InterAgentCommunication(_)
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::WorldState(_)
+        | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::RealtimeItem(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+    assert_eq!(persisted_replacement_history, Some(&live_history));
+    assert!(persisted_replacement_history.is_some_and(|history| {
+        history.iter().all(|envelope| {
+            crate::context_manager::estimate_item_token_count(&envelope.item)
+                <= compact::MAX_PORTABLE_CONTEXT_ITEM_TOKENS as i64
+        })
+    }));
+}
+
+#[tokio::test]
 async fn record_initial_history_assigns_and_persists_id_for_forked_response_item() {
     let (mut session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),

@@ -266,6 +266,32 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages() {
 }
 
 #[test]
+fn portable_compaction_stops_when_aggregate_budget_cannot_retain_an_older_message() {
+    let mut user_messages = (0..256)
+        .map(|index| compacted_user_message(&format!("old-{index}:{}", "x".repeat(128))))
+        .collect::<Vec<_>>();
+    user_messages.push(compacted_user_message("tail"));
+
+    let history = super::build_compacted_history_with_limit(
+        Vec::new(),
+        &user_messages,
+        "SUMMARY",
+        /*max_tokens*/ 2,
+    );
+    let retained_user_texts = history[..history.len() - 1]
+        .iter()
+        .map(|envelope| match &envelope.item {
+            ResponseItem::Message { content, .. } => {
+                content_items_to_text(content).expect("retained user message should contain text")
+            }
+            other => panic!("expected retained user message, found {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(retained_user_texts, vec!["tail".to_string()]);
+}
+
+#[test]
 fn build_token_limited_compacted_history_appends_summary_message() {
     let initial_context: Vec<ResponseItemEnvelope> = Vec::new();
     let user_messages = vec![compacted_user_message("first user message")];

@@ -15,6 +15,7 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::portable_compaction::PortableCompactionPolicy;
 use crate::portable_compaction::project_history_for_execution;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
@@ -92,6 +93,7 @@ pub(crate) struct CompactedHistoryMetadata {
     pub(crate) message: String,
     pub(crate) window_number: u64,
     pub(crate) window_ids: AutoCompactWindowIds,
+    pub(crate) portable_policy: PortableCompactionPolicy,
 }
 
 pub(crate) async fn build_compaction_initial_context(
@@ -280,6 +282,8 @@ async fn run_compact_task_inner_impl(
             )));
         }
     };
+    let portable_policy =
+        PortableCompactionPolicy::for_history(&execution_auth_mode, history.annotated_items());
     let mut client_session = if execution_auth_mode.is_pooled() {
         sess.services
             .model_client
@@ -421,6 +425,7 @@ async fn run_compact_task_inner_impl(
             message: summary_text,
             window_number,
             window_ids,
+            portable_policy,
         },
     )
     .await;
@@ -744,6 +749,12 @@ fn build_compacted_history_with_limit(
                     .unwrap_or_default(),
                 _ => 0,
             };
+            if retained_tokens == 0 {
+                if message.message.is_empty() {
+                    continue;
+                }
+                break;
+            }
             remaining = remaining.saturating_sub(retained_tokens);
             selected_messages.push(ResponseItemEnvelope {
                 item,
@@ -804,7 +815,7 @@ fn truncate_text_to_estimated_token_limit(
     Some(best)
 }
 
-fn bound_portable_context_item(item: &mut ResponseItem, max_tokens: usize) {
+pub(crate) fn bound_portable_context_item(item: &mut ResponseItem, max_tokens: usize) {
     let original_text = match item {
         ResponseItem::Message { content, .. } => match content.as_slice() {
             [ContentItem::InputText { text }] | [ContentItem::OutputText { text }] => text.clone(),

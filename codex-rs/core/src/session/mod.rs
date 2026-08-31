@@ -3474,6 +3474,15 @@ impl Session {
     ) {
         for envelope in &mut items {
             Self::assign_missing_response_item_id(&mut envelope.item);
+            match metadata.portable_policy {
+                crate::portable_compaction::PortableCompactionPolicy::Stock => {}
+                crate::portable_compaction::PortableCompactionPolicy::Portable => {
+                    compact::bound_portable_context_item(
+                        &mut envelope.item,
+                        compact::MAX_PORTABLE_CONTEXT_ITEM_TOKENS,
+                    );
+                }
+            }
         }
         let compacted_item = CompactedItem {
             message: metadata.message,
@@ -3920,6 +3929,7 @@ impl Session {
                 message: String::new(),
                 window_number,
                 window_ids,
+                portable_policy: crate::portable_compaction::PortableCompactionPolicy::Stock,
             },
         )
         .await;
