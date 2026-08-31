@@ -5,6 +5,7 @@ use codex_core::ExecutionAccountPoolHandle;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
+use codex_history::CodexHarnessMetadata;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_login::AccountAvailability;
@@ -20,8 +21,10 @@ use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -122,6 +125,52 @@ fn write_malformed_account_pool_fixture(codex_home: &Path) {
         "not valid account profile json",
     )
     .unwrap();
+}
+
+#[expect(clippy::unwrap_used)]
+fn write_backup_only_account_pool_fixture(codex_home: &Path) {
+    write_profile_credentials(codex_home, "backup-acct", "access-backup");
+    std::fs::write(
+        codex_home.join("account-profiles.json"),
+        serde_json::to_string_pretty(&json!({
+            "version": 1,
+            "profiles": [profile_manifest_entry("backup-acct", 10)],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn stamp_resumed_model_items_as_profile_a(rollout_path: &Path) -> anyhow::Result<()> {
+    let mut lines = std::fs::read_to_string(rollout_path)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<Result<Vec<_>, _>>()?;
+    for line in &mut lines {
+        let RolloutItem::ResponseItem(envelope) = &mut line.item else {
+            continue;
+        };
+        let model_owned = match &envelope.item {
+            ResponseItem::Reasoning { .. } => true,
+            ResponseItem::Message { role, .. } => role == "assistant",
+            _ => false,
+        };
+        if model_owned {
+            let metadata = envelope
+                .metadata
+                .get_or_insert_with(CodexHarnessMetadata::default);
+            metadata.execution_profile_id = Some("primary-acct".to_string());
+            metadata.execution_generation = Some(7);
+        }
+    }
+    let rewritten = lines
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    std::fs::write(rollout_path, format!("{rewritten}\n"))?;
+    Ok(())
 }
 
 pub(super) fn assistant_execution_provenance(
@@ -264,6 +313,88 @@ async fn account_transition_respond_to_model_output_keeps_execution_provenance()
     assert_eq!(
         (tool_call_provenance, synthesized_output_provenance),
         (expected.clone(), expected),
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_transition_single_profile_resume_projects_foreign_model_state()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("profile-a-response"),
+                ev_reasoning_item("reasoning-a", &["portable summary"], &["private details"]),
+                ev_assistant_message("message-a", "profile A answer"),
+                ev_completed("profile-a-response"),
+            ]),
+            sse(vec![
+                ev_response_created("profile-b-response"),
+                ev_completed("profile-b-response"),
+            ]),
+        ],
+    )
+    .await;
+    let mut initial_builder =
+        test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let initial = initial_builder.build_with_auto_env(&server).await?;
+    initial.submit_turn("portable before resume").await?;
+    let home = Arc::clone(&initial.home);
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("initial rollout path");
+    initial.codex.shutdown_and_wait().await?;
+    initial.thread_manager.auth_manager().logout().await?;
+    stamp_resumed_model_items_as_profile_a(&rollout_path)?;
+    write_backup_only_account_pool_fixture(home.path());
+
+    let mut resume_builder = test_codex().without_auth();
+    let resumed = resume_builder
+        .resume_with_auto_env(&server, home, rollout_path)
+        .await?;
+    resumed.submit_turn("after B-only resume").await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let initial_user = requests[0]
+        .input()
+        .into_iter()
+        .find(|item| item["role"] == "user" && item.to_string().contains("portable before resume"))
+        .expect("initial portable user input");
+    let resumed_input = requests[1].input();
+    let resumed_user = resumed_input
+        .iter()
+        .find(|item| item["role"] == "user" && item.to_string().contains("portable before resume"))
+        .expect("resumed portable user input");
+    assert_eq!(resumed_user, &initial_user);
+    let reasoning = resumed_input
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("projected reasoning summary");
+    assert!(reasoning.get("id").is_none() || reasoning["id"].is_null());
+    assert!(
+        reasoning.get("encrypted_content").is_none() || reasoning["encrypted_content"].is_null()
+    );
+    assert!(reasoning.to_string().contains("portable summary"));
+    let assistant = resumed_input
+        .iter()
+        .find(|item| item["role"] == "assistant")
+        .expect("projected assistant message");
+    assert!(assistant.get("id").is_none() || assistant["id"].is_null());
+    assert!(assistant.to_string().contains("profile A answer"));
+    assert_eq!(
+        (
+            requests[1].header("authorization"),
+            requests[1].header("chatgpt-account-id"),
+        ),
+        (
+            Some("Bearer access-backup".to_string()),
+            Some("account-backup-acct".to_string()),
+        ),
     );
     Ok(())
 }

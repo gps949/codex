@@ -158,6 +158,43 @@ fn portable_unattributed_history_retains_ids_and_content_annotations() {
 }
 
 #[test]
+fn mixed_agent_message_counts_removed_encrypted_parts() {
+    let mut stats = AccountHistoryTransitionStats::default();
+    let item = ResponseItem::AgentMessage {
+        id: None,
+        author: "/root/worker".to_string(),
+        recipient: "/root".to_string(),
+        content: vec![
+            AgentMessageInputContent::InputText {
+                text: "portable status".to_string(),
+            },
+            AgentMessageInputContent::EncryptedContent {
+                encrypted_content: "opaque status".to_string(),
+            },
+        ],
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let projected = sanitize_foreign_item(item, Some("profile-a"), Some("profile-b"), &mut stats)
+        .expect("mixed agent message should be projectable")
+        .expect("plaintext part should keep the agent message");
+
+    assert_eq!(
+        projected,
+        ResponseItem::AgentMessage {
+            id: None,
+            author: "/root/worker".to_string(),
+            recipient: "/root".to_string(),
+            content: vec![AgentMessageInputContent::InputText {
+                text: "portable status".to_string(),
+            }],
+            internal_chat_message_metadata_passthrough: None,
+        },
+    );
+    assert_eq!(stats.stripped_encrypted_agent_message_parts, 1);
+}
+
+#[test]
 fn single_profile_foreign_history_is_projected() {
     let foreign = ResponseItem::Reasoning {
         id: Some(ResponseItemId::with_suffix("rs", "foreign")),

@@ -72,6 +72,7 @@ pub(crate) struct AccountHistoryTransitionStats {
     pub(crate) stripped_reasoning_blobs: usize,
     pub(crate) stripped_encrypted_function_args: usize,
     pub(crate) stripped_encrypted_tool_outputs: usize,
+    pub(crate) stripped_encrypted_agent_message_parts: usize,
     pub(crate) dropped_encrypted_agent_messages: usize,
 }
 
@@ -256,6 +257,10 @@ fn sanitize_foreign_item(
         ResponseItem::AgentMessage { content, .. } => {
             let before = content.len();
             content.retain(|part| matches!(part, AgentMessageInputContent::InputText { .. }));
+            let removed = before.saturating_sub(content.len());
+            stats.stripped_encrypted_agent_message_parts = stats
+                .stripped_encrypted_agent_message_parts
+                .saturating_add(removed);
             if content.len() != before && content.is_empty() {
                 stats.dropped_encrypted_agent_messages =
                     stats.dropped_encrypted_agent_messages.saturating_add(1);

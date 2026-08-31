@@ -1533,6 +1533,8 @@ async fn run_sampling_request(
                     stripped_reasoning_blobs = stats.stripped_reasoning_blobs,
                     stripped_encrypted_function_args = stats.stripped_encrypted_function_args,
                     stripped_encrypted_tool_outputs = stats.stripped_encrypted_tool_outputs,
+                    stripped_encrypted_agent_message_parts = stats
+                        .stripped_encrypted_agent_message_parts,
                     dropped_encrypted_agent_messages = stats.dropped_encrypted_agent_messages,
                     "projected account-scoped history for execution"
                 );
