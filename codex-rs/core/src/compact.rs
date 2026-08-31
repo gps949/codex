@@ -66,7 +66,6 @@ pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 pub(crate) const MAX_PORTABLE_CONTEXT_ITEM_TOKENS: usize = 8_000;
-const PORTABLE_ITEM_TRUNCATION_MARGIN_TOKENS: usize = 16;
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -398,6 +397,7 @@ async fn run_compact_task_inner_impl(
         if let ExecutionAuthBinding::Pooled(lease) = &execution_binding {
             stamp_execution_provenance(&mut summary_item.metadata, lease);
         }
+        bound_portable_context_item(&mut summary_item.item, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
     }
     let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
@@ -697,69 +697,62 @@ fn build_compacted_history_with_limit(
     summary_text: &str,
     max_tokens: usize,
 ) -> Vec<ResponseItemEnvelope> {
-    let mut selected_messages: Vec<CompactedUserMessage> = Vec::new();
+    let mut selected_messages = Vec::new();
     if max_tokens > 0 {
         let mut remaining = max_tokens;
         for message in user_messages.iter().rev() {
             if remaining == 0 {
                 break;
             }
-            let item_text_limit = compacted_user_message_text_limit().min(remaining);
-            let tokens = approx_token_count(&message.message);
-            if tokens <= item_text_limit {
-                selected_messages.push(message.clone());
-                remaining = remaining.saturating_sub(tokens);
-            } else {
-                let truncated =
-                    truncate_text(&message.message, TruncationPolicy::Tokens(item_text_limit));
-                let truncated_tokens = approx_token_count(&truncated);
-                selected_messages.push(CompactedUserMessage {
-                    message: truncated,
-                    internal_chat_message_metadata_passthrough: message
-                        .internal_chat_message_metadata_passthrough
-                        .clone(),
-                    harness_metadata: message.harness_metadata.clone(),
-                });
-                remaining = remaining.saturating_sub(truncated_tokens);
-                if remaining == 0 {
-                    break;
-                }
-            }
-        }
-        selected_messages.reverse();
-    }
-
-    for message in &selected_messages {
-        let mut item = ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: message.message.clone(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: message
+            let Some(message_text) =
+                truncate_text_to_estimated_token_limit(&message.message, remaining, |text| {
+                    i64::try_from(approx_token_count(text)).unwrap_or(i64::MAX)
+                })
+            else {
+                break;
+            };
+            let mut item = ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: message_text.clone(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: message
+                    .internal_chat_message_metadata_passthrough
+                    .clone(),
+            };
+            if message
                 .internal_chat_message_metadata_passthrough
-                .clone(),
-        };
-        if message
-            .internal_chat_message_metadata_passthrough
-            .as_ref()
-            .and_then(|metadata| metadata.content_item_kinds.as_ref())
-            .is_some()
-        {
-            let _ = set_annotated_content(
-                &mut item,
-                vec![AnnotatedContent::input_text(
-                    &message.message,
-                    ContentItemKind("user.text".to_string()),
-                )],
-            );
+                .as_ref()
+                .and_then(|metadata| metadata.content_item_kinds.as_ref())
+                .is_some()
+            {
+                let _ = set_annotated_content(
+                    &mut item,
+                    vec![AnnotatedContent::input_text(
+                        &message_text,
+                        ContentItemKind("user.text".to_string()),
+                    )],
+                );
+            }
+            bound_portable_context_item(&mut item, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
+            let retained_tokens = match &item {
+                ResponseItem::Message { content, .. } => content_items_to_text(content)
+                    .as_deref()
+                    .map(approx_token_count)
+                    .unwrap_or_default(),
+                _ => 0,
+            };
+            remaining = remaining.saturating_sub(retained_tokens);
+            selected_messages.push(ResponseItemEnvelope {
+                item,
+                metadata: message.harness_metadata.clone(),
+            });
         }
-        history.push(ResponseItemEnvelope {
-            item,
-            metadata: message.harness_metadata.clone(),
-        });
     }
+    selected_messages.reverse();
+    history.extend(selected_messages);
 
     let summary_text = if summary_text.is_empty() {
         "(no summary available)".to_string()
@@ -774,39 +767,89 @@ fn build_compacted_history_with_limit(
     history
 }
 
-fn compacted_user_message_text_limit() -> usize {
-    let empty = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: String::new(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-    MAX_PORTABLE_CONTEXT_ITEM_TOKENS.saturating_sub(
-        crate::context_manager::estimate_item_token_count(&empty)
-            .max(0)
-            .try_into()
-            .unwrap_or(MAX_PORTABLE_CONTEXT_ITEM_TOKENS)
-            .saturating_add(PORTABLE_ITEM_TRUNCATION_MARGIN_TOKENS),
-    )
+fn bounded_compaction_summary(summary_text: &str) -> ResponseItem {
+    let mut summary = ContextualUserFragment::into(CompactionSummary::new(summary_text));
+    bound_portable_context_item(&mut summary, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
+    summary
 }
 
-fn bounded_compaction_summary(summary_text: &str) -> ResponseItem {
-    let empty: ResponseItem = ContextualUserFragment::into(CompactionSummary::new(String::new()));
-    let overhead: usize = crate::context_manager::estimate_item_token_count(&empty)
-        .max(0)
-        .try_into()
-        .unwrap_or(MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
-    let text_limit = MAX_PORTABLE_CONTEXT_ITEM_TOKENS
-        .saturating_sub(overhead.saturating_add(PORTABLE_ITEM_TRUNCATION_MARGIN_TOKENS));
-    let summary_text = if approx_token_count(summary_text) > text_limit {
-        truncate_text(summary_text, TruncationPolicy::Tokens(text_limit))
-    } else {
-        summary_text.to_string()
+fn truncate_text_to_estimated_token_limit(
+    text: &str,
+    max_tokens: usize,
+    mut estimate: impl FnMut(&str) -> i64,
+) -> Option<String> {
+    let max_tokens = i64::try_from(max_tokens).unwrap_or(i64::MAX);
+    if estimate(text) <= max_tokens {
+        return Some(text.to_string());
+    }
+    if estimate("") > max_tokens {
+        return None;
+    }
+
+    let mut best = String::new();
+    let mut lower = 0;
+    let mut upper = approx_token_count(text);
+    while lower <= upper {
+        let candidate_limit = lower + (upper - lower) / 2;
+        let candidate = truncate_text(text, TruncationPolicy::Tokens(candidate_limit));
+        if estimate(&candidate) <= max_tokens {
+            best = candidate;
+            lower = candidate_limit.saturating_add(1);
+        } else if candidate_limit == 0 {
+            break;
+        } else {
+            upper = candidate_limit - 1;
+        }
+    }
+    Some(best)
+}
+
+fn bound_portable_context_item(item: &mut ResponseItem, max_tokens: usize) {
+    let original_text = match item {
+        ResponseItem::Message { content, .. } => match content.as_slice() {
+            [ContentItem::InputText { text }] | [ContentItem::OutputText { text }] => text.clone(),
+            _ => return,
+        },
+        _ => return,
     };
-    ContextualUserFragment::into(CompactionSummary::new(summary_text))
+    let estimate_candidate = |template: &ResponseItem, candidate_text: &str| {
+        let mut candidate = template.clone();
+        if let ResponseItem::Message { content, .. } = &mut candidate
+            && let Some(content) = content.first_mut()
+        {
+            match content {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    *text = candidate_text.to_string();
+                }
+                ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
+            }
+        }
+        crate::context_manager::estimate_item_token_count(&candidate)
+    };
+    let mut bounded_text =
+        truncate_text_to_estimated_token_limit(&original_text, max_tokens, |candidate_text| {
+            estimate_candidate(item, candidate_text)
+        });
+    if bounded_text.is_none() {
+        // Passthrough metadata should normally be small. If it alone exceeds the portable-item
+        // limit, dropping transport metadata is safer than creating an unbounded model item.
+        item.clear_internal_chat_message_metadata_passthrough();
+        bounded_text =
+            truncate_text_to_estimated_token_limit(&original_text, max_tokens, |candidate_text| {
+                estimate_candidate(item, candidate_text)
+            });
+    }
+    let bounded_text = bounded_text.unwrap_or_default();
+    if let ResponseItem::Message { content, .. } = item
+        && let Some(content) = content.first_mut()
+    {
+        match content {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                *text = bounded_text;
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
+        }
+    }
 }
 
 async fn drain_to_completed(

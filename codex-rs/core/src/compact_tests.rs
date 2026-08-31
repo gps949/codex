@@ -289,13 +289,14 @@ fn build_token_limited_compacted_history_appends_summary_message() {
 
 #[test]
 fn portable_compaction_caps_each_user_and_summary_item() {
-    let older = compacted_user_message(&format!("older {} older-tail", "word ".repeat(20_000)));
-    let recent = compacted_user_message(&format!("recent {} recent-tail", "word ".repeat(20_000)));
-    let summary = format!("summary {} summary-tail", "word ".repeat(20_000));
+    let older = compacted_user_message(&format!("older:{}:older-tail", "a".repeat(32_000)));
+    let middle = compacted_user_message(&format!("middle:{}:middle-tail", "b".repeat(32_000)));
+    let recent = compacted_user_message(&format!("recent:{}:recent-tail", "c".repeat(32_000)));
+    let summary = format!("summary:{}:summary-tail", "d".repeat(32_000));
 
-    let history = build_compacted_history(Vec::new(), &[older, recent], &summary);
+    let history = build_compacted_history(Vec::new(), &[older, middle, recent], &summary);
 
-    assert!(history.len() >= 2);
+    assert_eq!(history.len(), 4);
     let estimates = history
         .iter()
         .map(|envelope| crate::context_manager::estimate_item_token_count(&envelope.item))
@@ -305,6 +306,23 @@ fn portable_compaction_caps_each_user_and_summary_item() {
             .iter()
             .all(|tokens| *tokens <= MAX_PORTABLE_CONTEXT_ITEM_TOKENS as i64),
         "portable item estimates exceeded the cap: {estimates:?}",
+    );
+    let retained_user_bytes = history[..history.len() - 1]
+        .iter()
+        .map(|envelope| match &envelope.item {
+            ResponseItem::Message { content, .. } => content_items_to_text(content)
+                .expect("retained user message should contain text")
+                .len(),
+            other => panic!("expected retained user message, found {other:?}"),
+        })
+        .sum::<usize>();
+    assert!(
+        retained_user_bytes > 64_000,
+        "the independent item cap must not replace the 20k aggregate user budget"
+    );
+    assert!(
+        retained_user_bytes <= 80_000,
+        "retained user text exceeded the 20k aggregate budget: {retained_user_bytes} bytes"
     );
     assert!(history.iter().any(|envelope| {
         matches!(
@@ -319,6 +337,87 @@ fn portable_compaction_caps_each_user_and_summary_item() {
         Some(ResponseItem::Message { content, .. })
             if content_items_to_text(content)
                 .is_some_and(|text| text.contains("summary-tail"))
+    ));
+}
+
+#[test]
+fn portable_compaction_caps_escaped_user_item_with_passthrough_metadata() {
+    let escaped_text = format!("escaped-user:{}:escaped-user-tail", "\\\"\n".repeat(20_000));
+    let history = build_compacted_history(
+        Vec::new(),
+        &[CompactedUserMessage {
+            message: escaped_text,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: Some("profile-a-routing-turn".to_string()),
+                    content_item_kinds: Some(vec![ContentItemKind("user.text".to_string())]),
+                    ..Default::default()
+                },
+            ),
+            harness_metadata: Some(CodexHarnessMetadata {
+                execution_profile_id: Some("profile-a".to_string()),
+                execution_generation: Some(7),
+                ..CodexHarnessMetadata::default()
+            }),
+        }],
+        "summary",
+    );
+
+    let user = &history[0];
+    assert!(
+        crate::context_manager::estimate_item_token_count(&user.item)
+            <= MAX_PORTABLE_CONTEXT_ITEM_TOKENS as i64
+    );
+    assert_eq!(user.item.turn_id(), Some("profile-a-routing-turn"));
+    assert!(matches!(
+        &user.item,
+        ResponseItem::Message {
+            content,
+            internal_chat_message_metadata_passthrough: Some(metadata),
+            ..
+        } if content_items_to_text(content)
+            .is_some_and(|text| text.contains("escaped-user-tail"))
+            && metadata
+                .content_item_kinds
+                .as_ref()
+                .is_some_and(|kinds| !kinds.is_empty())
+    ));
+}
+
+#[test]
+fn portable_compaction_caps_final_summary_after_turn_and_provenance_stamp() {
+    let summary_text = format!(
+        "escaped-summary:{}:escaped-summary-tail",
+        "\\\"\n".repeat(20_000)
+    );
+    let mut history = build_compacted_history(Vec::new(), &[], &summary_text);
+    let summary = history.last_mut().expect("compaction summary");
+    summary.set_turn_id_if_missing("portable-compaction-turn");
+    summary.metadata = Some(CodexHarnessMetadata {
+        execution_profile_id: Some("profile-b".to_string()),
+        execution_generation: Some(42),
+        ..CodexHarnessMetadata::default()
+    });
+    bound_portable_context_item(&mut summary.item, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
+
+    assert!(
+        crate::context_manager::estimate_item_token_count(&summary.item)
+            <= MAX_PORTABLE_CONTEXT_ITEM_TOKENS as i64
+    );
+    assert_eq!(summary.item.turn_id(), Some("portable-compaction-turn"));
+    assert_eq!(
+        summary.metadata,
+        Some(CodexHarnessMetadata {
+            execution_profile_id: Some("profile-b".to_string()),
+            execution_generation: Some(42),
+            ..CodexHarnessMetadata::default()
+        })
+    );
+    assert!(matches!(
+        &summary.item,
+        ResponseItem::Message { content, .. }
+            if content_items_to_text(content)
+                .is_some_and(|text| text.contains("escaped-summary-tail"))
     ));
 }
 

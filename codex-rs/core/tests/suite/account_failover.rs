@@ -141,6 +141,19 @@ fn write_backup_only_account_pool_fixture(codex_home: &Path) {
     .unwrap();
 }
 
+fn ev_reasoning_item_with_routing_metadata(
+    id: &str,
+    summary: &[&str],
+    raw_content: &[&str],
+    routing_marker: &str,
+) -> serde_json::Value {
+    let mut event = ev_reasoning_item(id, summary, raw_content);
+    event["item"]["internal_chat_message_metadata_passthrough"] = json!({
+        "turn_id": routing_marker,
+    });
+    event
+}
+
 fn stamp_resumed_model_items_as_profile_a(rollout_path: &Path) -> anyhow::Result<()> {
     let mut lines = std::fs::read_to_string(rollout_path)?
         .lines()
@@ -423,6 +436,80 @@ async fn account_transition_single_profile_resume_projects_foreign_model_state()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stock_first_sampling_projects_foreign_profile_history() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let routing_marker = "profile-a-routing-marker";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("stock-seed-response"),
+                ev_reasoning_item_with_routing_metadata(
+                    "stock-seed-reasoning",
+                    &["portable stock summary"],
+                    &["private stock reasoning"],
+                    routing_marker,
+                ),
+                ev_assistant_message("stock-seed-message", "profile A stock seed"),
+                ev_completed("stock-seed-response"),
+            ]),
+            sse(vec![
+                ev_response_created("stock-projected-response"),
+                ev_assistant_message("stock-projected-message", "stock projection completed"),
+                ev_completed("stock-projected-response"),
+            ]),
+        ],
+    )
+    .await;
+    let mut initial_builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(write_account_pool_fixture);
+    let initial = initial_builder.build_with_auto_env(&server).await?;
+    initial
+        .submit_turn("seed profile A before Stock resume")
+        .await?;
+    let home = Arc::clone(&initial.home);
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("initial rollout path");
+    initial.codex.shutdown_and_wait().await?;
+
+    let mut resume_builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.model_provider_id = "custom-openai".to_string();
+        });
+    let resumed = resume_builder
+        .resume_with_auto_env(&server, home, rollout_path)
+        .await?;
+    resumed
+        .submit_turn("run first request with Stock execution")
+        .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let stock_input = requests[1].input();
+    let reasoning = stock_input
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("projected reasoning summary in first Stock request");
+    assert!(reasoning.get("id").is_none() || reasoning["id"].is_null());
+    assert!(
+        reasoning.get("encrypted_content").is_none() || reasoning["encrypted_content"].is_null()
+    );
+    assert!(
+        reasoning
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none()
+    );
+    assert!(!reasoning.to_string().contains(routing_marker));
+    assert!(reasoning.to_string().contains("portable stock summary"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pool_compaction_manual_uses_local_projection_and_keeps_backup_turn_working()
 -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -520,15 +607,17 @@ async fn pool_compaction_manual_uses_local_projection_and_keeps_backup_turn_work
 async fn pool_compaction_automatic_projects_foreign_history() -> anyhow::Result<()> {
     let server = MockServer::start().await;
     let large_reasoning = "private A reasoning ".repeat(800);
+    let routing_marker = "automatic-profile-a-routing-marker";
     let sampling = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
                 ev_response_created("automatic-profile-a"),
-                ev_reasoning_item(
+                ev_reasoning_item_with_routing_metadata(
                     "automatic-reasoning-a",
                     &["readable automatic summary"],
                     &[&large_reasoning],
+                    routing_marker,
                 ),
                 ev_assistant_message("automatic-message-a", "profile A automatic response"),
                 ev_completed_with_tokens("automatic-profile-a", /*total_tokens*/ 1_000),
@@ -556,6 +645,15 @@ async fn pool_compaction_automatic_projects_foreign_history() -> anyhow::Result<
     fixture
         .submit_turn("seed automatic profile A history")
         .await?;
+    let rollout_path = fixture
+        .session_configured
+        .rollout_path
+        .as_deref()
+        .expect("automatic compaction rollout path");
+    assert!(
+        std::fs::read_to_string(rollout_path)?.contains(routing_marker),
+        "automatic compaction fixture must persist A-owned routing metadata"
+    );
 
     ExecutionAccountPoolHandle::shared(fixture.thread_manager.auth_manager())
         .activate(
@@ -583,6 +681,12 @@ async fn pool_compaction_automatic_projects_foreign_history() -> anyhow::Result<
     assert!(
         reasoning.get("encrypted_content").is_none() || reasoning["encrypted_content"].is_null()
     );
+    assert!(
+        reasoning
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none()
+    );
+    assert!(!reasoning.to_string().contains(routing_marker));
     assert!(reasoning.to_string().contains("readable automatic summary"));
     Ok(())
 }

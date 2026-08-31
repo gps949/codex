@@ -428,15 +428,6 @@ pub(crate) async fn run_turn(
                 .record_step_world_state_if_changed(&world_state, step_context.as_ref())
                 .await?;
 
-            // Construct the input that we will send to the model.
-            let sampling_request_input: Vec<ResponseItem> = async {
-                sess.clone_history()
-                    .await
-                    .for_prompt(&step_context.model_info.input_modalities)
-            }
-            .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
-            .await;
-
             let responses_metadata = sess
                 .responses_metadata(turn_context.as_ref(), CodexResponsesRequestKind::Turn)
                 .await;
@@ -449,7 +440,6 @@ pub(crate) async fn run_turn(
                 &execution_auth_mode,
                 &mut client_session,
                 &responses_metadata,
-                sampling_request_input,
                 cancellation_token.child_token(),
             )
             .await
@@ -1457,7 +1447,6 @@ async fn run_sampling_request(
     execution_auth_mode: &ExecutionAuthMode,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
-    input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let mut step_context = step_context;
@@ -1471,7 +1460,6 @@ async fn run_sampling_request(
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
-    let mut initial_input = if pooled_execution { None } else { Some(input) };
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
@@ -1509,15 +1497,12 @@ async fn run_sampling_request(
         });
         let attempt_state = pooled_execution.then(|| install_sampling_attempt(&turn_context));
 
-        let prompt_input = if let Some(input) = initial_input.take() {
-            input
-        } else {
-            let annotated = history_before
-                .clone()
-                .for_prompt_annotated(&step_context.model_info.input_modalities);
+        let annotated = history_before
+            .clone()
+            .for_prompt_annotated(&step_context.model_info.input_modalities);
+        let prompt_input =
             project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
-                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
-        };
+                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
         let mut prompt_input = prompt_input;
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
             && executed_tool_calls
@@ -1618,7 +1603,6 @@ async fn run_sampling_request(
                                 .model_client
                                 .replace_session_for_execution_identity_change(client_session);
                             retry_state = ResponsesStreamRetryState::default();
-                            initial_input = None;
                             sess.refresh_mcp_if_dirty().await;
                             step_context = sess
                                 .capture_step_context(
@@ -1675,7 +1659,6 @@ async fn run_sampling_request(
                                     .model_client
                                     .replace_session_for_execution_identity_change(client_session);
                                 retry_state = ResponsesStreamRetryState::default();
-                                initial_input = None;
                                 sess.refresh_mcp_if_dirty().await;
                                 step_context = sess
                                     .capture_step_context(
