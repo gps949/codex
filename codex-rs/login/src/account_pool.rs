@@ -688,11 +688,34 @@ impl AccountPool {
             return Ok(AccountAvailabilityMutation::StaleIgnored { active });
         }
 
-        if state
+        let account = state
             .accounts
-            .get(&lease.profile.id)
-            .is_some_and(|account| account.availability == availability)
-        {
+            .get_mut(&lease.profile.id)
+            .ok_or_else(|| AccountPoolError::UnknownProfile(lease.profile.id.clone()))?;
+        let merged_availability = match (&account.availability, availability) {
+            (
+                AccountAvailability::AuthenticationUnavailable { .. }
+                | AccountAvailability::Disabled,
+                _,
+            ) => account.availability.clone(),
+            (
+                AccountAvailability::Exhausted { resets_at: current },
+                AccountAvailability::Exhausted {
+                    resets_at: observed,
+                },
+            ) => AccountAvailability::Exhausted {
+                resets_at: match (*current, observed) {
+                    (Some(current), Some(observed)) => Some(current.max(observed)),
+                    (None, _) | (_, None) => None,
+                },
+            },
+            (_, observed) => observed,
+        };
+        let availability_changed = account.availability != merged_availability;
+        let rate_limits_changed = rate_limits
+            .as_ref()
+            .is_some_and(|rate_limits| account.rate_limits != *rate_limits);
+        if !availability_changed && !rate_limits_changed {
             let active = active_lease(&state);
             drop(state);
             if refreshed {
@@ -700,15 +723,10 @@ impl AccountPool {
             }
             return Ok(AccountAvailabilityMutation::AlreadyUnavailable { active });
         }
-
-        let account = state
-            .accounts
-            .get_mut(&lease.profile.id)
-            .ok_or_else(|| AccountPoolError::UnknownProfile(lease.profile.id.clone()))?;
         if let Some(rate_limits) = rate_limits {
             account.rate_limits = rate_limits;
         }
-        account.availability = availability;
+        account.availability = merged_availability;
 
         if state.active_profile.as_ref() != Some(&lease.profile.id) {
             let active = active_lease(&state);
@@ -870,6 +888,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
+    use chrono::Duration;
     use codex_config::AccountPoolRotationStrategy;
     use codex_config::types::AuthCredentialsStoreMode;
 
@@ -1310,6 +1329,99 @@ mod tests {
         assert_eq!(
             (active.profile().id.clone(), active.generation()),
             (second.id, second_lease.generation()),
+        );
+    }
+
+    #[tokio::test]
+    async fn permanent_auth_failure_is_not_downgraded_by_a_late_quota_failure() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let first_lease = pool.lease().expect("first lease");
+        assert!(matches!(
+            pool.mark_authentication_unavailable(&first_lease, "refresh permanently failed")
+                .expect("permanent auth failure"),
+            AccountAvailabilityMutation::Rebound(_)
+        ));
+        assert!(matches!(
+            pool.mark_exhausted(&first_lease, Some(Utc::now() + Duration::hours(1)))
+                .expect("late quota failure"),
+            AccountAvailabilityMutation::AlreadyUnavailable { active: Some(_) }
+        ));
+
+        let first_snapshot = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == first.id)
+            .expect("first snapshot");
+        assert_eq!(
+            first_snapshot.availability,
+            AccountAvailability::AuthenticationUnavailable {
+                reason: "refresh permanently failed".to_string(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_exhaustion_updates_snapshot_without_shortening_cooldown() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let first_lease = pool.lease().expect("first lease");
+        let resets_at = Utc::now() + Duration::hours(2);
+        let initial_limits = AccountRateLimits {
+            observed_at: Some(Utc::now() - Duration::minutes(1)),
+            ..AccountRateLimits::default()
+        };
+        assert!(matches!(
+            pool.mark_exhausted_with_rate_limits(&first_lease, Some(resets_at), initial_limits,)
+                .expect("first quota failure"),
+            AccountAvailabilityMutation::Rebound(_)
+        ));
+
+        let updated_limits = AccountRateLimits {
+            observed_at: Some(Utc::now()),
+            ..AccountRateLimits::default()
+        };
+        assert!(matches!(
+            pool.mark_exhausted_with_rate_limits(
+                &first_lease,
+                Some(resets_at - Duration::hours(1)),
+                updated_limits.clone(),
+            )
+            .expect("repeated quota failure"),
+            AccountAvailabilityMutation::InactiveProfileUpdated { active: Some(_) }
+        ));
+
+        let first_snapshot = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == first.id)
+            .expect("first snapshot");
+        assert_eq!(
+            (first_snapshot.availability, first_snapshot.rate_limits),
+            (
+                AccountAvailability::Exhausted {
+                    resets_at: Some(resets_at),
+                },
+                updated_limits,
+            ),
         );
     }
 
