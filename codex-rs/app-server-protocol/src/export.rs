@@ -54,6 +54,7 @@ const EXPERIMENTAL_CLIENT_METHOD_DEPENDENCY_TYPES: &[&str] = &[
     "ThreadBackgroundTerminal",
     "ThreadSearchOccurrence",
     "ThreadSearchTextRange",
+    "TurnSettingsUpdateStatus",
 ];
 /// Experimental RPC payload types that are also referenced by stable APIs and must remain in the
 /// non-experimental schema bundle.
