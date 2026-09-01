@@ -14,6 +14,8 @@ use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_login::CodexAuth;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
@@ -173,14 +175,14 @@ async fn resume_with_profile(
     Ok((test, pool))
 }
 
-async fn wait_for_turn_error(codex: &CodexThread) -> anyhow::Result<String> {
+async fn wait_for_turn_error(codex: &CodexThread) -> anyhow::Result<ErrorEvent> {
     let mut error_messages = Vec::new();
     loop {
         match codex.next_event().await?.msg {
-            EventMsg::Error(error) => error_messages.push(error.message),
+            EventMsg::Error(error) => error_messages.push(error),
             EventMsg::TurnComplete(_) => {
                 return match error_messages.as_slice() {
-                    [message] => Ok(message.clone()),
+                    [error] => Ok(error.clone()),
                     [] => Err(anyhow::anyhow!("turn completed without an error")),
                     messages => Err(anyhow::anyhow!(
                         "turn emitted {} errors instead of exactly one: {messages:?}",
@@ -213,10 +215,14 @@ async fn response_request_count(server: &MockServer) -> usize {
         .count()
 }
 
-fn assert_migration_error(message: &str, owner_profile_id: &str) {
+fn assert_migration_error(error: &ErrorEvent, owner_profile_id: &str) {
     assert!(
-        message.contains(owner_profile_id) && message.contains("/compact"),
-        "unexpected migration error: {message}",
+        error.message.contains(owner_profile_id) && error.message.contains("/compact"),
+        "unexpected migration error: {error:?}",
+    );
+    assert_eq!(
+        error.codex_error_info,
+        Some(CodexErrorInfo::AccountMigrationRequired)
     );
 }
 

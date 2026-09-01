@@ -69,6 +69,35 @@ pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 pub(crate) const MAX_PORTABLE_CONTEXT_ITEM_TOKENS: usize = 8_000;
+const MAX_LOCAL_COMPACTION_OUTPUT_ITEMS: usize = 64;
+const MAX_LOCAL_COMPACTION_OUTPUT_TOKENS: i64 = 32_000;
+
+#[derive(Default)]
+struct LocalCompactionOutputBuffer {
+    items: Vec<ResponseItem>,
+    estimated_tokens: i64,
+}
+
+impl LocalCompactionOutputBuffer {
+    fn push(&mut self, item: ResponseItem) -> CodexResult<()> {
+        let estimated_tokens = crate::context_manager::estimate_item_token_count(&item).max(0);
+        if self.items.len() >= MAX_LOCAL_COMPACTION_OUTPUT_ITEMS
+            || self.estimated_tokens.saturating_add(estimated_tokens)
+                > MAX_LOCAL_COMPACTION_OUTPUT_TOKENS
+        {
+            return Err(CodexErr::Stream(
+                "local compaction response exceeded its buffered output limit".to_string(),
+            ));
+        }
+        self.estimated_tokens = self.estimated_tokens.saturating_add(estimated_tokens);
+        self.items.push(item);
+        Ok(())
+    }
+
+    fn items(&self) -> &[ResponseItem] {
+        &self.items
+    }
+}
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -296,7 +325,7 @@ async fn run_compact_task_inner_impl(
         AccountTransitionTargetProfile::from_execution(execution_auth.as_ref(), &execution_binding);
     preflight_account_transition(&preflight_history, &target_profile)
         .ensure_ready(&target_profile)
-        .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
+        .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
     let mut client_session = if execution_auth_mode.is_pooled() {
         sess.services
             .model_client
@@ -896,7 +925,7 @@ async fn drain_to_completed(
             &InferenceTraceContext::disabled(),
         )
         .await?;
-    let mut completed_items = Vec::new();
+    let mut completed_items = LocalCompactionOutputBuffer::default();
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
@@ -906,7 +935,7 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                completed_items.push(item);
+                completed_items.push(item)?;
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;
@@ -919,16 +948,16 @@ async fn drain_to_completed(
                 token_usage,
                 ..
             }) => {
-                if !completed_items.is_empty() {
+                if !completed_items.items().is_empty() {
                     match execution_binding {
                         ExecutionAuthBinding::Stock => {
-                            sess.record_conversation_items(turn_context, &completed_items)
+                            sess.record_conversation_items(turn_context, completed_items.items())
                                 .await;
                         }
                         ExecutionAuthBinding::Pooled(lease) => {
                             sess.record_conversation_items_for_execution(
                                 turn_context,
-                                &completed_items,
+                                completed_items.items(),
                                 lease,
                             )
                             .await;

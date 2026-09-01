@@ -160,6 +160,8 @@ pub enum CodexErrorDetails {
     #[error("unsupported operation: {0}")]
     UnsupportedOperation(String),
     #[error("{0}")]
+    AccountMigrationRequired(String),
+    #[error("{0}")]
     RefreshTokenFailed(RefreshTokenFailedError),
     #[error("Fatal error: {0}")]
     Fatal(String),
@@ -331,6 +333,7 @@ impl CodexErr {
         RetryLimit(error: RetryLimitReachedError),
         Sandbox(error: SandboxErr),
         UnsupportedOperation(message: String),
+        AccountMigrationRequired(message: String),
         RefreshTokenFailed(error: RefreshTokenFailedError),
         Fatal(message: String),
         Io(error: io::Error),
@@ -375,6 +378,7 @@ impl CodexErr {
             | CodexErrorDetails::ToolCollision(_)
             | CodexErrorDetails::RefreshTokenFailed(_)
             | CodexErrorDetails::UnsupportedOperation(_)
+            | CodexErrorDetails::AccountMigrationRequired(_)
             | CodexErrorDetails::Sandbox(_)
             | CodexErrorDetails::LandlockSandboxExecutableNotProvided
             | CodexErrorDetails::RetryLimit(_)
@@ -450,6 +454,9 @@ impl CodexErr {
             CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. } => CodexErrorInfo::BadRequest,
+            CodexErrorDetails::AccountMigrationRequired(_) => {
+                CodexErrorInfo::AccountMigrationRequired
+            }
             CodexErrorDetails::Sandbox(_) => CodexErrorInfo::SandboxError,
             _ => CodexErrorInfo::Other,
         }

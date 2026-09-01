@@ -174,6 +174,17 @@ fn server_overloaded_maps_to_protocol() {
 }
 
 #[test]
+fn account_migration_required_maps_to_typed_protocol_error() {
+    let err = CodexErr::AccountMigrationRequired("run /compact".to_string());
+
+    assert_eq!(
+        err.to_codex_protocol_error(),
+        CodexErrorInfo::AccountMigrationRequired
+    );
+    assert!(!err.is_retryable());
+}
+
+#[test]
 fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
     let output = ExecToolCallOutput {
         exit_code: 77,

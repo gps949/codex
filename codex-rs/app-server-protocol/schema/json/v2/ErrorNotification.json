@@ -69,6 +69,13 @@
           "type": "object"
         },
         {
+          "description": "The selected execution account cannot consume opaque history until its owner migrates it.",
+          "enum": [
+            "accountMigrationRequired"
+          ],
+          "type": "string"
+        },
+        {
           "additionalProperties": false,
           "description": "The response SSE stream disconnected in the middle of a turn before completion.",
           "properties": {

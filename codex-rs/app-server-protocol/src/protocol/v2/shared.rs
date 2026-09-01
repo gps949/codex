@@ -95,6 +95,8 @@ pub enum CodexErrorInfo {
     InternalServerError,
     Unauthorized,
     BadRequest,
+    /// The selected execution account cannot consume opaque history until its owner migrates it.
+    AccountMigrationRequired,
     ThreadRollbackFailed,
     SandboxError,
     /// The response SSE stream disconnected in the middle of a turn before completion.
@@ -139,6 +141,9 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
             CoreCodexErrorInfo::InternalServerError => CodexErrorInfo::InternalServerError,
             CoreCodexErrorInfo::Unauthorized => CodexErrorInfo::Unauthorized,
             CoreCodexErrorInfo::BadRequest => CodexErrorInfo::BadRequest,
+            CoreCodexErrorInfo::AccountMigrationRequired => {
+                CodexErrorInfo::AccountMigrationRequired
+            }
             CoreCodexErrorInfo::ThreadRollbackFailed => CodexErrorInfo::ThreadRollbackFailed,
             CoreCodexErrorInfo::SandboxError => CodexErrorInfo::SandboxError,
             CoreCodexErrorInfo::ResponseStreamDisconnected { http_status_code } => {

@@ -73,6 +73,36 @@ fn compacted_user_message(text: &str) -> CompactedUserMessage {
 }
 
 #[test]
+fn local_compaction_output_buffer_has_hard_item_and_token_limits() {
+    let mut item_limited = LocalCompactionOutputBuffer::default();
+    for index in 0..MAX_LOCAL_COMPACTION_OUTPUT_ITEMS {
+        item_limited
+            .push(user_message(&format!("item-{index}")))
+            .expect("items up to the hard count limit should fit");
+    }
+    let count_error = item_limited
+        .push(user_message("one-too-many"))
+        .expect_err("the 65th item must exceed the hard count limit");
+    assert!(matches!(
+        count_error.details(),
+        CodexErrorDetails::Stream(message) if message.contains("output limit")
+    ));
+
+    let mut token_limited = LocalCompactionOutputBuffer::default();
+    let oversized = user_message(&"x".repeat(
+        usize::try_from(MAX_LOCAL_COMPACTION_OUTPUT_TOKENS).unwrap_or_default() * 4 + 1_024,
+    ));
+    let token_error = token_limited
+        .push(oversized)
+        .expect_err("oversized output must exceed the token limit");
+    assert!(matches!(
+        token_error.details(),
+        CodexErrorDetails::Stream(message) if message.contains("output limit")
+    ));
+    assert!(token_limited.items().is_empty());
+}
+
+#[test]
 fn content_items_to_text_joins_non_empty_segments() {
     let items = vec![
         ContentItem::InputText {

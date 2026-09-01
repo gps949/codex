@@ -109,7 +109,10 @@ impl SessionTask for CompactTask {
             }
             Err(err)
                 if portable_policy == PortableCompactionPolicy::Portable
-                    && matches!(err.details(), CodexErrorDetails::UnsupportedOperation(_)) =>
+                    && matches!(
+                        err.details(),
+                        CodexErrorDetails::AccountMigrationRequired(_)
+                    ) =>
             {
                 session.track_turn_codex_error(ctx.as_ref(), &err);
                 session

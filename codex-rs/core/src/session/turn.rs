@@ -230,7 +230,7 @@ pub(crate) async fn run_turn(
         );
         preflight_account_transition(&annotated, &target_profile)
             .ensure_ready(&target_profile)
-            .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
+            .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
     }
     let mut client_session = if execution_auth_mode.is_pooled() {
         // Cached websockets are bound to the previous turn's account; after pool rotation they
@@ -1509,7 +1509,7 @@ async fn run_sampling_request(
         );
         preflight_account_transition(&annotated, &target_profile)
             .ensure_ready(&target_profile)
-            .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
+            .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
         let execution_lease = match &execution_binding {
             ExecutionAuthBinding::Stock => None,
             ExecutionAuthBinding::Pooled(lease) => {
