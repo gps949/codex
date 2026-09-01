@@ -53,6 +53,7 @@ pub(crate) struct ExecutionAuth {
     legacy_manager: Arc<AuthManager>,
     runtime: OnceCell<Arc<AccountPoolRuntime>>,
     change_tx: watch::Sender<u64>,
+    reset_credit_rescue_gate: tokio::sync::Semaphore,
 }
 
 /// Private outcome of one lazy pool-install attempt. `NotConfigured` keeps the cell empty so a
@@ -173,6 +174,7 @@ impl ExecutionAuth {
             legacy_manager,
             runtime: OnceCell::new(),
             change_tx,
+            reset_credit_rescue_gate: tokio::sync::Semaphore::new(1),
         }
     }
 
@@ -331,6 +333,10 @@ impl ExecutionAuth {
     /// transition from legacy auth to pooled auth because `ExecutionAuth` owns the channel itself.
     pub(crate) fn active_auth_change_receiver(&self) -> watch::Receiver<u64> {
         self.change_tx.subscribe()
+    }
+
+    pub(crate) fn reset_credit_rescue_gate(&self) -> &tokio::sync::Semaphore {
+        &self.reset_credit_rescue_gate
     }
 
     /// Associates a backend rate-limit snapshot with the exact lease that observed it. Cached

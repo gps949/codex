@@ -773,7 +773,7 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::R
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_pre_build_hook(write_account_pool_fixture);
-    let fixture = builder.build(&server).await?;
+    let fixture = builder.build_with_auto_env(&server).await?;
     let codex = fixture.codex.clone();
 
     codex
