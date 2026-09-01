@@ -337,6 +337,7 @@ async fn run_compact_task_inner_impl(
             &mut client_session,
             &responses_metadata,
             &prompt,
+            &execution_binding,
         )
         .await;
 
@@ -879,6 +880,7 @@ async fn drain_to_completed(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
+    execution_binding: &ExecutionAuthBinding,
 ) -> CodexResult<()> {
     let mut stream = client_session
         .stream(
@@ -894,6 +896,7 @@ async fn drain_to_completed(
             &InferenceTraceContext::disabled(),
         )
         .await?;
+    let mut completed_items = Vec::new();
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
@@ -903,8 +906,7 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
-                    .await;
+                completed_items.push(item);
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;
@@ -917,6 +919,22 @@ async fn drain_to_completed(
                 token_usage,
                 ..
             }) => {
+                if !completed_items.is_empty() {
+                    match execution_binding {
+                        ExecutionAuthBinding::Stock => {
+                            sess.record_conversation_items(turn_context, &completed_items)
+                                .await;
+                        }
+                        ExecutionAuthBinding::Pooled(lease) => {
+                            sess.record_conversation_items_for_execution(
+                                turn_context,
+                                &completed_items,
+                                lease,
+                            )
+                            .await;
+                        }
+                    }
+                }
                 sess.send_event(
                     turn_context,
                     EventMsg::RawResponseCompleted(RawResponseCompletedEvent {

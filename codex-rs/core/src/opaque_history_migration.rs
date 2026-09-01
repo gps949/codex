@@ -9,6 +9,9 @@ use crate::account_transition::history_item_ownership;
 use crate::execution_auth::ExecutionAuth;
 use crate::execution_auth::ExecutionAuthBinding;
 
+const DISPLAY_PROFILE_ID_MAX_BYTES: usize = 64;
+const DISPLAY_PROFILE_ID_TRUNCATION_MARKER: &str = "...";
+
 /// Captured target identity and legacy ownership mapping used by one transition preflight.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AccountTransitionTargetProfile {
@@ -65,16 +68,7 @@ pub(crate) fn preflight_account_transition(
     target_profile: &AccountTransitionTargetProfile,
 ) -> AccountTransitionReadiness {
     for envelope in history {
-        let is_opaque_compaction = match &envelope.item {
-            ResponseItem::Compaction {
-                encrypted_content, ..
-            } => !encrypted_content.is_empty(),
-            ResponseItem::ContextCompaction {
-                encrypted_content, ..
-            } => encrypted_content.is_some(),
-            _ => false,
-        };
-        if !is_opaque_compaction {
+        if !is_opaque_compaction(envelope) {
             continue;
         }
 
@@ -100,6 +94,22 @@ pub(crate) fn preflight_account_transition(
     AccountTransitionReadiness::Ready
 }
 
+pub(crate) fn history_contains_opaque_compaction(history: &[ResponseItemEnvelope]) -> bool {
+    history.iter().any(is_opaque_compaction)
+}
+
+fn is_opaque_compaction(envelope: &ResponseItemEnvelope) -> bool {
+    match &envelope.item {
+        ResponseItem::Compaction {
+            encrypted_content, ..
+        } => !encrypted_content.is_empty(),
+        ResponseItem::ContextCompaction {
+            encrypted_content, ..
+        } => encrypted_content.is_some(),
+        _ => false,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OpaqueHistoryMigrationRequired {
     owner_profile_id: Option<AccountProfileId>,
@@ -111,19 +121,40 @@ impl fmt::Display for OpaqueHistoryMigrationRequired {
         let target = self
             .target_profile_id
             .as_ref()
-            .map(|profile_id| format!("`{profile_id}`"))
+            .map(|profile_id| format!("`{}`", display_profile_id(profile_id)))
             .unwrap_or_else(|| "the selected account".to_string());
         match self.owner_profile_id.as_ref() {
-            Some(owner) => write!(
-                formatter,
-                "History contains an opaque compaction owned by `{owner}`. Switch to `{owner}` and run `/compact` before using {target}."
-            ),
+            Some(owner) => {
+                let owner = display_profile_id(owner);
+                write!(
+                    formatter,
+                    "History contains an opaque compaction owned by `{owner}`. Switch to `{owner}` and run `/compact` before using {target}."
+                )
+            }
             None => write!(
                 formatter,
                 "History contains an opaque compaction with an unknown owner. Resume the thread with its owning account and run `/compact` before using {target}."
             ),
         }
     }
+}
+
+fn display_profile_id(profile_id: &AccountProfileId) -> String {
+    let value = profile_id.as_str();
+    if value.len() <= DISPLAY_PROFILE_ID_MAX_BYTES {
+        return value.to_string();
+    }
+
+    let retained_bytes =
+        DISPLAY_PROFILE_ID_MAX_BYTES.saturating_sub(DISPLAY_PROFILE_ID_TRUNCATION_MARKER.len());
+    let prefix_bytes = retained_bytes.div_ceil(2);
+    let suffix_bytes = retained_bytes / 2;
+    format!(
+        "{}{}{}",
+        &value[..prefix_bytes],
+        DISPLAY_PROFILE_ID_TRUNCATION_MARKER,
+        &value[value.len() - suffix_bytes..]
+    )
 }
 
 impl std::error::Error for OpaqueHistoryMigrationRequired {}

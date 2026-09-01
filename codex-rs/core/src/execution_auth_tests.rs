@@ -118,3 +118,27 @@ async fn non_openai_provider_ignores_configured_account_pool() -> anyhow::Result
     assert!(execution_auth.runtime().is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn startup_prewarm_is_skipped_only_for_an_eligible_configured_pool() -> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await?;
+    let execution_auth = ExecutionAuth::legacy(AuthManager::from_auth_for_testing(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    ));
+
+    assert!(!execution_auth.should_skip_startup_prewarm(&config, &config.model_provider));
+
+    std::fs::write(
+        codex_home.path().join("account-profiles.json"),
+        "configured",
+    )?;
+    assert!(execution_auth.should_skip_startup_prewarm(&config, &config.model_provider));
+
+    let ollama = &built_in_model_providers(/*openai_base_url*/ None)["ollama"];
+    assert!(!execution_auth.should_skip_startup_prewarm(&config, ollama));
+    Ok(())
+}

@@ -16,6 +16,7 @@ use codex_login::AccountPoolError;
 use codex_login::AccountPoolRuntime;
 use codex_login::AccountPoolRuntimeError;
 use codex_login::AccountProfileId;
+use codex_login::AccountProfileStore;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AuthManager;
@@ -200,6 +201,26 @@ impl ExecutionAuth {
             Some(runtime) => ExecutionAuthMode::Pooled(runtime),
             None => ExecutionAuthMode::Stock,
         })
+    }
+
+    /// Returns whether startup auth/WebSocket prewarm must wait for per-thread pool preflight.
+    ///
+    /// This is intentionally a side-effect-free manifest probe. Installing the pool here would
+    /// resolve managed credentials before resumed history is available for ownership inspection.
+    pub(crate) fn should_skip_startup_prewarm(
+        &self,
+        config: &Config,
+        provider: &ModelProviderInfo,
+    ) -> bool {
+        pool_eligibility(
+            &config.model_provider_id,
+            provider,
+            self.legacy_manager.get_api_auth_mode(),
+            self.legacy_manager.is_workload_identity_selected(),
+        ) == PoolEligibility::Eligible
+            && AccountProfileStore::new(config.codex_home.to_path_buf())
+                .manifest_path()
+                .is_file()
     }
 
     /// Installs native account pooling once a profile manifest exists. Repeated calls are cheap and

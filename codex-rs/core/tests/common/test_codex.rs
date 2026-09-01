@@ -601,6 +601,29 @@ impl TestCodexBuilder {
         .await
     }
 
+    pub async fn resume_with_websocket_server_and_auto_env(
+        &mut self,
+        server: &WebSocketTestServer,
+        home: Arc<TempDir>,
+        rollout_path: PathBuf,
+    ) -> anyhow::Result<TestCodex> {
+        let base_url = format!("{}/v1", server.uri());
+        let base_url_clone = base_url.clone();
+        self.config_mutators.push(Box::new(move |config| {
+            config.model_provider.base_url = Some(base_url_clone);
+            config.model_provider.supports_websockets = true;
+        }));
+        let test_env = test_env().await?;
+        Box::pin(self.build_with_home_and_base_url(
+            base_url,
+            home,
+            Some(rollout_path),
+            test_env,
+            /*include_local_environment*/ false,
+        ))
+        .await
+    }
+
     pub async fn resume(
         &mut self,
         server: &wiremock::MockServer,

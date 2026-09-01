@@ -40,6 +40,7 @@ use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::opaque_history_migration::AccountTransitionTargetProfile;
+use crate::opaque_history_migration::history_contains_opaque_compaction;
 use crate::opaque_history_migration::preflight_account_transition;
 use crate::plugins::build_plugin_injections;
 use crate::portable_compaction::PortableCompactionPolicy;
@@ -215,6 +216,21 @@ pub(crate) async fn run_turn(
             }),
         )
         .await;
+    }
+    let pre_compact_history = sess.clone_history().await;
+    if history_contains_opaque_compaction(pre_compact_history.annotated_items()) {
+        let execution_binding = execution_auth_mode
+            .capture_binding()
+            .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
+        let annotated =
+            pre_compact_history.for_prompt_annotated(&turn_context.model_info.input_modalities);
+        let target_profile = AccountTransitionTargetProfile::from_execution(
+            execution_auth.as_ref(),
+            &execution_binding,
+        );
+        preflight_account_transition(&annotated, &target_profile)
+            .ensure_ready(&target_profile)
+            .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
     }
     let mut client_session = if execution_auth_mode.is_pooled() {
         // Cached websockets are bound to the previous turn's account; after pool rotation they
@@ -1267,7 +1283,12 @@ async fn run_auto_compact(
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
-    if turn_context.config.features.enabled(Feature::TokenBudget) {
+    let history = sess.clone_history().await;
+    let portable_policy =
+        PortableCompactionPolicy::for_history(execution_auth_mode, history.annotated_items());
+    let opaque_migration_required = portable_policy == PortableCompactionPolicy::Portable
+        && history_contains_opaque_compaction(history.annotated_items());
+    if turn_context.config.features.enabled(Feature::TokenBudget) && !opaque_migration_required {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
         crate::compact_token_budget::run_inline_auto_compact_task(
@@ -1279,10 +1300,7 @@ async fn run_auto_compact(
         return Ok(());
     }
 
-    let history = sess.clone_history().await;
-    if PortableCompactionPolicy::for_history(execution_auth_mode, history.annotated_items())
-        == PortableCompactionPolicy::Portable
-    {
+    if portable_policy == PortableCompactionPolicy::Portable {
         emit_compact_metric(
             &sess.services.session_telemetry,
             "local_multi_account",

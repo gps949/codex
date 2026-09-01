@@ -1,10 +1,12 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use codex_core::CodexThread;
 use codex_core::ExecutionAccountPoolHandle;
 use codex_core::TurnInputRequest;
+use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::CompactedItem;
 use codex_history::ResponseItemEnvelope;
@@ -21,6 +23,7 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::responses::start_websocket_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
@@ -171,13 +174,19 @@ async fn resume_with_profile(
 }
 
 async fn wait_for_turn_error(codex: &CodexThread) -> anyhow::Result<String> {
-    let mut error_message = None;
+    let mut error_messages = Vec::new();
     loop {
         match codex.next_event().await?.msg {
-            EventMsg::Error(error) => error_message = Some(error.message),
+            EventMsg::Error(error) => error_messages.push(error.message),
             EventMsg::TurnComplete(_) => {
-                return error_message
-                    .ok_or_else(|| anyhow::anyhow!("turn completed without an error"));
+                return match error_messages.as_slice() {
+                    [message] => Ok(message.clone()),
+                    [] => Err(anyhow::anyhow!("turn completed without an error")),
+                    messages => Err(anyhow::anyhow!(
+                        "turn emitted {} errors instead of exactly one: {messages:?}",
+                        messages.len()
+                    )),
+                };
             }
             _ => {}
         }
@@ -346,9 +355,15 @@ async fn opaque_history_owner_compact_migrates_before_a_target_turn() -> anyhow:
     )
     .await;
 
+    let owner_builder = test_codex().without_auth().with_config(|config| {
+        config
+            .features
+            .enable(Feature::TokenBudget)
+            .expect("test config should enable token budget");
+    });
     let (owner, pool) = resume_with_profile(
         &server,
-        test_codex().without_auth(),
+        owner_builder,
         Arc::clone(&home),
         rollout_path.clone(),
         "primary-acct",
@@ -416,7 +431,15 @@ async fn opaque_history_owner_compact_failure_preserves_live_and_persisted_check
         .and(header("authorization", "Bearer access-primary"))
         .respond_with(move |_request: &wiremock::Request| {
             if response_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                ResponseTemplate::new(500).set_body_string("compaction failed")
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse(vec![
+                        ev_response_created("owner-compact-partial"),
+                        ev_assistant_message(
+                            "owner-compact-partial-summary",
+                            "partial summary that must be rolled back",
+                        ),
+                    ]))
             } else {
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
@@ -455,6 +478,11 @@ async fn opaque_history_owner_compact_failure_preserves_live_and_persisted_check
         compactions_before_failure,
         "failed compaction must not persist a replacement checkpoint",
     );
+    assert!(
+        !std::fs::read_to_string(&rollout_path)?
+            .contains("partial summary that must be rolled back"),
+        "failed compaction persisted partial model output",
+    );
 
     owner.codex.submit(Op::Compact).await?;
     wait_for_event(&owner.codex, |event| {
@@ -485,6 +513,12 @@ async fn opaque_history_owner_compact_failure_preserves_live_and_persisted_check
             .to_string()
             .contains("RETRYABLE_PRIMARY_OPAQUE_CHECKPOINT")),
         "owner retry lost the original opaque checkpoint: {request_bodies:#?}",
+    );
+    assert!(
+        request_bodies.iter().all(|body| !body
+            .to_string()
+            .contains("partial summary that must be rolled back")),
+        "owner retry included partial output from the failed attempt: {request_bodies:#?}",
     );
     assert_eq!(
         latest_compaction_summary_execution_provenance(&rollout_path)?.0,
@@ -521,5 +555,112 @@ async fn opaque_history_manual_compact_wrong_owner_surfaces_migration_error() ->
     assert_eq!(response_request_count(&server).await, requests_before);
     assert_eq!(persisted_compactions(&rollout_path)?, compactions_before);
     assert_migration_error(&error_message, "primary-acct");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opaque_history_token_budget_manual_compact_preserves_foreign_checkpoint()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let (home, rollout_path) =
+        create_opaque_rollout(&server, Some("primary-acct"), "TOKEN_BUDGET_FOREIGN_OPAQUE").await?;
+    write_account_pool_fixture(home.path());
+    let target_builder = test_codex().without_auth().with_config(|config| {
+        config
+            .features
+            .enable(Feature::TokenBudget)
+            .expect("test config should enable token budget");
+    });
+    let (target, _pool) = resume_with_profile(
+        &server,
+        target_builder,
+        home,
+        rollout_path.clone(),
+        "backup-acct",
+    )
+    .await?;
+    let compactions_before = persisted_compactions(&rollout_path)?;
+    let requests_before = response_request_count(&server).await;
+
+    target.codex.submit(Op::Compact).await?;
+    let error_message = wait_for_turn_error(&target.codex).await?;
+
+    assert_eq!(response_request_count(&server).await, requests_before);
+    assert_eq!(persisted_compactions(&rollout_path)?, compactions_before);
+    assert_migration_error(&error_message, "primary-acct");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opaque_history_token_budget_auto_compact_blocks_target_before_reset() -> anyhow::Result<()>
+{
+    let server = MockServer::start().await;
+    let (home, rollout_path) = create_opaque_rollout(
+        &server,
+        Some("primary-acct"),
+        "TOKEN_BUDGET_AUTO_FOREIGN_OPAQUE",
+    )
+    .await?;
+    write_account_pool_fixture(home.path());
+    let target_builder = test_codex().without_auth().with_config(|config| {
+        config.model_auto_compact_token_limit = Some(0);
+        config
+            .features
+            .enable(Feature::TokenBudget)
+            .expect("test config should enable token budget");
+    });
+    let (target, _pool) = resume_with_profile(
+        &server,
+        target_builder,
+        home,
+        rollout_path.clone(),
+        "backup-acct",
+    )
+    .await?;
+    let compactions_before = persisted_compactions(&rollout_path)?;
+    let requests_before = response_request_count(&server).await;
+
+    start_text_turn(&target.codex, "trigger token-budget pre-turn compaction").await?;
+    let error_message = wait_for_turn_error(&target.codex).await?;
+
+    assert_eq!(response_request_count(&server).await, requests_before);
+    assert_eq!(persisted_compactions(&rollout_path)?, compactions_before);
+    assert_migration_error(&error_message, "primary-acct");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opaque_history_resume_skips_pooled_websocket_prewarm_before_preflight()
+-> anyhow::Result<()> {
+    let seed_server = MockServer::start().await;
+    let (home, rollout_path) =
+        create_opaque_rollout(&seed_server, Some("primary-acct"), "PREWARM_PRIMARY_OPAQUE").await?;
+    write_account_pool_fixture(home.path());
+    std::fs::write(
+        home.path().join("account-runtime-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "active_profile_id": "backup-acct",
+            "profiles": [],
+        }))?,
+    )?;
+    let websocket_server =
+        start_websocket_server(vec![vec![vec![ev_completed("unexpected-prewarm")]]]).await;
+    let mut builder = test_codex().without_auth();
+    let resumed = builder
+        .resume_with_websocket_server_and_auto_env(&websocket_server, home, rollout_path)
+        .await?;
+
+    assert!(
+        !websocket_server
+            .wait_for_handshakes(/*expected*/ 1, Duration::from_millis(250))
+            .await,
+        "pooled resume opened a websocket before history preflight",
+    );
+    start_text_turn(&resumed.codex, "preflight before websocket auth").await?;
+    let error_message = wait_for_turn_error(&resumed.codex).await?;
+    assert_migration_error(&error_message, "primary-acct");
+    assert!(websocket_server.handshakes().is_empty());
+    websocket_server.shutdown().await;
     Ok(())
 }
