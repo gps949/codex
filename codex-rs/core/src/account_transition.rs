@@ -210,7 +210,7 @@ impl AccountHistoryTransition {
     }
 }
 
-fn history_item_ownership(envelope: &ResponseItemEnvelope) -> HistoryItemOwnership {
+pub(crate) fn history_item_ownership(envelope: &ResponseItemEnvelope) -> HistoryItemOwnership {
     if let Some(profile_id) = envelope
         .metadata
         .as_ref()

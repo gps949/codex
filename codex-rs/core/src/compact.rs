@@ -15,6 +15,8 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::opaque_history_migration::AccountTransitionTargetProfile;
+use crate::opaque_history_migration::preflight_account_transition;
 use crate::portable_compaction::PortableCompactionPolicy;
 use crate::portable_compaction::project_history_for_execution;
 use crate::responses_metadata::CodexResponsesMetadata;
@@ -284,6 +286,17 @@ async fn run_compact_task_inner_impl(
     };
     let portable_policy =
         PortableCompactionPolicy::for_history(&execution_auth_mode, history.annotated_items());
+    let execution_binding = execution_auth_mode
+        .capture_binding()
+        .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
+    let preflight_history = history
+        .clone()
+        .for_prompt_annotated(&turn_context.model_info.input_modalities);
+    let target_profile =
+        AccountTransitionTargetProfile::from_execution(execution_auth.as_ref(), &execution_binding);
+    preflight_account_transition(&preflight_history, &target_profile)
+        .ensure_ready(&target_profile)
+        .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
     let mut client_session = if execution_auth_mode.is_pooled() {
         sess.services
             .model_client
@@ -291,9 +304,6 @@ async fn run_compact_task_inner_impl(
     } else {
         sess.services.model_client.new_session()
     };
-    let execution_binding = execution_auth_mode
-        .capture_binding()
-        .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
     if let Some(request_auth) = execution_binding.request_auth() {
         client_session.bind_execution_auth(request_auth);
     }

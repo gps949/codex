@@ -66,7 +66,7 @@ fn profile_manifest_entry(id: &str, priority: u32) -> serde_json::Value {
 }
 
 #[expect(clippy::unwrap_used)]
-fn write_profile_credentials(codex_home: &Path, id: &str, access_token: &str) {
+pub(super) fn write_profile_credentials(codex_home: &Path, id: &str, access_token: &str) {
     use base64::Engine as _;
 
     let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
@@ -128,7 +128,7 @@ fn write_malformed_account_pool_fixture(codex_home: &Path) {
 }
 
 #[expect(clippy::unwrap_used)]
-fn write_backup_only_account_pool_fixture(codex_home: &Path) {
+pub(super) fn write_backup_only_account_pool_fixture(codex_home: &Path) {
     write_profile_credentials(codex_home, "backup-acct", "access-backup");
     std::fs::write(
         codex_home.join("account-profiles.json"),
@@ -236,7 +236,7 @@ fn response_item_execution_provenance(
     Ok((metadata.execution_profile_id, metadata.execution_generation))
 }
 
-fn latest_compaction_summary_execution_provenance(
+pub(super) fn latest_compaction_summary_execution_provenance(
     rollout_path: &Path,
 ) -> anyhow::Result<(Option<String>, Option<u64>)> {
     let envelope = std::fs::read_to_string(rollout_path)?

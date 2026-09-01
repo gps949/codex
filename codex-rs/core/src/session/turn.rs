@@ -39,6 +39,8 @@ use crate::mentions::build_connector_slug_counts;
 use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
+use crate::opaque_history_migration::AccountTransitionTargetProfile;
+use crate::opaque_history_migration::preflight_account_transition;
 use crate::plugins::build_plugin_injections;
 use crate::portable_compaction::PortableCompactionPolicy;
 use crate::portable_compaction::project_history_for_execution;
@@ -1479,6 +1481,17 @@ async fn run_sampling_request(
                 return Err(pool_unavailable_error(execution_auth.as_ref()));
             }
         };
+        let history_before = sess.clone_history().await;
+        let annotated = history_before
+            .clone()
+            .for_prompt_annotated(&step_context.model_info.input_modalities);
+        let target_profile = AccountTransitionTargetProfile::from_execution(
+            execution_auth.as_ref(),
+            &execution_binding,
+        );
+        preflight_account_transition(&annotated, &target_profile)
+            .ensure_ready(&target_profile)
+            .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
         let execution_lease = match &execution_binding {
             ExecutionAuthBinding::Stock => None,
             ExecutionAuthBinding::Pooled(lease) => {
@@ -1488,7 +1501,6 @@ async fn run_sampling_request(
             }
         };
 
-        let history_before = sess.clone_history().await;
         let history_cursor = pooled_execution.then(|| {
             SamplingHistoryCursor::from_history(
                 history_before.history_version(),
@@ -1497,9 +1509,6 @@ async fn run_sampling_request(
         });
         let attempt_state = pooled_execution.then(|| install_sampling_attempt(&turn_context));
 
-        let annotated = history_before
-            .clone()
-            .for_prompt_annotated(&step_context.model_info.input_modalities);
         let prompt_input =
             project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
                 .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;

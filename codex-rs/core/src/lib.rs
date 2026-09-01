@@ -17,6 +17,7 @@ mod execution_request_auth;
 mod failover;
 mod failover_checkpoint;
 mod failover_turn;
+mod opaque_history_migration;
 mod portable_compaction;
 mod quota_exhaustion;
 mod realtime_context;
