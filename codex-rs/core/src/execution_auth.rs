@@ -7,6 +7,9 @@ use std::sync::atomic::Ordering;
 
 use crate::config::Config;
 use crate::execution_request_auth::ExecutionRequestAuth;
+use crate::reset_credit_singleflight::ResetCreditRescueAttempt;
+use crate::reset_credit_singleflight::ResetCreditRescueAttemptKey;
+use crate::reset_credit_singleflight::ResetCreditRescueSingleflight;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_login::AccountAvailabilityMutation;
@@ -53,7 +56,7 @@ pub(crate) struct ExecutionAuth {
     legacy_manager: Arc<AuthManager>,
     runtime: OnceCell<Arc<AccountPoolRuntime>>,
     change_tx: watch::Sender<u64>,
-    reset_credit_rescue_gate: tokio::sync::Semaphore,
+    reset_credit_rescue_attempt: ResetCreditRescueSingleflight,
 }
 
 /// Private outcome of one lazy pool-install attempt. `NotConfigured` keeps the cell empty so a
@@ -174,7 +177,7 @@ impl ExecutionAuth {
             legacy_manager,
             runtime: OnceCell::new(),
             change_tx,
-            reset_credit_rescue_gate: tokio::sync::Semaphore::new(1),
+            reset_credit_rescue_attempt: ResetCreditRescueSingleflight::default(),
         }
     }
 
@@ -335,8 +338,19 @@ impl ExecutionAuth {
         self.change_tx.subscribe()
     }
 
-    pub(crate) fn reset_credit_rescue_gate(&self) -> &tokio::sync::Semaphore {
-        &self.reset_credit_rescue_gate
+    pub(crate) fn begin_reset_credit_rescue_attempt(
+        &self,
+        failed_lease: &ExecutionAuthLease,
+    ) -> Option<ResetCreditRescueAttempt> {
+        let profile_id = failed_lease.profile_id()?.clone();
+        let generation = failed_lease.generation();
+        Some(
+            self.reset_credit_rescue_attempt
+                .begin(ResetCreditRescueAttemptKey {
+                    profile_id,
+                    generation,
+                }),
+        )
     }
 
     /// Associates a backend rate-limit snapshot with the exact lease that observed it. Cached

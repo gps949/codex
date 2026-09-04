@@ -466,42 +466,58 @@ async fn no_eligible_target_rejects_next_turn_without_sampling() -> anyhow::Resu
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_pool_exhaustion_consumes_one_reset_credit_with_failed_profile_auth()
--> anyhow::Result<()> {
+#[derive(Clone, Copy)]
+enum ConcurrentResetCreditOutcome {
+    Reset,
+    NoCredit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ConcurrentResetCreditObservation {
+    consume_authorizations: Vec<Option<String>>,
+    success_warnings: usize,
+    response_requests: usize,
+}
+
+async fn run_concurrent_reset_credit_case(
+    outcome: ConcurrentResetCreditOutcome,
+) -> anyhow::Result<ConcurrentResetCreditObservation> {
     let server = MockServer::start().await;
     let reset_at = chrono::Utc::now().timestamp() + 4 * 3600;
-    let responses = mount_response_sequence(
-        &server,
-        vec![
-            ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
-                "error": {
-                    "type": "usage_limit_reached",
-                    "message": "single profile exhausted",
-                    "resets_at": reset_at,
-                }
-            })),
-            ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
-                "error": {
-                    "type": "usage_limit_reached",
-                    "message": "concurrent single profile exhausted",
-                    "resets_at": reset_at,
-                }
-            })),
-            responses::sse_response(sse(vec![
-                ev_response_created("rescued-response"),
-                ev_assistant_message("rescued-message", "continued after one reset credit"),
-                ev_completed("rescued-response"),
-            ])),
-        ],
-    )
-    .await;
+    let mut response_templates = vec![
+        ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "single profile exhausted",
+                "resets_at": reset_at,
+            }
+        })),
+        ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "concurrent single profile exhausted",
+                "resets_at": reset_at,
+            }
+        })),
+    ];
+    if matches!(outcome, ConcurrentResetCreditOutcome::Reset) {
+        response_templates.push(responses::sse_response(sse(vec![
+            ev_response_created("rescued-response"),
+            ev_assistant_message("rescued-message", "continued after one reset credit"),
+            ev_completed("rescued-response"),
+        ])));
+    }
+    let responses = mount_response_sequence(&server, response_templates).await;
+    let consume_code = match outcome {
+        ConcurrentResetCreditOutcome::Reset => "reset",
+        ConcurrentResetCreditOutcome::NoCredit => "no_credit",
+    };
     Mock::given(method("POST"))
         .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
         .respond_with(
             ResponseTemplate::new(/*status*/ 200)
                 .set_delay(std::time::Duration::from_millis(250))
-                .set_body_json(json!({"code": "reset", "windows_reset": 2})),
+                .set_body_json(json!({"code": consume_code, "windows_reset": 2})),
         )
         .mount(&server)
         .await;
@@ -544,7 +560,7 @@ async fn concurrent_pool_exhaustion_consumes_one_reset_credit_with_failed_profil
         .chain(second_events?)
         .collect::<Vec<_>>();
 
-    let consume_requests = server
+    let consume_authorizations = server
         .received_requests()
         .await
         .expect("captured reset-credit requests")
@@ -552,27 +568,54 @@ async fn concurrent_pool_exhaustion_consumes_one_reset_credit_with_failed_profil
         .filter(|request| {
             request.url.path() == "/backend-api/wham/rate-limit-reset-credits/consume"
         })
+        .map(|request| {
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        })
         .collect::<Vec<_>>();
-    assert_eq!(consume_requests.len(), 1);
-    assert_eq!(
-        consume_requests[0]
-            .headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok()),
-        Some("Bearer access-backup"),
-    );
-    assert_eq!(
-        all_events
+    Ok(ConcurrentResetCreditObservation {
+        consume_authorizations,
+        success_warnings: all_events
             .iter()
-            .filter(|event| matches!(
-                event,
-                EventMsg::Warning(warning)
-                    if warning.message.contains("Redeemed one rate-limit reset credit")
-            ))
+            .filter(|event| {
+                matches!(
+                    event,
+                    EventMsg::Warning(warning)
+                        if warning.message.contains("Redeemed one rate-limit reset credit")
+                )
+            })
             .count(),
-        1,
+        response_requests: responses.requests().len(),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_pool_exhaustion_consumes_one_reset_credit_with_failed_profile_auth()
+-> anyhow::Result<()> {
+    assert_eq!(
+        run_concurrent_reset_credit_case(ConcurrentResetCreditOutcome::Reset).await?,
+        ConcurrentResetCreditObservation {
+            consume_authorizations: vec![Some("Bearer access-backup".to_string())],
+            success_warnings: 1,
+            response_requests: 3,
+        }
     );
-    assert_eq!(responses.requests().len(), 3);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_non_reset_outcome_is_shared_without_another_consume() -> anyhow::Result<()> {
+    assert_eq!(
+        run_concurrent_reset_credit_case(ConcurrentResetCreditOutcome::NoCredit).await?,
+        ConcurrentResetCreditObservation {
+            consume_authorizations: vec![Some("Bearer access-backup".to_string())],
+            success_warnings: 0,
+            response_requests: 2,
+        }
+    );
     Ok(())
 }
 
