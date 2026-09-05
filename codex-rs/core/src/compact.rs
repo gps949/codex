@@ -2,16 +2,23 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::Prompt;
+use crate::account_transition::stamp_execution_provenance;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
 use crate::execution_auth::ExecutionAuth;
+use crate::execution_auth::ExecutionAuthBinding;
+use crate::failover_turn::pool_unavailable_error;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::opaque_history_migration::AccountTransitionTargetProfile;
+use crate::opaque_history_migration::preflight_account_transition;
+use crate::portable_compaction::PortableCompactionPolicy;
+use crate::portable_compaction::project_history_for_execution;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -61,6 +68,36 @@ use tracing::error;
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+pub(crate) const MAX_PORTABLE_CONTEXT_ITEM_TOKENS: usize = 8_000;
+const MAX_LOCAL_COMPACTION_OUTPUT_ITEMS: usize = 64;
+const MAX_LOCAL_COMPACTION_OUTPUT_TOKENS: i64 = 32_000;
+
+#[derive(Default)]
+struct LocalCompactionOutputBuffer {
+    items: Vec<ResponseItem>,
+    estimated_tokens: i64,
+}
+
+impl LocalCompactionOutputBuffer {
+    fn push(&mut self, item: ResponseItem) -> CodexResult<()> {
+        let estimated_tokens = crate::context_manager::estimate_item_token_count(&item).max(0);
+        if self.items.len() >= MAX_LOCAL_COMPACTION_OUTPUT_ITEMS
+            || self.estimated_tokens.saturating_add(estimated_tokens)
+                > MAX_LOCAL_COMPACTION_OUTPUT_TOKENS
+        {
+            return Err(CodexErr::Stream(
+                "local compaction response exceeded its buffered output limit".to_string(),
+            ));
+        }
+        self.estimated_tokens = self.estimated_tokens.saturating_add(estimated_tokens);
+        self.items.push(item);
+        Ok(())
+    }
+
+    fn items(&self) -> &[ResponseItem] {
+        &self.items
+    }
+}
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -87,6 +124,7 @@ pub(crate) struct CompactedHistoryMetadata {
     pub(crate) message: String,
     pub(crate) window_number: u64,
     pub(crate) window_ids: AutoCompactWindowIds,
+    pub(crate) portable_policy: PortableCompactionPolicy,
 }
 
 pub(crate) async fn build_compaction_initial_context(
@@ -264,23 +302,40 @@ async fn run_compact_task_inner_impl(
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
-    let multi_account_enabled = match execution_auth
-        .ensure_runtime_from_config(turn_context.config.as_ref())
+    let execution_auth_mode = match execution_auth
+        .mode_for_turn(turn_context.config.as_ref(), turn_context.provider.info())
         .await
     {
-        Ok(_) => execution_auth.multi_account_enabled(),
+        Ok(mode) => mode,
         Err(err) => {
-            tracing::warn!(%err, "failed to initialize native multi-account execution for compaction");
-            false
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "failed to initialize native multi-account execution for compaction: {err}"
+            )));
         }
     };
-    let mut client_session = if multi_account_enabled {
+    let portable_policy =
+        PortableCompactionPolicy::for_history(&execution_auth_mode, history.annotated_items());
+    let execution_binding = execution_auth_mode
+        .capture_binding()
+        .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
+    let preflight_history = history
+        .clone()
+        .for_prompt_annotated(&turn_context.model_info.input_modalities);
+    let target_profile =
+        AccountTransitionTargetProfile::from_execution(execution_auth.as_ref(), &execution_binding);
+    preflight_account_transition(&preflight_history, &target_profile)
+        .ensure_ready(&target_profile)
+        .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
+    let mut client_session = if execution_auth_mode.is_pooled() {
         sess.services
             .model_client
             .new_session_for_execution_identity_change()
     } else {
         sess.services.model_client.new_session()
     };
+    if let Some(request_auth) = execution_binding.request_auth() {
+        client_session.bind_execution_auth(request_auth);
+    }
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
     // survives retries within this compact turn.
@@ -293,9 +348,12 @@ async fn run_compact_task_inner_impl(
 
     loop {
         // Clone is required because of the loop
-        let turn_input = history
+        let annotated = history
             .clone()
-            .for_prompt(&turn_context.model_info.input_modalities);
+            .for_prompt_annotated(&turn_context.model_info.input_modalities);
+        let turn_input =
+            project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
+                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
         let turn_input_len = turn_input.len();
         let prompt = Prompt {
             input: turn_input,
@@ -308,6 +366,7 @@ async fn run_compact_task_inner_impl(
             &mut client_session,
             &responses_metadata,
             &prompt,
+            &execution_binding,
         )
         .await;
 
@@ -379,6 +438,10 @@ async fn run_compact_task_inner_impl(
         // This replacement history skips `record_conversation_items`; only the appended summary
         // belongs to this compaction turn.
         summary_item.set_turn_id_if_missing(&turn_context.sub_id);
+        if let ExecutionAuthBinding::Pooled(lease) = &execution_binding {
+            stamp_execution_provenance(&mut summary_item.metadata, lease);
+        }
+        bound_portable_context_item(&mut summary_item.item, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
     }
     let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
@@ -402,6 +465,7 @@ async fn run_compact_task_inner_impl(
             message: summary_text,
             window_number,
             window_ids,
+            portable_policy,
         },
     )
     .await;
@@ -678,64 +742,68 @@ fn build_compacted_history_with_limit(
     summary_text: &str,
     max_tokens: usize,
 ) -> Vec<ResponseItemEnvelope> {
-    let mut selected_messages: Vec<CompactedUserMessage> = Vec::new();
+    let mut selected_messages = Vec::new();
     if max_tokens > 0 {
         let mut remaining = max_tokens;
         for message in user_messages.iter().rev() {
             if remaining == 0 {
                 break;
             }
-            let tokens = approx_token_count(&message.message);
-            if tokens <= remaining {
-                selected_messages.push(message.clone());
-                remaining = remaining.saturating_sub(tokens);
-            } else {
-                let truncated =
-                    truncate_text(&message.message, TruncationPolicy::Tokens(remaining));
-                selected_messages.push(CompactedUserMessage {
-                    message: truncated,
-                    internal_chat_message_metadata_passthrough: message
-                        .internal_chat_message_metadata_passthrough
-                        .clone(),
-                    harness_metadata: message.harness_metadata.clone(),
-                });
+            let Some(message_text) =
+                truncate_text_to_estimated_token_limit(&message.message, remaining, |text| {
+                    i64::try_from(approx_token_count(text)).unwrap_or(i64::MAX)
+                })
+            else {
+                break;
+            };
+            let mut item = ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: message_text.clone(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: message
+                    .internal_chat_message_metadata_passthrough
+                    .clone(),
+            };
+            if message
+                .internal_chat_message_metadata_passthrough
+                .as_ref()
+                .and_then(|metadata| metadata.content_item_kinds.as_ref())
+                .is_some()
+            {
+                let _ = set_annotated_content(
+                    &mut item,
+                    vec![AnnotatedContent::input_text(
+                        &message_text,
+                        ContentItemKind("user.text".to_string()),
+                    )],
+                );
+            }
+            bound_portable_context_item(&mut item, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
+            let retained_tokens = match &item {
+                ResponseItem::Message { content, .. } => content_items_to_text(content)
+                    .as_deref()
+                    .map(approx_token_count)
+                    .unwrap_or_default(),
+                _ => 0,
+            };
+            if retained_tokens == 0 {
+                if message.message.is_empty() {
+                    continue;
+                }
                 break;
             }
+            remaining = remaining.saturating_sub(retained_tokens);
+            selected_messages.push(ResponseItemEnvelope {
+                item,
+                metadata: message.harness_metadata.clone(),
+            });
         }
-        selected_messages.reverse();
     }
-
-    for message in &selected_messages {
-        let mut item = ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: message.message.clone(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: message
-                .internal_chat_message_metadata_passthrough
-                .clone(),
-        };
-        if message
-            .internal_chat_message_metadata_passthrough
-            .as_ref()
-            .and_then(|metadata| metadata.content_item_kinds.as_ref())
-            .is_some()
-        {
-            let _ = set_annotated_content(
-                &mut item,
-                vec![AnnotatedContent::input_text(
-                    &message.message,
-                    ContentItemKind("user.text".to_string()),
-                )],
-            );
-        }
-        history.push(ResponseItemEnvelope {
-            item,
-            metadata: message.harness_metadata.clone(),
-        });
-    }
+    selected_messages.reverse();
+    history.extend(selected_messages);
 
     let summary_text = if summary_text.is_empty() {
         "(no summary available)".to_string()
@@ -743,11 +811,96 @@ fn build_compacted_history_with_limit(
         summary_text.to_string()
     };
 
-    history.push(ResponseItemEnvelope::new(ContextualUserFragment::into(
-        CompactionSummary::new(summary_text),
+    history.push(ResponseItemEnvelope::new(bounded_compaction_summary(
+        &summary_text,
     )));
 
     history
+}
+
+fn bounded_compaction_summary(summary_text: &str) -> ResponseItem {
+    let mut summary = ContextualUserFragment::into(CompactionSummary::new(summary_text));
+    bound_portable_context_item(&mut summary, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
+    summary
+}
+
+fn truncate_text_to_estimated_token_limit(
+    text: &str,
+    max_tokens: usize,
+    mut estimate: impl FnMut(&str) -> i64,
+) -> Option<String> {
+    let max_tokens = i64::try_from(max_tokens).unwrap_or(i64::MAX);
+    if estimate(text) <= max_tokens {
+        return Some(text.to_string());
+    }
+    if estimate("") > max_tokens {
+        return None;
+    }
+
+    let mut best = String::new();
+    let mut lower = 0;
+    let mut upper = approx_token_count(text);
+    while lower <= upper {
+        let candidate_limit = lower + (upper - lower) / 2;
+        let candidate = truncate_text(text, TruncationPolicy::Tokens(candidate_limit));
+        if estimate(&candidate) <= max_tokens {
+            best = candidate;
+            lower = candidate_limit.saturating_add(1);
+        } else if candidate_limit == 0 {
+            break;
+        } else {
+            upper = candidate_limit - 1;
+        }
+    }
+    Some(best)
+}
+
+pub(crate) fn bound_portable_context_item(item: &mut ResponseItem, max_tokens: usize) {
+    let original_text = match item {
+        ResponseItem::Message { content, .. } => match content.as_slice() {
+            [ContentItem::InputText { text }] | [ContentItem::OutputText { text }] => text.clone(),
+            _ => return,
+        },
+        _ => return,
+    };
+    let estimate_candidate = |template: &ResponseItem, candidate_text: &str| {
+        let mut candidate = template.clone();
+        if let ResponseItem::Message { content, .. } = &mut candidate
+            && let Some(content) = content.first_mut()
+        {
+            match content {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    *text = candidate_text.to_string();
+                }
+                ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
+            }
+        }
+        crate::context_manager::estimate_item_token_count(&candidate)
+    };
+    let mut bounded_text =
+        truncate_text_to_estimated_token_limit(&original_text, max_tokens, |candidate_text| {
+            estimate_candidate(item, candidate_text)
+        });
+    if bounded_text.is_none() {
+        // Passthrough metadata should normally be small. If it alone exceeds the portable-item
+        // limit, dropping transport metadata is safer than creating an unbounded model item.
+        item.clear_internal_chat_message_metadata_passthrough();
+        bounded_text =
+            truncate_text_to_estimated_token_limit(&original_text, max_tokens, |candidate_text| {
+                estimate_candidate(item, candidate_text)
+            });
+    }
+    let bounded_text = bounded_text.unwrap_or_default();
+    if let ResponseItem::Message { content, .. } = item
+        && let Some(content) = content.first_mut()
+    {
+        match content {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                *text = bounded_text;
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
+        }
+    }
 }
 
 async fn drain_to_completed(
@@ -756,6 +909,7 @@ async fn drain_to_completed(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
+    execution_binding: &ExecutionAuthBinding,
 ) -> CodexResult<()> {
     let mut stream = client_session
         .stream(
@@ -771,6 +925,7 @@ async fn drain_to_completed(
             &InferenceTraceContext::disabled(),
         )
         .await?;
+    let mut completed_items = LocalCompactionOutputBuffer::default();
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
@@ -780,8 +935,7 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
-                    .await;
+                completed_items.push(item)?;
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;
@@ -794,6 +948,22 @@ async fn drain_to_completed(
                 token_usage,
                 ..
             }) => {
+                if !completed_items.items().is_empty() {
+                    match execution_binding {
+                        ExecutionAuthBinding::Stock => {
+                            sess.record_conversation_items(turn_context, completed_items.items())
+                                .await;
+                        }
+                        ExecutionAuthBinding::Pooled(lease) => {
+                            sess.record_conversation_items_for_execution(
+                                turn_context,
+                                completed_items.items(),
+                                lease,
+                            )
+                            .await;
+                        }
+                    }
+                }
                 sess.send_event(
                     turn_context,
                     EventMsg::RawResponseCompleted(RawResponseCompletedEvent {

@@ -1794,6 +1794,8 @@ pub enum CodexErrorInfo {
     InternalServerError,
     Unauthorized,
     BadRequest,
+    /// The selected execution account cannot consume opaque history until its owner migrates it.
+    AccountMigrationRequired,
     SandboxError,
     /// The response SSE stream disconnected in the middle of a turnbefore completion.
     ResponseStreamDisconnected {
@@ -1828,6 +1830,7 @@ impl CodexErrorInfo {
             | Self::InternalServerError
             | Self::Unauthorized
             | Self::BadRequest
+            | Self::AccountMigrationRequired
             | Self::SandboxError
             | Self::ResponseStreamDisconnected { .. }
             | Self::ResponseTooManyFailedAttempts { .. }

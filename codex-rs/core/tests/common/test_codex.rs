@@ -14,6 +14,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_config::CloudConfigBundleLoader;
+use codex_config::ManagedAuthPolicy;
 use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
@@ -33,6 +34,9 @@ use codex_extension_api::UserInstructionsProvider;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_home::CodexHomeUserInstructionsProvider;
+use codex_login::AuthConfig;
+use codex_login::AuthKeyringBackendKind;
+use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
@@ -91,6 +95,30 @@ const TEST_MODEL_WITH_EXPERIMENTAL_TOOLS: &str = "test-gpt-5.1-codex";
 const REMOTE_EXEC_SERVER_URL_ENV_VAR: &str = "CODEX_TEST_REMOTE_EXEC_SERVER_URL";
 static REMOTE_TEST_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const SUBMIT_TURN_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn test_auth_manager(auth: Option<CodexAuth>, config: &Config) -> Result<Arc<AuthManager>> {
+    match auth {
+        Some(auth) => Ok(codex_core::test_support::auth_manager_from_auth_with_home(
+            auth,
+            config.codex_home.to_path_buf(),
+        )),
+        None => AuthManager::shared_from_auth_config(
+            AuthConfig {
+                codex_home: config.codex_home.to_path_buf(),
+                auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+                keyring_backend_kind: AuthKeyringBackendKind::Direct,
+                forced_login_method: config.forced_login_method,
+                chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
+                forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+                managed_auth_policy: ManagedAuthPolicy::default(),
+                auth_route_config: config.auth_route_config(),
+            },
+            /*enable_codex_api_key_env*/ false,
+        )
+        .await
+        .context("create unauthenticated test AuthManager"),
+    }
+}
 
 pub struct RecordingUserInstructionsProvider {
     inner: Arc<dyn UserInstructionsProvider>,
@@ -324,7 +352,7 @@ pub fn turn_permission_fields(
 
 pub struct TestCodexBuilder {
     config_mutators: Vec<Box<ConfigMutator>>,
-    auth: CodexAuth,
+    auth: Option<CodexAuth>,
     pre_build_hooks: Vec<Box<PreBuildHook>>,
     workspace_setups: Vec<Box<WorkspaceSetup>>,
     home: Option<Arc<TempDir>>,
@@ -350,7 +378,12 @@ impl TestCodexBuilder {
     }
 
     pub fn with_auth(mut self, auth: CodexAuth) -> Self {
-        self.auth = auth;
+        self.auth = Some(auth);
+        self
+    }
+
+    pub fn without_auth(mut self) -> Self {
+        self.auth = None;
         self
     }
 
@@ -568,6 +601,29 @@ impl TestCodexBuilder {
         .await
     }
 
+    pub async fn resume_with_websocket_server_and_auto_env(
+        &mut self,
+        server: &WebSocketTestServer,
+        home: Arc<TempDir>,
+        rollout_path: PathBuf,
+    ) -> anyhow::Result<TestCodex> {
+        let base_url = format!("{}/v1", server.uri());
+        let base_url_clone = base_url.clone();
+        self.config_mutators.push(Box::new(move |config| {
+            config.model_provider.base_url = Some(base_url_clone);
+            config.model_provider.supports_websockets = true;
+        }));
+        let test_env = test_env().await?;
+        Box::pin(self.build_with_home_and_base_url(
+            base_url,
+            home,
+            Some(rollout_path),
+            test_env,
+            /*include_local_environment*/ false,
+        ))
+        .await
+    }
+
     pub async fn resume(
         &mut self,
         server: &wiremock::MockServer,
@@ -576,6 +632,25 @@ impl TestCodexBuilder {
     ) -> anyhow::Result<TestCodex> {
         let base_url = format!("{}/v1", server.uri());
         let test_env = TestEnv::local().await?;
+        Box::pin(self.build_with_home_and_base_url(
+            base_url,
+            home,
+            Some(rollout_path),
+            test_env,
+            /*include_local_environment*/ false,
+        ))
+        .await
+    }
+
+    /// Resumes a rollout using the execution environment selected by the test process.
+    pub async fn resume_with_auto_env(
+        &mut self,
+        server: &wiremock::MockServer,
+        home: Arc<TempDir>,
+        rollout_path: PathBuf,
+    ) -> anyhow::Result<TestCodex> {
+        let base_url = format!("{}/v1", server.uri());
+        let test_env = test_env().await?;
         Box::pin(self.build_with_home_and_base_url(
             base_url,
             home,
@@ -677,10 +752,7 @@ impl TestCodexBuilder {
                     config.codex_home.clone(),
                 ))
             });
-        let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
-            auth.clone(),
-            config.codex_home.to_path_buf(),
-        );
+        let auth_manager = test_auth_manager(auth.clone(), &config).await?;
         let models_manager = self
             .models_manager
             .clone()
@@ -727,10 +799,7 @@ impl TestCodexBuilder {
 
         let new_conversation = match (resume_from, user_shell_override) {
             (Some(path), Some(user_shell_override)) => {
-                let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
-                    auth,
-                    config.codex_home.to_path_buf(),
-                );
+                let auth_manager = test_auth_manager(auth, &config).await?;
                 Box::pin(
                     codex_core::test_support::resume_thread_from_rollout_with_user_shell_override(
                         thread_manager.as_ref(),
@@ -744,10 +813,7 @@ impl TestCodexBuilder {
                 .await?
             }
             (Some(path), None) => {
-                let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
-                    auth,
-                    config.codex_home.to_path_buf(),
-                );
+                let auth_manager = test_auth_manager(auth, &config).await?;
                 Box::pin(thread_manager.resume_thread_from_rollout(
                     config.clone(),
                     path,
@@ -1344,7 +1410,7 @@ pub fn test_codex() -> TestCodexBuilder {
                 .enable(Feature::ContentItemKinds)
                 .expect("test config should allow ContentItemKinds override");
         })],
-        auth: CodexAuth::from_api_key("dummy"),
+        auth: Some(CodexAuth::from_api_key("dummy")),
         pre_build_hooks: vec![],
         workspace_setups: vec![],
         home: None,

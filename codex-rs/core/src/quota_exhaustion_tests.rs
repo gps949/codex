@@ -6,7 +6,7 @@ use codex_protocol::protocol::RateLimitReachedType;
 use codex_protocol::protocol::RateLimitSnapshot;
 
 use super::plans_share_quota_bucket;
-use super::usage_limit_matches_profile;
+use super::usage_limit_metadata_matches_profile;
 
 #[test]
 fn workspace_and_consumer_plans_do_not_share_quota_bucket() {
@@ -34,7 +34,7 @@ async fn workspace_member_limit_does_not_match_plus_profile() {
         promo_message: None,
         rate_limit_reached_type: Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached),
     };
-    assert!(!usage_limit_matches_profile(&lease, &limit).await);
+    assert!(!usage_limit_metadata_matches_profile(&lease, &limit).await);
 }
 
 #[tokio::test]
@@ -47,7 +47,7 @@ async fn matching_team_limit_matches_team_profile() {
         promo_message: None,
         rate_limit_reached_type: Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached),
     };
-    assert!(usage_limit_matches_profile(&lease, &limit).await);
+    assert!(usage_limit_metadata_matches_profile(&lease, &limit).await);
 }
 
 #[tokio::test]
@@ -70,7 +70,7 @@ async fn mismatched_plan_type_in_rate_limits_snapshot_is_rejected() {
         promo_message: None,
         rate_limit_reached_type: None,
     };
-    assert!(!usage_limit_matches_profile(&lease, &limit).await);
+    assert!(!usage_limit_metadata_matches_profile(&lease, &limit).await);
 }
 
 async fn test_lease_with_plan(plan: PlanType) -> (tempfile::TempDir, codex_login::AccountLease) {

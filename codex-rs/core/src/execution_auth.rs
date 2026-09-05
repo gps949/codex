@@ -6,17 +6,26 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use crate::config::Config;
+use crate::execution_request_auth::ExecutionRequestAuth;
+use crate::reset_credit_singleflight::ResetCreditRescueAttempt;
+use crate::reset_credit_singleflight::ResetCreditRescueAttemptKey;
+use crate::reset_credit_singleflight::ResetCreditRescueSingleflight;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_login::AccountAvailabilityMutation;
 use codex_login::AccountLease;
 use codex_login::AccountPool;
+use codex_login::AccountPoolError;
 use codex_login::AccountPoolRuntime;
 use codex_login::AccountPoolRuntimeError;
 use codex_login::AccountProfileId;
+use codex_login::AccountProfileStore;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AuthManager;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use tokio::sync::OnceCell;
@@ -47,6 +56,7 @@ pub(crate) struct ExecutionAuth {
     legacy_manager: Arc<AuthManager>,
     runtime: OnceCell<Arc<AccountPoolRuntime>>,
     change_tx: watch::Sender<u64>,
+    reset_credit_rescue_attempt: ResetCreditRescueSingleflight,
 }
 
 /// Private outcome of one lazy pool-install attempt. `NotConfigured` keeps the cell empty so a
@@ -56,10 +66,63 @@ enum RuntimeInitError {
     Failed(AccountPoolRuntimeError),
 }
 
+/// Authentication mode selected for one turn after applying provider and credential policy.
+pub(crate) enum ExecutionAuthMode {
+    Stock,
+    Pooled(Arc<AccountPoolRuntime>),
+}
+
+impl ExecutionAuthMode {
+    pub(crate) fn multi_account_enabled(&self) -> bool {
+        match self {
+            Self::Stock => false,
+            Self::Pooled(runtime) => runtime.pool().snapshots().len() > 1,
+        }
+    }
+
+    pub(crate) fn capture_binding(&self) -> Result<ExecutionAuthBinding, AccountPoolError> {
+        match self {
+            Self::Stock => Ok(ExecutionAuthBinding::Stock),
+            Self::Pooled(runtime) => runtime
+                .pool()
+                .lease()
+                .map(ExecutionAuthLease::from_account_lease)
+                .map(ExecutionAuthBinding::Pooled),
+        }
+    }
+
+    pub(crate) fn is_pooled(&self) -> bool {
+        matches!(self, Self::Pooled(_))
+    }
+}
+
+/// Authentication binding captured at one inference request boundary.
+#[derive(Clone)]
+pub(crate) enum ExecutionAuthBinding {
+    Stock,
+    Pooled(ExecutionAuthLease),
+}
+
+impl ExecutionAuthBinding {
+    pub(crate) fn request_auth(&self) -> Option<ExecutionRequestAuth> {
+        match self {
+            Self::Stock => None,
+            Self::Pooled(lease) => Some(lease.request_auth()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PoolEligibility {
+    Eligible,
+    Ineligible,
+}
+
 /// Immutable execution identity captured by one account-bound model client/request path.
 #[derive(Clone)]
 pub(crate) struct ExecutionAuthLease {
     account: Option<AccountLease>,
+    auth_manager: Arc<AuthManager>,
 }
 
 /// A preemptive rotation lacking an authoritative reset timestamp re-probes the parked account
@@ -114,7 +177,55 @@ impl ExecutionAuth {
             legacy_manager,
             runtime: OnceCell::new(),
             change_tx,
+            reset_credit_rescue_attempt: ResetCreditRescueSingleflight::default(),
         }
+    }
+
+    /// Resolves stock versus pooled authentication for one turn.
+    ///
+    /// Provider and credential gating happens before the account manifest is inspected, so custom,
+    /// API-key, Bedrock, workload-identity, and host-supplied auth paths retain stock behavior even
+    /// when a ChatGPT account manifest exists in the shared Codex home.
+    pub(crate) async fn mode_for_turn(
+        &self,
+        config: &Config,
+        provider: &ModelProviderInfo,
+    ) -> Result<ExecutionAuthMode, AccountPoolRuntimeError> {
+        if pool_eligibility(
+            &config.model_provider_id,
+            provider,
+            self.legacy_manager.get_api_auth_mode(),
+            self.legacy_manager.is_workload_identity_selected(),
+        ) == PoolEligibility::Ineligible
+        {
+            return Ok(ExecutionAuthMode::Stock);
+        }
+
+        self.install_runtime_from_config(config).await?;
+        Ok(match self.runtime() {
+            Some(runtime) => ExecutionAuthMode::Pooled(runtime),
+            None => ExecutionAuthMode::Stock,
+        })
+    }
+
+    /// Returns whether startup auth/WebSocket prewarm must wait for per-thread pool preflight.
+    ///
+    /// This is intentionally a side-effect-free manifest probe. Installing the pool here would
+    /// resolve managed credentials before resumed history is available for ownership inspection.
+    pub(crate) fn should_skip_startup_prewarm(
+        &self,
+        config: &Config,
+        provider: &ModelProviderInfo,
+    ) -> bool {
+        pool_eligibility(
+            &config.model_provider_id,
+            provider,
+            self.legacy_manager.get_api_auth_mode(),
+            self.legacy_manager.is_workload_identity_selected(),
+        ) == PoolEligibility::Eligible
+            && AccountProfileStore::new(config.codex_home.to_path_buf())
+                .manifest_path()
+                .is_file()
     }
 
     /// Installs native account pooling once a profile manifest exists. Repeated calls are cheap and
@@ -124,15 +235,20 @@ impl ExecutionAuth {
         &self,
         config: &Config,
     ) -> Result<bool, AccountPoolRuntimeError> {
-        if !supports_native_account_pool(config) {
-            return Ok(false);
-        }
+        self.mode_for_turn(config, &config.model_provider)
+            .await
+            .map(|mode| matches!(mode, ExecutionAuthMode::Pooled(_)))
+    }
 
+    async fn install_runtime_from_config(
+        &self,
+        config: &Config,
+    ) -> Result<(), AccountPoolRuntimeError> {
         if let Some(runtime) = self.runtime() {
             let pool = runtime.pool();
             pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
             pool.set_rotation_strategy(config.account_pool.effective_rotation_strategy());
-            return Ok(true);
+            return Ok(());
         }
 
         // OnceCell serializes concurrent initializers without holding a guard across await.
@@ -166,9 +282,9 @@ impl ExecutionAuth {
                     self.notify_change();
                     self.spawn_pool_change_bridge(pool);
                 }
-                Ok(true)
+                Ok(())
             }
-            Err(RuntimeInitError::NotConfigured) => Ok(false),
+            Err(RuntimeInitError::NotConfigured) => Ok(()),
             Err(RuntimeInitError::Failed(error)) => Err(error),
         }
     }
@@ -179,12 +295,6 @@ impl ExecutionAuth {
 
     pub(crate) fn account_pool(&self) -> Option<Arc<AccountPool>> {
         self.runtime().map(|runtime| runtime.pool())
-    }
-
-    /// Whether this logical session can move between more than one configured execution identity.
-    pub(crate) fn multi_account_enabled(&self) -> bool {
-        self.account_pool()
-            .is_some_and(|pool| pool.snapshots().len() > 1)
     }
 
     /// Stable profile that owns rollout items created by stock Codex before execution provenance
@@ -209,7 +319,7 @@ impl ExecutionAuth {
                 .lease()
                 .ok()
                 .map(ExecutionAuthLease::from_account_lease),
-            None => Some(ExecutionAuthLease::legacy()),
+            None => Some(ExecutionAuthLease::legacy(Arc::clone(&self.legacy_manager))),
         }
     }
 
@@ -226,6 +336,21 @@ impl ExecutionAuth {
     /// transition from legacy auth to pooled auth because `ExecutionAuth` owns the channel itself.
     pub(crate) fn active_auth_change_receiver(&self) -> watch::Receiver<u64> {
         self.change_tx.subscribe()
+    }
+
+    pub(crate) fn begin_reset_credit_rescue_attempt(
+        &self,
+        failed_lease: &ExecutionAuthLease,
+    ) -> Option<ResetCreditRescueAttempt> {
+        let profile_id = failed_lease.profile_id()?.clone();
+        let generation = failed_lease.generation();
+        Some(
+            self.reset_credit_rescue_attempt
+                .begin(ResetCreditRescueAttemptKey {
+                    profile_id,
+                    generation,
+                }),
+        )
     }
 
     /// Associates a backend rate-limit snapshot with the exact lease that observed it. Cached
@@ -286,15 +411,8 @@ impl ExecutionAuth {
         else {
             return Ok(());
         };
-        pool.update_rate_limits(
-            &account_lease.profile().id,
-            AccountRateLimits {
-                primary: snapshot.primary.as_ref().map(convert_rate_limit_window),
-                secondary: snapshot.secondary.as_ref().map(convert_rate_limit_window),
-                observed_at: Some(Utc::now()),
-            },
-        )
-        .map_err(std::io::Error::other)
+        pool.update_rate_limits_from_lease(account_lease, convert_rate_limits(snapshot))
+            .map_err(std::io::Error::other)
     }
 
     /// Marks only the lease that actually received the quota rejection as exhausted. Generation
@@ -303,29 +421,49 @@ impl ExecutionAuth {
         &self,
         failed_lease: &ExecutionAuthLease,
         resets_at: Option<DateTime<Utc>>,
-    ) -> std::io::Result<Option<ExecutionAuthLease>> {
+    ) -> std::io::Result<AccountAvailabilityMutation> {
         let (Some(pool), Some(account_lease)) =
             (self.account_pool(), failed_lease.account.as_ref())
         else {
-            return Ok(None);
+            return Ok(AccountAvailabilityMutation::PoolExhausted);
         };
         pool.mark_exhausted(account_lease, resets_at)
-            .map(|next| next.map(ExecutionAuthLease::from_account_lease))
             .map_err(std::io::Error::other)
+    }
+
+    pub(crate) fn failover_after_usage_limit(
+        &self,
+        failed_lease: &ExecutionAuthLease,
+        resets_at: DateTime<Utc>,
+        snapshot: Option<&RateLimitSnapshot>,
+    ) -> std::io::Result<AccountAvailabilityMutation> {
+        let (Some(pool), Some(account_lease)) =
+            (self.account_pool(), failed_lease.account.as_ref())
+        else {
+            return Ok(AccountAvailabilityMutation::PoolExhausted);
+        };
+        match snapshot {
+            Some(snapshot) => pool.mark_exhausted_with_rate_limits(
+                account_lease,
+                Some(resets_at),
+                convert_rate_limits(snapshot),
+            ),
+            None => pool.mark_exhausted(account_lease, Some(resets_at)),
+        }
+        .map_err(std::io::Error::other)
     }
 
     pub(crate) fn failover_after_auth_unavailable(
         &self,
         failed_lease: &ExecutionAuthLease,
         message: impl Into<String>,
-    ) -> std::io::Result<Option<ExecutionAuthLease>> {
+    ) -> std::io::Result<AccountAvailabilityMutation> {
         let (Some(pool), Some(account_lease)) =
             (self.account_pool(), failed_lease.account.as_ref())
         else {
-            return Ok(None);
+            return Ok(AccountAvailabilityMutation::PoolExhausted);
         };
         pool.mark_authentication_unavailable(account_lease, message)
-            .map(|next| next.map(ExecutionAuthLease::from_account_lease))
             .map_err(std::io::Error::other)
     }
 
@@ -345,20 +483,41 @@ impl ExecutionAuth {
     }
 }
 
-fn supports_native_account_pool(config: &Config) -> bool {
-    config.model_provider_id == OPENAI_PROVIDER_ID
-        && config.model_provider.is_openai()
-        && config.model_provider.requires_openai_auth
+fn pool_eligibility(
+    provider_id: &str,
+    provider: &ModelProviderInfo,
+    auth_mode: Option<AuthMode>,
+    workload_identity_selected: bool,
+) -> PoolEligibility {
+    if provider_id == OPENAI_PROVIDER_ID
+        && provider.is_openai()
+        && provider.requires_openai_auth
+        && provider.env_key.is_none()
+        && provider.experimental_bearer_token.is_none()
+        && provider.auth.is_none()
+        && provider.aws.is_none()
+        && matches!(auth_mode, None | Some(AuthMode::Chatgpt))
+        && !workload_identity_selected
+    {
+        PoolEligibility::Eligible
+    } else {
+        PoolEligibility::Ineligible
+    }
 }
 
 impl ExecutionAuthLease {
-    fn legacy() -> Self {
-        Self { account: None }
+    fn legacy(auth_manager: Arc<AuthManager>) -> Self {
+        Self {
+            account: None,
+            auth_manager,
+        }
     }
 
     fn from_account_lease(account: AccountLease) -> Self {
+        let auth_manager = account.auth_manager();
         Self {
             account: Some(account),
+            auth_manager,
         }
     }
 
@@ -373,6 +532,14 @@ impl ExecutionAuthLease {
     pub(crate) fn account_lease(&self) -> Option<&AccountLease> {
         self.account.as_ref()
     }
+
+    pub(crate) fn request_auth(&self) -> ExecutionRequestAuth {
+        ExecutionRequestAuth::new(
+            self.profile_id().cloned(),
+            self.generation(),
+            Arc::clone(&self.auth_manager),
+        )
+    }
 }
 
 fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow {
@@ -381,6 +548,14 @@ fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow
         resets_at: window
             .resets_at
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+    }
+}
+
+fn convert_rate_limits(snapshot: &RateLimitSnapshot) -> AccountRateLimits {
+    AccountRateLimits {
+        primary: snapshot.primary.as_ref().map(convert_rate_limit_window),
+        secondary: snapshot.secondary.as_ref().map(convert_rate_limit_window),
+        observed_at: Some(Utc::now()),
     }
 }
 

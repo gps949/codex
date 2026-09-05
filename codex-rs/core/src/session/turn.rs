@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::account_transition::AccountHistoryTransition;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -15,6 +14,8 @@ use crate::connectors;
 use crate::context::ContextualUserFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::execution_auth::ExecutionAuth;
+use crate::execution_auth::ExecutionAuthBinding;
+use crate::execution_auth::ExecutionAuthMode;
 use crate::execution_provenance::record_conversation_items_with_execution_provenance;
 use crate::execution_provenance::sampling_execution_provenance;
 use crate::execution_provenance::set_sampling_execution_provenance;
@@ -38,7 +39,12 @@ use crate::mentions::build_connector_slug_counts;
 use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
+use crate::opaque_history_migration::AccountTransitionTargetProfile;
+use crate::opaque_history_migration::history_contains_opaque_compaction;
+use crate::opaque_history_migration::preflight_account_transition;
 use crate::plugins::build_plugin_injections;
+use crate::portable_compaction::PortableCompactionPolicy;
+use crate::portable_compaction::project_history_for_execution;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -178,16 +184,15 @@ pub(crate) async fn run_turn(
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
     let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
-    let multi_account_enabled = match execution_auth
-        .ensure_runtime_from_config(turn_context.config.as_ref())
+    let execution_auth_mode = execution_auth
+        .mode_for_turn(turn_context.config.as_ref(), turn_context.provider.info())
         .await
-    {
-        Ok(_) => execution_auth.multi_account_enabled(),
-        Err(err) => {
-            warn!(%err, "failed to initialize native multi-account execution; using stock auth");
-            false
-        }
-    };
+        .map_err(|err| {
+            CodexErr::UnsupportedOperation(format!(
+                "failed to initialize native multi-account execution: {err}"
+            ))
+        })?;
+    let multi_account_enabled = execution_auth_mode.multi_account_enabled();
     // Rotate away from a nearly exhausted account at the turn boundary, before any transport or
     // step state exists, so the switch costs nothing and the turn cannot hit the limit mid-response.
     if multi_account_enabled
@@ -212,7 +217,22 @@ pub(crate) async fn run_turn(
         )
         .await;
     }
-    let mut client_session = if multi_account_enabled {
+    let pre_compact_history = sess.clone_history().await;
+    if history_contains_opaque_compaction(pre_compact_history.annotated_items()) {
+        let execution_binding = execution_auth_mode
+            .capture_binding()
+            .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
+        let annotated =
+            pre_compact_history.for_prompt_annotated(&turn_context.model_info.input_modalities);
+        let target_profile = AccountTransitionTargetProfile::from_execution(
+            execution_auth.as_ref(),
+            &execution_binding,
+        );
+        preflight_account_transition(&annotated, &target_profile)
+            .ensure_ready(&target_profile)
+            .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
+    }
+    let mut client_session = if execution_auth_mode.is_pooled() {
         // Cached websockets are bound to the previous turn's account; after pool rotation they
         // would keep sending as the exhausted identity and poison sibling profiles.
         sess.services
@@ -229,6 +249,7 @@ pub(crate) async fn run_turn(
         &sess,
         &turn_context,
         &mut client_session,
+        &execution_auth_mode,
         &cancellation_token,
     )
     .await
@@ -425,15 +446,6 @@ pub(crate) async fn run_turn(
                 .record_step_world_state_if_changed(&world_state, step_context.as_ref())
                 .await?;
 
-            // Construct the input that we will send to the model.
-            let sampling_request_input: Vec<ResponseItem> = async {
-                sess.clone_history()
-                    .await
-                    .for_prompt(&step_context.model_info.input_modalities)
-            }
-            .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
-            .await;
-
             let responses_metadata = sess
                 .responses_metadata(turn_context.as_ref(), CodexResponsesRequestKind::Turn)
                 .await;
@@ -443,9 +455,9 @@ pub(crate) async fn run_turn(
                 Arc::clone(&turn_context.extension_data),
                 Arc::clone(&turn_diff_tracker),
                 Arc::clone(&execution_auth),
+                &execution_auth_mode,
                 &mut client_session,
                 &responses_metadata,
-                sampling_request_input,
                 cancellation_token.child_token(),
             )
             .await
@@ -533,6 +545,7 @@ pub(crate) async fn run_turn(
                         Arc::clone(&step_context),
                         /*fallback_step_context*/ None,
                         &mut client_session,
+                        &execution_auth_mode,
                         InitialContextInjection::BeforeLastUserMessage {
                             world_state: Arc::clone(&world_state),
                             step_context: Arc::clone(&step_context),
@@ -1084,10 +1097,17 @@ async fn run_pre_sampling_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    execution_auth_mode: &ExecutionAuthMode,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
-        .await?;
+    maybe_run_previous_model_inline_compact(
+        sess,
+        turn_context,
+        client_session,
+        execution_auth_mode,
+        cancellation_token,
+    )
+    .await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
@@ -1102,6 +1122,7 @@ async fn run_pre_sampling_compact(
             step_context,
             /*fallback_step_context*/ None,
             client_session,
+            execution_auth_mode,
             InitialContextInjection::DoNotInject,
             CompactionReason::ContextLimit,
             CompactionPhase::PreTurn,
@@ -1152,6 +1173,7 @@ async fn maybe_run_previous_model_inline_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    execution_auth_mode: &ExecutionAuthMode,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
     let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
@@ -1184,6 +1206,7 @@ async fn maybe_run_previous_model_inline_compact(
             step_context,
             fallback_step_context,
             client_session,
+            execution_auth_mode,
             InitialContextInjection::DoNotInject,
             CompactionReason::CompHashChanged,
             CompactionPhase::PreTurn,
@@ -1232,6 +1255,7 @@ async fn maybe_run_previous_model_inline_compact(
             step_context,
             fallback_step_context,
             client_session,
+            execution_auth_mode,
             InitialContextInjection::DoNotInject,
             CompactionReason::ModelDownshift,
             CompactionPhase::PreTurn,
@@ -1241,6 +1265,7 @@ async fn maybe_run_previous_model_inline_compact(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[instrument(
     level = "trace",
     skip_all,
@@ -1251,13 +1276,19 @@ async fn run_auto_compact(
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
     client_session: &mut ModelClientSession,
+    execution_auth_mode: &ExecutionAuthMode,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
-    if turn_context.config.features.enabled(Feature::TokenBudget) {
+    let history = sess.clone_history().await;
+    let portable_policy =
+        PortableCompactionPolicy::for_history(execution_auth_mode, history.annotated_items());
+    let opaque_migration_required = portable_policy == PortableCompactionPolicy::Portable
+        && history_contains_opaque_compaction(history.annotated_items());
+    if turn_context.config.features.enabled(Feature::TokenBudget) && !opaque_migration_required {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
         crate::compact_token_budget::run_inline_auto_compact_task(
@@ -1269,8 +1300,7 @@ async fn run_auto_compact(
         return Ok(());
     }
 
-    let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
-    if crate::portable_compaction::requires_portable_compaction(execution_auth.as_ref()) {
+    if portable_policy == PortableCompactionPolicy::Portable {
         emit_compact_metric(
             &sess.services.session_telemetry,
             "local_multi_account",
@@ -1304,6 +1334,7 @@ async fn run_auto_compact(
                 step_context,
                 fallback_step_context,
                 client_session,
+                execution_auth_mode,
                 initial_context_injection,
                 reason,
                 phase,
@@ -1321,6 +1352,7 @@ async fn run_auto_compact(
                 step_context,
                 fallback_step_context,
                 client_session.turn_state(),
+                execution_auth_mode,
                 initial_context_injection,
                 reason,
                 phase,
@@ -1432,15 +1464,15 @@ async fn run_sampling_request(
     turn_store: Arc<codex_extension_api::ExtensionData>,
     turn_diff_tracker: SharedTurnDiffTracker,
     execution_auth: Arc<ExecutionAuth>,
+    execution_auth_mode: &ExecutionAuthMode,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
-    input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let mut step_context = step_context;
     let turn_context = Arc::clone(&step_context.turn);
     let base_instructions = sess.get_base_instructions().await;
-    let pooled_execution = execution_auth.multi_account_enabled();
+    let pooled_execution = execution_auth_mode.is_pooled();
     let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
         &sess,
         Arc::clone(&step_context),
@@ -1448,16 +1480,15 @@ async fn run_sampling_request(
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
-    let mut initial_input = if pooled_execution { None } else { Some(input) };
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
         // After every pool account is cooling down, the next turn still reaches sampling.
         // Surface UsageLimitExceeded (not UnsupportedOperation/BadRequest) so remote clients
         // keep the normal cooldown UX instead of a hard "unsupported operation" failure.
-        let execution_lease = match execution_auth.active_lease() {
-            Some(lease) => lease,
-            None => {
+        let execution_binding = match execution_auth_mode.capture_binding() {
+            Ok(binding) => binding,
+            Err(_) => {
                 sess.send_event(
                     &turn_context,
                     EventMsg::Warning(WarningEvent {
@@ -1468,9 +1499,26 @@ async fn run_sampling_request(
                 return Err(pool_unavailable_error(execution_auth.as_ref()));
             }
         };
-        set_sampling_execution_provenance(&turn_context, execution_lease.clone());
-
         let history_before = sess.clone_history().await;
+        let annotated = history_before
+            .clone()
+            .for_prompt_annotated(&step_context.model_info.input_modalities);
+        let target_profile = AccountTransitionTargetProfile::from_execution(
+            execution_auth.as_ref(),
+            &execution_binding,
+        );
+        preflight_account_transition(&annotated, &target_profile)
+            .ensure_ready(&target_profile)
+            .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
+        let execution_lease = match &execution_binding {
+            ExecutionAuthBinding::Stock => None,
+            ExecutionAuthBinding::Pooled(lease) => {
+                set_sampling_execution_provenance(&turn_context, lease.clone());
+                client_session.bind_execution_auth(lease.request_auth());
+                Some(lease.clone())
+            }
+        };
+
         let history_cursor = pooled_execution.then(|| {
             SamplingHistoryCursor::from_history(
                 history_before.history_version(),
@@ -1479,25 +1527,9 @@ async fn run_sampling_request(
         });
         let attempt_state = pooled_execution.then(|| install_sampling_attempt(&turn_context));
 
-        let prompt_input = if let Some(input) = initial_input.take() {
-            input
-        } else if pooled_execution {
-            let transition = AccountHistoryTransition::pooled(
-                &execution_lease,
-                execution_auth
-                    .legacy_unattributed_profile_id()
-                    .map(|id| id.as_str().to_string()),
-            );
-            let annotated = history_before
-                .clone()
-                .for_prompt_annotated(&step_context.model_info.input_modalities);
-            transition
-                .prepare_for_request(annotated)
-                .map(|(items, _stats)| items)
-                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
-        } else {
-            history_before.for_prompt(&step_context.model_info.input_modalities)
-        };
+        let prompt_input =
+            project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
+                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
         let mut prompt_input = prompt_input;
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
             && executed_tool_calls
@@ -1548,7 +1580,7 @@ async fn run_sampling_request(
                         | CodexErrorDetails::QuotaExceeded
                         | CodexErrorDetails::RefreshTokenFailed(_)
                 );
-                if pooled_execution && account_failure {
+                if account_failure && let Some(execution_lease) = execution_lease.as_ref() {
                     let history_after = sess.clone_history().await;
                     let mut checkpoint = attempt_state
                         .as_ref()
@@ -1563,26 +1595,29 @@ async fn run_sampling_request(
 
                     match handle_sampling_failover(
                         execution_auth.as_ref(),
-                        &execution_lease,
+                        execution_lease,
                         checkpoint,
                         &err,
                     )
                     .await
                     .map_err(CodexErr::from)?
                     {
-                        SamplingFailoverDirective::ReplayCurrentSamplingRequest
-                        | SamplingFailoverDirective::ContinueFromDurableHistory => {
+                        SamplingFailoverDirective::ReplayCurrentSamplingRequest { transition }
+                        | SamplingFailoverDirective::ContinueFromDurableHistory { transition } => {
                             if let Some(account) = execution_lease.account_lease() {
                                 let _ = account.auth_manager().auth().await;
                             }
                             // Make the outer provider observe the selected pool identity now rather
                             // than racing the background auth-sync task.
                             execution_auth.compatibility_auth_manager().reload().await;
-                            if let Some(message) = account_switch_message(
-                                execution_auth.as_ref(),
-                                &execution_lease,
-                                AccountSwitchContinuation::Automatic,
-                            ) {
+                            if transition
+                                == crate::failover_turn::AccountFailoverTransition::Rebound
+                                && let Some(message) = account_switch_message(
+                                    execution_auth.as_ref(),
+                                    execution_lease,
+                                    AccountSwitchContinuation::Automatic,
+                                )
+                            {
                                 sess.send_event(
                                     &turn_context,
                                     EventMsg::Warning(WarningEvent { message }),
@@ -1595,7 +1630,6 @@ async fn run_sampling_request(
                                 .model_client
                                 .replace_session_for_execution_identity_change(client_session);
                             retry_state = ResponsesStreamRetryState::default();
-                            initial_input = None;
                             sess.refresh_mcp_if_dirty().await;
                             step_context = sess
                                 .capture_step_context(
@@ -1606,15 +1640,18 @@ async fn run_sampling_request(
                             turn_context.turn_timing_state.record_sampling_retry();
                             continue;
                         }
-                        SamplingFailoverDirective::ReconcileCurrentAttempt => {
+                        SamplingFailoverDirective::ReconcileCurrentAttempt { transition } => {
                             // The pool already rotated, but visible partial output makes an
                             // automatic replay unsafe. Tell the user how to continue before the
                             // original error is surfaced.
-                            if let Some(message) = account_switch_message(
-                                execution_auth.as_ref(),
-                                &execution_lease,
-                                AccountSwitchContinuation::ResendRequired,
-                            ) {
+                            if transition
+                                == crate::failover_turn::AccountFailoverTransition::Rebound
+                                && let Some(message) = account_switch_message(
+                                    execution_auth.as_ref(),
+                                    execution_lease,
+                                    AccountSwitchContinuation::ResendRequired,
+                                )
+                            {
                                 sess.send_event(
                                     &turn_context,
                                     EventMsg::Warning(WarningEvent { message }),
@@ -1629,7 +1666,7 @@ async fn run_sampling_request(
                             if let Some(rescue) =
                                 crate::reset_credit_rescue::try_reset_credit_rescue(
                                     execution_auth.as_ref(),
-                                    &execution_lease,
+                                    execution_lease,
                                     turn_context.config.as_ref(),
                                 )
                                 .await
@@ -1649,7 +1686,6 @@ async fn run_sampling_request(
                                     .model_client
                                     .replace_session_for_execution_identity_change(client_session);
                                 retry_state = ResponsesStreamRetryState::default();
-                                initial_input = None;
                                 sess.refresh_mcp_if_dirty().await;
                                 step_context = sess
                                     .capture_step_context(

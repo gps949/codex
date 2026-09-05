@@ -8,13 +8,16 @@
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
+use codex_backend_client::ConsumeRateLimitResetCreditCode;
 use codex_config::AutoResetCredits;
 use codex_login::AccountAvailability;
+use codex_login::AccountPool;
 use codex_login::AccountProfileId;
 
 use crate::config::Config;
 use crate::execution_auth::ExecutionAuth;
 use crate::execution_auth::ExecutionAuthLease;
+use crate::reset_credit_singleflight::ResetCreditRescueAttempt;
 
 const REDEEM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -57,8 +60,17 @@ pub(crate) async fn try_reset_credit_rescue(
     let profile_id = failed_lease.profile_id()?.clone();
 
     let now = Utc::now();
-    let earliest_reset = pool
-        .snapshots()
+    let snapshots = pool.snapshots();
+    if !snapshots.iter().any(|snapshot| {
+        snapshot.profile.id == profile_id
+            && matches!(snapshot.availability, AccountAvailability::Exhausted { .. })
+    }) || snapshots
+        .iter()
+        .any(|snapshot| matches!(snapshot.availability, AccountAvailability::Available))
+    {
+        return None;
+    }
+    let earliest_reset = snapshots
         .into_iter()
         .filter_map(|snapshot| match snapshot.availability {
             AccountAvailability::Exhausted { resets_at } => resets_at,
@@ -81,13 +93,42 @@ pub(crate) async fn try_reset_credit_rescue(
         return None;
     }
 
-    let manager = pool
+    let leader = match execution_auth.begin_reset_credit_rescue_attempt(failed_lease)? {
+        ResetCreditRescueAttempt::Leader(leader) => leader,
+        ResetCreditRescueAttempt::Follower(follower) => {
+            follower.wait().await;
+            return None;
+        }
+        ResetCreditRescueAttempt::AlreadyFinished => return None,
+    };
+
+    if !consume_reset_credit_for_profile(&pool, &profile_id, config, leader.redeem_request_id())
+        .await
+    {
+        return None;
+    }
+
+    reactivate_redeemed_profile(&pool, profile_id)
+}
+
+async fn consume_reset_credit_for_profile(
+    pool: &AccountPool,
+    profile_id: &AccountProfileId,
+    config: &Config,
+    redeem_request_id: &str,
+) -> bool {
+    let Some(manager) = pool
         .auth_managers()
         .into_iter()
-        .find_map(|(id, manager)| (id == profile_id).then_some(manager))?;
-    let auth = manager.auth().await?;
+        .find_map(|(id, manager)| (id == *profile_id).then_some(manager))
+    else {
+        return false;
+    };
+    let Some(auth) = manager.auth().await else {
+        return false;
+    };
     if !auth.uses_codex_backend() {
-        return None;
+        return false;
     }
     let client = codex_backend_client::Client::from_auth(
         config.chatgpt_base_url.clone(),
@@ -95,28 +136,41 @@ pub(crate) async fn try_reset_credit_rescue(
         config.http_client_factory(),
     );
 
-    let redeem_request_id = uuid::Uuid::new_v4().to_string();
     match tokio::time::timeout(
         REDEEM_REQUEST_TIMEOUT,
-        client.consume_rate_limit_reset_credit(&redeem_request_id),
+        client.consume_rate_limit_reset_credit(redeem_request_id),
     )
     .await
     {
-        Ok(Ok(_)) => {}
+        Ok(Ok(response)) if response.code == ConsumeRateLimitResetCreditCode::Reset => {}
+        Ok(Ok(response)) => {
+            tracing::info!(
+                %profile_id,
+                code = ?response.code,
+                "automatic reset-credit redemption did not reset a rate-limit window"
+            );
+            return false;
+        }
         Ok(Err(error)) => {
             tracing::info!(
                 %profile_id,
                 %error,
                 "automatic reset-credit redemption failed; surfacing the original usage-limit error"
             );
-            return None;
+            return false;
         }
         Err(_) => {
             tracing::warn!(%profile_id, "automatic reset-credit redemption timed out");
-            return None;
+            return false;
         }
     }
+    true
+}
 
+fn reactivate_redeemed_profile(
+    pool: &AccountPool,
+    profile_id: AccountProfileId,
+) -> Option<ResetCreditRescue> {
     match pool.force_activate(&profile_id) {
         Ok(_) => {
             tracing::info!(%profile_id, "redeemed one rate-limit reset credit and reactivated the account");

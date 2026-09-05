@@ -12,6 +12,8 @@ use tracing::trace_span;
 use tracing::warn;
 
 use crate::client::ModelClientSession;
+use crate::config::Config;
+use crate::execution_auth::ExecutionAuth;
 use crate::guardian::routes_approval_to_guardian;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::INITIAL_SUBMIT_ID;
@@ -182,7 +184,15 @@ impl SessionStartupPrewarmHandle {
 }
 
 impl Session {
-    pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
+    pub(crate) async fn schedule_startup_prewarm(
+        self: &Arc<Self>,
+        base_instructions: String,
+        config: &Config,
+    ) {
+        let execution_auth = ExecutionAuth::shared(Arc::clone(&self.services.auth_manager));
+        if execution_auth.should_skip_startup_prewarm(config, &config.model_provider) {
+            return;
+        }
         if !self.services.model_client.responses_websocket_enabled() {
             // Without websocket prewarm, resolve auth once so Agent Identity bootstrap can
             // register or engage this session's bearer fallback before the first user request.

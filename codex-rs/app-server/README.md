@@ -1720,6 +1720,8 @@ Ownership rejections for parent-owned Multi-Agent V2 subagents return JSON-RPC e
 - `ActiveTurnNotSteerable { turnKind }`: `turn/start` or `turn/steer` was submitted while the
   current active turn was not steerable, for example `/review` or manual `/compact`
 - `BadRequest`
+- `accountMigrationRequired`: the selected execution account cannot consume an opaque history
+  checkpoint; display the error message's owner-specific `/compact` recovery action
 - `Unauthorized`
 - `SandboxError`
 - `InternalServerError`

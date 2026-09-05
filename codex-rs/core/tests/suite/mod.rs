@@ -36,6 +36,8 @@ pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
 #[cfg(not(target_os = "windows"))]
 mod abort_tasks;
 mod account_failover;
+mod account_failover_recovery;
+mod account_request_auth;
 mod additional_context;
 mod agent_execution;
 mod agent_websocket;
@@ -109,6 +111,7 @@ mod multi_agent_resume;
 #[cfg(unix)]
 mod multi_exec_server_sandbox;
 mod network_approval;
+mod opaque_history_migration;
 mod openai_file_mcp;
 mod otel;
 mod override_updates;

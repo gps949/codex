@@ -163,6 +163,25 @@ pub struct AccountLease {
     generation: u64,
 }
 
+/// Result of applying an availability observation from one captured execution lease.
+///
+/// Callers must distinguish a mutation that selected a replacement from a late observation that
+/// only updated an inactive profile. Returning the active lease alone would make both cases look
+/// like a fresh account switch.
+#[derive(Clone)]
+pub enum AccountAvailabilityMutation {
+    /// The failed lease was active and this mutation selected a replacement.
+    Rebound(AccountLease),
+    /// The failed lease was active and no replacement is currently schedulable.
+    PoolExhausted,
+    /// The observation updated its exact inactive profile without changing the active identity.
+    InactiveProfileUpdated { active: Option<AccountLease> },
+    /// This generation already recorded the same unavailable state; no mutation was needed.
+    AlreadyUnavailable { active: Option<AccountLease> },
+    /// The profile has since been activated under a newer generation, so the observation is stale.
+    StaleIgnored { active: Option<AccountLease> },
+}
+
 impl AccountLease {
     pub fn profile(&self) -> &AccountProfile {
         &self.profile
@@ -182,6 +201,7 @@ struct ManagedAccount {
     auth_manager: Arc<AuthManager>,
     availability: AccountAvailability,
     rate_limits: AccountRateLimits,
+    last_active_generation: Option<u64>,
 }
 
 struct AccountPoolState {
@@ -261,6 +281,7 @@ impl AccountPool {
                 auth_manager,
                 availability,
                 rate_limits: AccountRateLimits::default(),
+                last_active_generation: None,
             },
         );
         drop(state);
@@ -499,8 +520,26 @@ impl AccountPool {
         &self,
         lease: &AccountLease,
         resets_at: Option<DateTime<Utc>>,
-    ) -> Result<Option<AccountLease>, AccountPoolError> {
-        self.mark_unavailable_from_lease(lease, AccountAvailability::Exhausted { resets_at })
+    ) -> Result<AccountAvailabilityMutation, AccountPoolError> {
+        self.mark_unavailable_from_lease(
+            lease,
+            AccountAvailability::Exhausted { resets_at },
+            /*rate_limits*/ None,
+        )
+    }
+
+    /// Records the rate-limit snapshot and exhaustion from one lease atomically.
+    pub fn mark_exhausted_with_rate_limits(
+        &self,
+        lease: &AccountLease,
+        resets_at: Option<DateTime<Utc>>,
+        rate_limits: AccountRateLimits,
+    ) -> Result<AccountAvailabilityMutation, AccountPoolError> {
+        self.mark_unavailable_from_lease(
+            lease,
+            AccountAvailability::Exhausted { resets_at },
+            Some(rate_limits),
+        )
     }
 
     /// Marks a permanently failed authentication profile unavailable after its own normal token
@@ -509,12 +548,13 @@ impl AccountPool {
         &self,
         lease: &AccountLease,
         reason: impl Into<String>,
-    ) -> Result<Option<AccountLease>, AccountPoolError> {
+    ) -> Result<AccountAvailabilityMutation, AccountPoolError> {
         self.mark_unavailable_from_lease(
             lease,
             AccountAvailability::AuthenticationUnavailable {
                 reason: reason.into(),
             },
+            /*rate_limits*/ None,
         )
     }
 
@@ -535,6 +575,9 @@ impl AccountPool {
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
         let availability_changed = account.availability != new_availability;
         account.availability = new_availability;
+        if disabled {
+            account.last_active_generation = None;
+        }
 
         let active_changed = if disabled && state.active_profile.as_ref() == Some(profile_id) {
             state.active_profile = None;
@@ -560,6 +603,31 @@ impl AccountPool {
             .accounts
             .get_mut(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+        let changed = account.rate_limits != rate_limits;
+        account.rate_limits = rate_limits;
+        drop(state);
+        if changed {
+            self.notify_change();
+        }
+        Ok(())
+    }
+
+    /// Updates advisory rate limits only when the observation came from the profile generation
+    /// represented by `lease`. A delayed response must not overwrite data for a later activation
+    /// of the same profile.
+    pub fn update_rate_limits_from_lease(
+        &self,
+        lease: &AccountLease,
+        rate_limits: AccountRateLimits,
+    ) -> Result<(), AccountPoolError> {
+        let mut state = self.lock_state();
+        let account = state
+            .accounts
+            .get_mut(&lease.profile.id)
+            .ok_or_else(|| AccountPoolError::UnknownProfile(lease.profile.id.clone()))?;
+        if account.last_active_generation != Some(lease.generation) {
+            return Ok(());
+        }
         let changed = account.rate_limits != rate_limits;
         account.rate_limits = rate_limits;
         drop(state);
@@ -600,30 +668,73 @@ impl AccountPool {
         &self,
         lease: &AccountLease,
         availability: AccountAvailability,
-    ) -> Result<Option<AccountLease>, AccountPoolError> {
+        rate_limits: Option<AccountRateLimits>,
+    ) -> Result<AccountAvailabilityMutation, AccountPoolError> {
         let mut state = self.lock_state();
         let refreshed = refresh_expired_exhaustion(&mut state);
 
-        if state.active_profile.as_ref() != Some(&lease.profile.id)
-            || state.generation != lease.generation
-        {
-            let active = state
-                .active_profile
-                .as_ref()
-                .and_then(|profile_id| state.accounts.get(profile_id))
-                .map(|account| make_lease(account, state.generation));
+        let lease_matches_profile_generation = state
+            .accounts
+            .get(&lease.profile.id)
+            .ok_or_else(|| AccountPoolError::UnknownProfile(lease.profile.id.clone()))?
+            .last_active_generation
+            == Some(lease.generation);
+        if !lease_matches_profile_generation {
+            let active = active_lease(&state);
             drop(state);
             if refreshed {
                 self.notify_change();
             }
-            return Ok(active);
+            return Ok(AccountAvailabilityMutation::StaleIgnored { active });
         }
 
         let account = state
             .accounts
             .get_mut(&lease.profile.id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(lease.profile.id.clone()))?;
-        account.availability = availability;
+        let merged_availability = match (&account.availability, availability) {
+            (
+                AccountAvailability::AuthenticationUnavailable { .. }
+                | AccountAvailability::Disabled,
+                _,
+            ) => account.availability.clone(),
+            (
+                AccountAvailability::Exhausted { resets_at: current },
+                AccountAvailability::Exhausted {
+                    resets_at: observed,
+                },
+            ) => AccountAvailability::Exhausted {
+                resets_at: match (*current, observed) {
+                    (Some(current), Some(observed)) => Some(current.max(observed)),
+                    (None, _) | (_, None) => None,
+                },
+            },
+            (_, observed) => observed,
+        };
+        let availability_changed = account.availability != merged_availability;
+        let rate_limits_changed = rate_limits
+            .as_ref()
+            .is_some_and(|rate_limits| account.rate_limits != *rate_limits);
+        if !availability_changed && !rate_limits_changed {
+            let active = active_lease(&state);
+            drop(state);
+            if refreshed {
+                self.notify_change();
+            }
+            return Ok(AccountAvailabilityMutation::AlreadyUnavailable { active });
+        }
+        if let Some(rate_limits) = rate_limits {
+            account.rate_limits = rate_limits;
+        }
+        account.availability = merged_availability;
+
+        if state.active_profile.as_ref() != Some(&lease.profile.id) {
+            let active = active_lease(&state);
+            drop(state);
+            self.notify_change();
+            return Ok(AccountAvailabilityMutation::InactiveProfileUpdated { active });
+        }
+
         state.active_profile = None;
 
         let now = Utc::now();
@@ -633,10 +744,10 @@ impl AccountPool {
                 .accounts
                 .get(&selected_id)
                 .ok_or_else(|| AccountPoolError::UnknownProfile(selected_id.clone()))?;
-            Some(make_lease(account, state.generation))
+            AccountAvailabilityMutation::Rebound(make_lease(account, state.generation))
         } else {
             state.generation = state.generation.wrapping_add(1);
-            None
+            AccountAvailabilityMutation::PoolExhausted
         };
         drop(state);
         self.notify_change();
@@ -664,11 +775,22 @@ fn make_lease(account: &ManagedAccount, generation: u64) -> AccountLease {
     }
 }
 
+fn active_lease(state: &AccountPoolState) -> Option<AccountLease> {
+    state
+        .active_profile
+        .as_ref()
+        .and_then(|profile_id| state.accounts.get(profile_id))
+        .map(|account| make_lease(account, state.generation))
+}
+
 fn refresh_expired_exhaustion(state: &mut AccountPoolState) -> bool {
     let now = Utc::now();
     let mut changed = false;
     for account in state.accounts.values_mut() {
-        changed |= account.availability.refresh_for_time(&now);
+        if account.availability.refresh_for_time(&now) {
+            account.last_active_generation = None;
+            changed = true;
+        }
     }
     changed
 }
@@ -741,6 +863,9 @@ fn set_active_profile(state: &mut AccountPoolState, profile_id: &AccountProfileI
     }
     state.active_profile = Some(profile_id.clone());
     state.generation = state.generation.wrapping_add(1);
+    if let Some(account) = state.accounts.get_mut(profile_id) {
+        account.last_active_generation = Some(state.generation);
+    }
     true
 }
 
@@ -763,6 +888,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
+    use chrono::Duration;
     use codex_config::AccountPoolRotationStrategy;
     use codex_config::types::AuthCredentialsStoreMode;
 
@@ -828,10 +954,10 @@ mod tests {
         assert_eq!(same_lease.profile().id, first.id);
         assert_eq!(same_lease.generation(), lease.generation());
 
-        let next = pool
-            .mark_exhausted(&lease, None)
-            .expect("mark exhausted")
-            .expect("fallback account");
+        let next = pool.mark_exhausted(&lease, None).expect("mark exhausted");
+        let AccountAvailabilityMutation::Rebound(next) = next else {
+            panic!("active exhaustion must select the fallback account");
+        };
         assert_eq!(next.profile().id, second.id);
         assert!(next.generation() > lease.generation());
     }
@@ -1048,16 +1174,255 @@ mod tests {
         let first_lease = pool.lease().expect("first lease");
         let second_lease = pool
             .mark_exhausted(&first_lease, None)
-            .expect("first failover")
-            .expect("second lease");
+            .expect("first failover");
+        let AccountAvailabilityMutation::Rebound(second_lease) = second_lease else {
+            panic!("first failover must select the second account");
+        };
         assert_eq!(second_lease.profile().id, second.id);
 
         let still_second = pool
             .mark_exhausted(&first_lease, None)
-            .expect("stale failure is ignored")
-            .expect("active lease remains");
+            .expect("stale failure is ignored");
+        let AccountAvailabilityMutation::StaleIgnored {
+            active: Some(still_second),
+        } = still_second
+        else {
+            panic!("stale failure must preserve the active lease");
+        };
         assert_eq!(still_second.profile().id, second.id);
         assert_eq!(still_second.generation(), second_lease.generation());
+    }
+
+    #[tokio::test]
+    async fn late_inactive_failure_updates_its_profile_without_rotating_active() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let first_lease = pool.lease().expect("first lease");
+        let second_lease = pool.activate(&second.id).expect("activate second");
+        let second_generation = second_lease.generation();
+
+        let outcome = pool
+            .mark_exhausted(&first_lease, None)
+            .expect("record late first failure");
+        let AccountAvailabilityMutation::InactiveProfileUpdated {
+            active: Some(active),
+        } = outcome
+        else {
+            panic!("late first failure must not be reported as a rebound");
+        };
+        assert_eq!(
+            (active.profile().id.clone(), active.generation()),
+            (second.id.clone(), second_generation),
+        );
+
+        let snapshots = pool.snapshots();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| (
+                    snapshot.profile.id.clone(),
+                    snapshot.availability.clone(),
+                    snapshot.is_active,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    first.id,
+                    AccountAvailability::Exhausted { resets_at: None },
+                    false,
+                ),
+                (second.id, AccountAvailability::Available, true),
+            ],
+        );
+        assert_eq!(
+            pool.lease().expect("active lease").generation(),
+            second_generation
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_usage_limit_cannot_overwrite_or_exhaust_a_new_profile_generation() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let stale_first_lease = pool.lease().expect("first lease");
+        pool.activate(&second.id).expect("activate second");
+        let current_first_lease = pool.activate(&first.id).expect("reactivate first");
+        assert!(current_first_lease.generation() > stale_first_lease.generation());
+
+        let outcome = pool
+            .mark_exhausted_with_rate_limits(
+                &stale_first_lease,
+                /*resets_at*/ None,
+                AccountRateLimits {
+                    observed_at: Some(Utc::now()),
+                    ..AccountRateLimits::default()
+                },
+            )
+            .expect("ignore stale usage limit");
+        assert!(matches!(
+            outcome,
+            AccountAvailabilityMutation::StaleIgnored { active: Some(_) }
+        ));
+
+        let first_snapshot = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == first.id)
+            .expect("first snapshot");
+        assert_eq!(first_snapshot.rate_limits, AccountRateLimits::default());
+        assert_eq!(first_snapshot.availability, AccountAvailability::Available);
+        assert!(first_snapshot.is_active);
+        assert_eq!(
+            pool.lease().expect("current first lease").generation(),
+            current_first_lease.generation(),
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_failure_from_the_same_generation_is_idempotent() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let first_lease = pool.lease().expect("first lease");
+        let first_outcome = pool
+            .mark_exhausted(&first_lease, /*resets_at*/ None)
+            .expect("first failure");
+        let AccountAvailabilityMutation::Rebound(second_lease) = first_outcome else {
+            panic!("first failure must select the second profile");
+        };
+
+        let repeated_outcome = pool
+            .mark_exhausted(&first_lease, /*resets_at*/ None)
+            .expect("repeated failure");
+        let AccountAvailabilityMutation::AlreadyUnavailable {
+            active: Some(active),
+        } = repeated_outcome
+        else {
+            panic!("same-generation repeated failure must be idempotent");
+        };
+        assert_eq!(
+            (active.profile().id.clone(), active.generation()),
+            (second.id, second_lease.generation()),
+        );
+    }
+
+    #[tokio::test]
+    async fn permanent_auth_failure_is_not_downgraded_by_a_late_quota_failure() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let first_lease = pool.lease().expect("first lease");
+        assert!(matches!(
+            pool.mark_authentication_unavailable(&first_lease, "refresh permanently failed")
+                .expect("permanent auth failure"),
+            AccountAvailabilityMutation::Rebound(_)
+        ));
+        assert!(matches!(
+            pool.mark_exhausted(&first_lease, Some(Utc::now() + Duration::hours(1)))
+                .expect("late quota failure"),
+            AccountAvailabilityMutation::AlreadyUnavailable { active: Some(_) }
+        ));
+
+        let first_snapshot = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == first.id)
+            .expect("first snapshot");
+        assert_eq!(
+            first_snapshot.availability,
+            AccountAvailability::AuthenticationUnavailable {
+                reason: "refresh permanently failed".to_string(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_exhaustion_updates_snapshot_without_shortening_cooldown() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let first_lease = pool.lease().expect("first lease");
+        let resets_at = Utc::now() + Duration::hours(2);
+        let initial_limits = AccountRateLimits {
+            observed_at: Some(Utc::now() - Duration::minutes(1)),
+            ..AccountRateLimits::default()
+        };
+        assert!(matches!(
+            pool.mark_exhausted_with_rate_limits(&first_lease, Some(resets_at), initial_limits,)
+                .expect("first quota failure"),
+            AccountAvailabilityMutation::Rebound(_)
+        ));
+
+        let updated_limits = AccountRateLimits {
+            observed_at: Some(Utc::now()),
+            ..AccountRateLimits::default()
+        };
+        assert!(matches!(
+            pool.mark_exhausted_with_rate_limits(
+                &first_lease,
+                Some(resets_at - Duration::hours(1)),
+                updated_limits.clone(),
+            )
+            .expect("repeated quota failure"),
+            AccountAvailabilityMutation::InactiveProfileUpdated { active: Some(_) }
+        ));
+
+        let first_snapshot = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == first.id)
+            .expect("first snapshot");
+        assert_eq!(
+            (first_snapshot.availability, first_snapshot.rate_limits),
+            (
+                AccountAvailability::Exhausted {
+                    resets_at: Some(resets_at),
+                },
+                updated_limits,
+            ),
+        );
     }
 
     #[tokio::test]
@@ -1078,6 +1443,15 @@ mod tests {
         pool.set_disabled(&first.id, true).expect("disable first");
         let next = pool.lease().expect("second lease");
         assert_eq!(next.profile().id, second.id);
+        assert!(matches!(
+            pool.mark_exhausted(&lease, None)
+                .expect("late disabled-profile failure"),
+            AccountAvailabilityMutation::StaleIgnored { active: Some(_) }
+        ));
+        assert_eq!(
+            pool.lease().expect("second remains active").generation(),
+            next.generation()
+        );
     }
 
     #[tokio::test]

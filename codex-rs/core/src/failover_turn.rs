@@ -17,16 +17,29 @@ pub(crate) enum SamplingFailoverDirective {
     /// Keep normal Codex error/retry handling; this is not an account-availability failure.
     NotHandled,
     /// Submit the exact same logical prompt using the newly selected execution account.
-    ReplayCurrentSamplingRequest,
+    ReplayCurrentSamplingRequest {
+        transition: AccountFailoverTransition,
+    },
     /// The failed response already produced durable conversation/tool state. Rebuild the prompt
     /// from local history and continue on the newly selected execution account.
-    ContinueFromDurableHistory,
+    ContinueFromDurableHistory {
+        transition: AccountFailoverTransition,
+    },
     /// The account pool recognized the failure but every configured account is unavailable.
     PoolExhausted,
     /// A tool may have caused an external side effect without a durable result, or partial visible
     /// model output must first be reconciled. The pool may already have moved to another account,
     /// but automatic replay is intentionally blocked.
-    ReconcileCurrentAttempt,
+    ReconcileCurrentAttempt {
+        transition: AccountFailoverTransition,
+    },
+}
+
+/// Whether this failure mutation selected the active account or found it already selected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AccountFailoverTransition {
+    Rebound,
+    ActiveUnchanged,
 }
 
 /// Converts one model failure plus its sampling checkpoint into a turn-loop continuation policy.
@@ -49,13 +62,6 @@ pub(crate) async fn handle_sampling_failover(
             );
             Ok(SamplingFailoverDirective::PoolExhausted)
         }
-        FailoverOutcome::StaleIdentityQuotaRejection => {
-            tracing::info!(
-                profile_id = ?failed_lease.profile_id(),
-                "resyncing execution identity after a mismatched usage-limit rejection"
-            );
-            Ok(SamplingFailoverDirective::ReplayCurrentSamplingRequest)
-        }
         FailoverOutcome::Rebound {
             cause,
             from_profile,
@@ -71,23 +77,50 @@ pub(crate) async fn handle_sampling_failover(
                 to_generation,
                 "rotated to another Codex execution account"
             );
-            match checkpoint.retry_mode() {
-                FailoverRetryMode::ReplayCurrentSamplingRequest => {
-                    Ok(SamplingFailoverDirective::ReplayCurrentSamplingRequest)
-                }
-                // Until the UI/protocol layer has an explicit abandoned-partial-output lifecycle,
-                // never duplicate visible assistant/reasoning text just to make switching look
-                // seamless.
-                FailoverRetryMode::ReplayAfterAbandoningPartialOutput => {
-                    Ok(SamplingFailoverDirective::ReconcileCurrentAttempt)
-                }
-                FailoverRetryMode::ContinueFromDurableHistory => {
-                    Ok(SamplingFailoverDirective::ContinueFromDurableHistory)
-                }
-                FailoverRetryMode::ReconcileCurrentAttempt => {
-                    Ok(SamplingFailoverDirective::ReconcileCurrentAttempt)
-                }
-            }
+            Ok(directive_for_retry_mode(
+                checkpoint.retry_mode(),
+                AccountFailoverTransition::Rebound,
+            ))
+        }
+        FailoverOutcome::ActiveUnchanged {
+            cause,
+            failed_profile,
+            failed_generation,
+            active_profile,
+            active_generation,
+        } => {
+            tracing::info!(
+                ?cause,
+                ?failed_profile,
+                failed_generation,
+                ?active_profile,
+                active_generation,
+                "attributed a late execution failure without changing the active Codex account"
+            );
+            Ok(directive_for_retry_mode(
+                checkpoint.retry_mode(),
+                AccountFailoverTransition::ActiveUnchanged,
+            ))
+        }
+    }
+}
+
+fn directive_for_retry_mode(
+    retry_mode: FailoverRetryMode,
+    transition: AccountFailoverTransition,
+) -> SamplingFailoverDirective {
+    match retry_mode {
+        FailoverRetryMode::ReplayCurrentSamplingRequest => {
+            SamplingFailoverDirective::ReplayCurrentSamplingRequest { transition }
+        }
+        // Until the UI/protocol layer has an explicit abandoned-partial-output lifecycle, never
+        // duplicate visible assistant/reasoning text just to make switching look seamless.
+        FailoverRetryMode::ReplayAfterAbandoningPartialOutput
+        | FailoverRetryMode::ReconcileCurrentAttempt => {
+            SamplingFailoverDirective::ReconcileCurrentAttempt { transition }
+        }
+        FailoverRetryMode::ContinueFromDurableHistory => {
+            SamplingFailoverDirective::ContinueFromDurableHistory { transition }
         }
     }
 }

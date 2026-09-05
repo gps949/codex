@@ -3,6 +3,7 @@ use super::CompactConversationRequestSettings;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
+use super::ReasoningSummaryConfig;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
@@ -12,6 +13,7 @@ use super::X_OPENAI_SUBAGENT_HEADER;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
+use crate::execution_request_auth::ExecutionRequestAuth;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
@@ -21,10 +23,15 @@ use codex_api::ResponseEvent;
 use codex_api::TransportError;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
+use codex_login::AccountProfileId;
 use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::ExternalAuth;
+use codex_login::ExternalAuthFuture;
+use codex_login::ExternalAuthRefreshContext;
+use codex_login::RefreshTokenError;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::BearerAuthProvider;
 use codex_model_provider::ModelProvider;
@@ -43,6 +50,8 @@ use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::error::RefreshTokenFailedError;
+use codex_protocol::error::RefreshTokenFailedReason;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -118,6 +127,241 @@ fn test_model_client_with_thread_id(
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     )
+}
+
+fn test_openai_model_client(
+    auth_manager: Arc<AuthManager>,
+    base_url: Option<String>,
+    session_source: SessionSource,
+) -> ModelClient {
+    let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    provider.base_url = base_url;
+    provider.supports_websockets = false;
+    ModelClient::new(
+        Some(auth_manager),
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        session_source,
+        "test_originator".to_string(),
+        /*model_verbosity*/ None,
+        /*content_item_kinds_enabled*/ true,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )
+}
+
+fn test_user_prompt() -> Prompt {
+    Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+            provenance: None,
+        },
+        ..Default::default()
+    }
+}
+
+struct RefreshingExternalAuth {
+    initial: CodexAuth,
+    refreshed: CodexAuth,
+}
+
+impl ExternalAuth for RefreshingExternalAuth {
+    fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.initial.clone()) })
+    }
+
+    fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.refreshed.clone()) })
+    }
+}
+
+struct PermanentlyFailingExternalAuth {
+    initial: CodexAuth,
+}
+
+impl ExternalAuth for PermanentlyFailingExternalAuth {
+    fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.initial.clone()) })
+    }
+
+    fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Err(std::io::Error::other("bound profile refresh failed")) })
+    }
+
+    fn classify_error(&self, error: std::io::Error) -> RefreshTokenError {
+        RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+            RefreshTokenFailedReason::Other,
+            error.to_string(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn bound_401_does_not_retry_with_outer_refreshed_auth() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(/*status*/ 401).set_body_json(json!({
+            "error": {"message": "bound profile unauthorized"}
+        })))
+        .mount(&server)
+        .await;
+
+    let outer_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("outer-initial"));
+    outer_manager
+        .set_external_auth(Arc::new(RefreshingExternalAuth {
+            initial: CodexAuth::from_api_key("outer-initial"),
+            refreshed: CodexAuth::from_api_key("outer-refreshed"),
+        }))
+        .await?;
+    let bound_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("bound-seed"));
+    bound_manager
+        .set_external_auth(Arc::new(PermanentlyFailingExternalAuth {
+            initial: CodexAuth::from_api_key("bound-token"),
+        }))
+        .await?;
+    let client = test_openai_model_client(
+        outer_manager,
+        Some(format!("{}/v1", server.uri())),
+        SessionSource::Cli,
+    );
+    let mut session = client.new_session();
+    session.bind_execution_auth(ExecutionRequestAuth::new(
+        /*profile_id*/ None,
+        /*generation*/ 4,
+        bound_manager,
+    ));
+    let prompt = test_user_prompt();
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    let result = session
+        .stream(
+            &prompt,
+            &test_model_info(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummaryConfig::None,
+            /*service_tier*/ None,
+            &responses_metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("bound profile refresh failure must reach the turn loop");
+    };
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::RefreshTokenFailed(_)
+    ));
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock request history");
+    assert_eq!(
+        requests.len(),
+        1,
+        "outer auth must not retry the bound request"
+    );
+    assert_eq!(
+        requests[0]
+            .headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer bound-token"),
+    );
+    Ok(())
+}
+
+#[test]
+fn websocket_turn_state_is_reused_only_for_the_same_execution_identity() {
+    let client = test_model_client(SessionSource::Cli);
+    let manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("token"));
+    let mut session = client.new_session();
+    let first = ExecutionRequestAuth::new(
+        Some(AccountProfileId::new("workspace-user-a").expect("profile id")),
+        /*generation*/ 1,
+        Arc::clone(&manager),
+    );
+    session.bind_execution_auth(first.clone());
+    session
+        .turn_state
+        .set("sticky-a".to_string())
+        .expect("first turn state");
+
+    session.bind_execution_auth(first);
+    assert_eq!(
+        session.turn_state.get().map(String::as_str),
+        Some("sticky-a")
+    );
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    session.websocket_session.last_request = Some(
+        client
+            .build_responses_request(
+                &test_user_prompt(),
+                &test_model_info(),
+                /*effort*/ None,
+                ReasoningSummaryConfig::None,
+                /*service_tier*/ None,
+                &responses_metadata,
+            )
+            .expect("cached websocket request"),
+    );
+    let (_last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
+    session.websocket_session.last_response_rx = Some(last_response_rx);
+    session.websocket_session.last_response_from_untraced_warmup = true;
+    session
+        .websocket_session
+        .set_connection_reused(/*connection_reused*/ true);
+
+    session.bind_execution_auth(ExecutionRequestAuth::new(
+        Some(AccountProfileId::new("workspace-user-b").expect("profile id")),
+        /*generation*/ 1,
+        Arc::clone(&manager),
+    ));
+    assert_eq!(session.turn_state.get(), None);
+    assert!(session.websocket_session.last_request.is_none());
+    assert!(session.websocket_session.last_response_rx.is_none());
+    assert!(!session.websocket_session.last_response_from_untraced_warmup);
+    assert!(!session.websocket_session.connection_reused());
+
+    session
+        .turn_state
+        .set("sticky-b".to_string())
+        .expect("second turn state");
+    session.bind_execution_auth(ExecutionRequestAuth::new(
+        Some(AccountProfileId::new("workspace-user-b").expect("profile id")),
+        /*generation*/ 2,
+        manager,
+    ));
+    assert_eq!(session.turn_state.get(), None);
 }
 
 #[tokio::test]
