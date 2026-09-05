@@ -223,7 +223,7 @@ pub(crate) async fn run_turn(
             .capture_binding()
             .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
         let annotated =
-            pre_compact_history.for_prompt_annotated(&turn_context.model_info.input_modalities);
+            pre_compact_history.for_prompt_annotated(&turn_context.model_info().input_modalities);
         let target_profile = AccountTransitionTargetProfile::from_execution(
             execution_auth.as_ref(),
             &execution_binding,

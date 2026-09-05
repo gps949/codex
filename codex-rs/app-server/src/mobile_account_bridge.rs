@@ -174,6 +174,7 @@ pub(crate) async fn complete_mobile_slash_turn(
         phase: None,
         memory_citation: None,
         delivery: None,
+        questions: None,
     };
     emit_item_lifecycle(
         outgoing,
@@ -500,6 +501,8 @@ mod tests {
             },
             rate_limits_by_limit_id: None,
             rate_limit_reset_credits: None,
+            account_id: None,
+            rate_limit_upsell: None,
         };
         overlay_get_account_rate_limits_for_remote_client(&mut response, &pool);
         assert!(

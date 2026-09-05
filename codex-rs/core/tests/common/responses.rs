@@ -1076,7 +1076,7 @@ where
     response_mock
 }
 
-fn base_mock() -> (MockBuilder, ResponseMock) {
+pub fn base_mock() -> (MockBuilder, ResponseMock) {
     let response_mock = ResponseMock::new();
     let mock = Mock::given(method("POST"))
         .and(path_regex(".*/(responses|guardian)$"))

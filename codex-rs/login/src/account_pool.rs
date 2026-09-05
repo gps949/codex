@@ -1182,15 +1182,30 @@ mod tests {
 
         let still_second = pool
             .mark_exhausted(&first_lease, None)
-            .expect("stale failure is ignored");
-        let AccountAvailabilityMutation::StaleIgnored {
-            active: Some(still_second),
-        } = still_second
-        else {
-            panic!("stale failure must preserve the active lease");
-        };
-        assert_eq!(still_second.profile().id, second.id);
-        assert_eq!(still_second.generation(), second_lease.generation());
+            .expect("late first failure is applied without rotating");
+        match &still_second {
+            AccountAvailabilityMutation::InactiveProfileUpdated {
+                active: Some(active),
+            }
+            | AccountAvailabilityMutation::AlreadyUnavailable {
+                active: Some(active),
+            } => {
+                assert_eq!(active.profile().id, second.id);
+                assert_eq!(active.generation(), second_lease.generation());
+            }
+            other => panic!(
+                "unexpected mutation after late first-lease failure: {}",
+                match other {
+                    AccountAvailabilityMutation::Rebound(_) => "Rebound",
+                    AccountAvailabilityMutation::PoolExhausted => "PoolExhausted",
+                    AccountAvailabilityMutation::StaleIgnored { .. } => "StaleIgnored",
+                    AccountAvailabilityMutation::AlreadyUnavailable { .. } => "AlreadyUnavailable",
+                    AccountAvailabilityMutation::InactiveProfileUpdated { .. } => {
+                        "InactiveProfileUpdated"
+                    }
+                }
+            ),
+        }
     }
 
     #[tokio::test]

@@ -78,4 +78,4 @@ jobs:
           NEXTEST_PROFILE: default
         run: |
           cargo nextest run --no-fail-fast -p codex-login -p codex-config -p codex-history -p codex-app-server-protocol
-          cargo nextest run --no-fail-fast -p codex-core -E 'test(account_failover) or test(failover) or test(account_transition) or test(preemptive)'
+          cargo nextest run --no-fail-fast -p codex-core -E 'test(account_failover) or test(failover) or test(account_transition) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration)'

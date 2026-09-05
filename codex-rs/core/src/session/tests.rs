@@ -3573,6 +3573,7 @@ async fn portable_compacted_history_bounds_assigned_ids_in_live_and_persisted_hi
                 window_number,
                 window_ids,
                 portable_policy: crate::portable_compaction::PortableCompactionPolicy::Portable,
+                compaction_response_id: None,
             },
         )
         .await;
@@ -3626,7 +3627,8 @@ async fn portable_compacted_history_bounds_assigned_ids_in_live_and_persisted_hi
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::RealtimeItem(_)
-        | RolloutItem::EventMsg(_) => None,
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::TokenUsageRecord(_) => None,
     });
     assert_eq!(persisted_replacement_history, Some(&live_history));
     assert!(persisted_replacement_history.is_some_and(|history| {
@@ -6041,6 +6043,7 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
                 message: "summary".to_string(),
                 window_number,
                 window_ids,
+                portable_policy: crate::portable_compaction::PortableCompactionPolicy::Stock,
                 compaction_response_id: None,
             },
         ),
@@ -11395,6 +11398,7 @@ async fn legacy_compaction_retains_only_the_selected_step(first_attempt: FirstAt
         Arc::clone(&primary),
         Some(Arc::clone(&fallback)),
         Arc::new(OnceLock::new()),
+        &crate::execution_auth::ExecutionAuthMode::Stock,
         InitialContextInjection::DoNotInject,
         CompactionReason::ModelDownshift,
         CompactionPhase::PreTurn,

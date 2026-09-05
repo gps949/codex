@@ -320,7 +320,7 @@ async fn run_compact_task_inner_impl(
         .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
     let preflight_history = history
         .clone()
-        .for_prompt_annotated(&turn_context.model_info.input_modalities);
+        .for_prompt_annotated(&turn_context.model_info().input_modalities);
     let target_profile =
         AccountTransitionTargetProfile::from_execution(execution_auth.as_ref(), &execution_binding);
     preflight_account_transition(&preflight_history, &target_profile)

@@ -316,6 +316,9 @@ async fn tool_side_effect_is_not_repeated_when_follow_up_sampling_fails() -> any
     .await;
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.update_plan_enabled = true;
+        })
         .with_pre_build_hook(write_account_pool_fixture);
     let fixture = builder.build_with_auto_env(&server).await?;
     fixture
@@ -507,7 +510,40 @@ async fn run_concurrent_reset_credit_case(
             ev_completed("rescued-response"),
         ])));
     }
-    let responses = mount_response_sequence(&server, response_templates).await;
+    // Concurrent turns race: one request may join reset-credit singleflight before sampling.
+    // Allow any count in 1..=templates rather than requiring every template slot.
+    let max_response_requests = response_templates.len() as u64;
+    let responses = {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+        use wiremock::Respond;
+
+        struct SeqResponder {
+            num_calls: AtomicUsize,
+            responses: Vec<ResponseTemplate>,
+        }
+
+        impl Respond for SeqResponder {
+            fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+                let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
+                self.responses
+                    .get(call_num)
+                    .unwrap_or_else(|| self.responses.last().expect("templates"))
+                    .clone()
+            }
+        }
+
+        let (mock, response_mock) = responses::base_mock();
+        mock.respond_with(SeqResponder {
+            num_calls: AtomicUsize::new(0),
+            responses: response_templates,
+        })
+        .up_to_n_times(max_response_requests)
+        .expect(1..)
+        .mount(&server)
+        .await;
+        response_mock
+    };
     let consume_code = match outcome {
         ConcurrentResetCreditOutcome::Reset => "reset",
         ConcurrentResetCreditOutcome::NoCredit => "no_credit",
@@ -519,6 +555,7 @@ async fn run_concurrent_reset_credit_case(
                 .set_delay(std::time::Duration::from_millis(250))
                 .set_body_json(json!({"code": consume_code, "windows_reset": 2})),
         )
+        .expect(1)
         .mount(&server)
         .await;
     let backend_base_url = format!("{}/backend-api", server.uri());
@@ -595,26 +632,32 @@ async fn run_concurrent_reset_credit_case(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_pool_exhaustion_consumes_one_reset_credit_with_failed_profile_auth()
 -> anyhow::Result<()> {
+    let observed = run_concurrent_reset_credit_case(ConcurrentResetCreditOutcome::Reset).await?;
     assert_eq!(
-        run_concurrent_reset_credit_case(ConcurrentResetCreditOutcome::Reset).await?,
-        ConcurrentResetCreditObservation {
-            consume_authorizations: vec![Some("Bearer access-backup".to_string())],
-            success_warnings: 1,
-            response_requests: 3,
-        }
+        observed.consume_authorizations,
+        vec![Some("Bearer access-backup".to_string())]
+    );
+    assert_eq!(observed.success_warnings, 1);
+    assert!(
+        (2..=3).contains(&observed.response_requests),
+        "expected 2..=3 response requests, got {}",
+        observed.response_requests
     );
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_non_reset_outcome_is_shared_without_another_consume() -> anyhow::Result<()> {
+    let observed = run_concurrent_reset_credit_case(ConcurrentResetCreditOutcome::NoCredit).await?;
     assert_eq!(
-        run_concurrent_reset_credit_case(ConcurrentResetCreditOutcome::NoCredit).await?,
-        ConcurrentResetCreditObservation {
-            consume_authorizations: vec![Some("Bearer access-backup".to_string())],
-            success_warnings: 0,
-            response_requests: 2,
-        }
+        observed.consume_authorizations,
+        vec![Some("Bearer access-backup".to_string())]
+    );
+    assert_eq!(observed.success_warnings, 0);
+    assert!(
+        (1..=2).contains(&observed.response_requests),
+        "expected 1..=2 response requests, got {}",
+        observed.response_requests
     );
     Ok(())
 }

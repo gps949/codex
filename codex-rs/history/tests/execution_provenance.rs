@@ -27,6 +27,7 @@ fn execution_provenance_round_trips_through_rollout_wire() {
             client_authored: false,
             execution_profile_id: Some("account-a".to_string()),
             execution_generation: Some(17),
+            fallback_token_limit_override: None,
         }),
     });
 
@@ -47,6 +48,7 @@ fn empty_execution_provenance_is_omitted_from_metadata_json() {
         client_authored: false,
         execution_profile_id: None,
         execution_generation: None,
+        fallback_token_limit_override: None,
     };
 
     let value = serde_json::to_value(metadata).expect("metadata should serialize");
