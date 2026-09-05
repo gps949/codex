@@ -119,6 +119,7 @@ pub mod in_process;
 mod mcp_refresh;
 mod message_processor;
 mod mobile_account_bridge;
+mod mobile_account_status;
 mod models;
 mod models_refresh_worker;
 mod notification_media;

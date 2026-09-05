@@ -235,6 +235,9 @@ pub struct AccountPool {
     change_tx: watch::Sender<u64>,
 }
 
+#[path = "account_pool_sync.rs"]
+mod shared_state;
+
 impl Default for AccountPool {
     fn default() -> Self {
         Self::new()
@@ -352,6 +355,45 @@ impl AccountPool {
         let lease = make_lease(account, state.generation);
         drop(state);
         if refreshed || active_changed {
+            self.notify_change();
+        }
+        Ok(lease)
+    }
+
+    /// Lease used only for AuthManager identity (login status / RPC auth), including profiles that
+    /// are cooling down. Turn sampling still goes through [`Self::lease`] and stays fail-closed.
+    pub fn identity_lease(&self) -> Result<AccountLease, AccountPoolError> {
+        let mut state = self.lock_state();
+        let refreshed = refresh_expired_exhaustion(&mut state);
+        let now = Utc::now();
+        let selected_id = state
+            .active_profile
+            .clone()
+            .filter(|id| state.accounts.contains_key(id))
+            .or_else(|| select_eligible_account(&state, &now))
+            .or_else(|| {
+                state
+                    .accounts
+                    .values()
+                    .filter(|account| {
+                        !matches!(
+                            account.availability,
+                            AccountAvailability::Disabled
+                                | AccountAvailability::AuthenticationUnavailable { .. }
+                        )
+                    })
+                    .min_by_key(|account| account.profile.priority)
+                    .map(|account| account.profile.id.clone())
+            })
+            .ok_or(AccountPoolError::NoEligibleAccount)?;
+        let switched = set_active_profile(&mut state, &selected_id);
+        let account = state
+            .accounts
+            .get(&selected_id)
+            .ok_or_else(|| AccountPoolError::UnknownProfile(selected_id.clone()))?;
+        let lease = make_lease(account, state.generation);
+        drop(state);
+        if refreshed || switched {
             self.notify_change();
         }
         Ok(lease)
@@ -1155,6 +1197,35 @@ mod tests {
         ));
         let forced = pool.force_activate(&first.id).expect("force activate");
         assert_eq!(forced.profile().id, first.id);
+    }
+
+    #[tokio::test]
+    async fn identity_lease_survives_full_pool_cooldown() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let lease = pool.lease().expect("initial lease");
+        pool.mark_exhausted(&lease, Some(Utc::now() + chrono::Duration::hours(1)))
+            .expect("exhaust first");
+        let backup = pool.lease().expect("backup lease");
+        pool.mark_exhausted(&backup, Some(Utc::now() + chrono::Duration::hours(2)))
+            .expect("exhaust second");
+        assert!(matches!(
+            pool.lease(),
+            Err(AccountPoolError::NoEligibleAccount)
+        ));
+        let identity = pool.identity_lease().expect("identity while cooling down");
+        assert!(
+            identity.profile().id == first.id || identity.profile().id == second.id,
+            "expected a stored profile for login status"
+        );
     }
 
     #[tokio::test]

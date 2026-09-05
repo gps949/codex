@@ -92,12 +92,56 @@ impl AccountRequestProcessor {
                 ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed
             }
         };
+        if matches!(
+            outcome,
+            ConsumeAccountRateLimitResetCreditOutcome::Reset
+                | ConsumeAccountRateLimitResetCreditOutcome::NothingToReset
+                | ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed
+        ) {
+            // Backend windows are usable again; drop the local cooldown that otherwise keeps the
+            // profile parked for the old reset timestamp (and can make restart look logged-out).
+            self.clear_pool_exhaustion_for_current_auth().await;
+        }
         Ok(Some(
             ConsumeAccountRateLimitResetCreditResponse { outcome }.into(),
         ))
     }
 
+    async fn clear_pool_exhaustion_for_current_auth(&self) {
+        let _ = self
+            .execution_account_pool
+            .ensure_from_config(self.config.as_ref())
+            .await;
+        let Some(auth) = self.auth_manager.auth().await else {
+            return;
+        };
+        let Some(account_id) = auth.get_account_id() else {
+            return;
+        };
+        for (profile_id, manager) in self.execution_account_pool.auth_managers() {
+            let Some(profile_auth) = manager.auth().await else {
+                continue;
+            };
+            if profile_auth.get_account_id().as_deref() != Some(account_id.as_str()) {
+                continue;
+            }
+            if let Err(error) = self
+                .execution_account_pool
+                .activate(&profile_id, /*force*/ true)
+                .await
+            {
+                tracing::warn!(
+                    %profile_id,
+                    %error,
+                    "failed to clear local cooldown after rate-limit reset credit"
+                );
+            }
+            break;
+        }
+    }
+
     async fn rate_limit_reset_backend_client(&self) -> Result<BackendClient, JSONRPCErrorError> {
+        let _ = self.get_account_pool_response().await?;
         let Some(auth) = self.auth_manager.auth().await else {
             return Err(invalid_request(
                 "codex account authentication required for rate limit reset credits",

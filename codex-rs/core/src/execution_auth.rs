@@ -300,12 +300,10 @@ impl ExecutionAuth {
     /// Stable profile that owns rollout items created by stock Codex before execution provenance
     /// existed. The root profile remains meaningful even after another profile becomes active.
     pub(crate) fn legacy_unattributed_profile_id(&self) -> Option<AccountProfileId> {
-        self.account_pool()?
-            .snapshots()
-            .into_iter()
-            .find_map(|snapshot| {
-                (snapshot.profile.id.as_str() == "legacy-root").then_some(snapshot.profile.id)
-            })
+        // Legacy history keeps its original owner even when that account was removed from
+        // scheduling. A missing pool entry must not erase historical provenance.
+        self.account_pool()?;
+        AccountProfileId::new("legacy-root").ok()
     }
 
     /// Captures the identity for a new account-bound model client/request.

@@ -405,7 +405,7 @@ impl MessageProcessor {
             outgoing.clone(),
             Arc::clone(&config),
             config_manager.clone(),
-            crate::mobile_account_bridge::shared_remote_client_registry(),
+            Arc::clone(&outgoing.remote_clients),
         );
         let apps_processor = AppsRequestProcessor::new(
             auth_manager.clone(),

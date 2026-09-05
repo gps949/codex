@@ -81,6 +81,13 @@ impl AccountProfileStore {
     pub fn load_profile_records(
         &self,
     ) -> Result<Vec<AccountProfileRecord>, AccountProfileStoreError> {
+        let _lock = crate::account_file::lock(&self.codex_home)?;
+        self.load_profile_records_unlocked()
+    }
+
+    pub(crate) fn load_profile_records_unlocked(
+        &self,
+    ) -> Result<Vec<AccountProfileRecord>, AccountProfileStoreError> {
         let manifest = self.load_manifest()?;
         manifest
             .profiles
@@ -99,6 +106,7 @@ impl AccountProfileStore {
         priority: u32,
     ) -> Result<AccountProfile, AccountProfileStoreError> {
         fs::create_dir_all(self.managed_credentials_root())?;
+        let _lock = crate::account_file::lock(&self.codex_home)?;
         let mut manifest = self.load_manifest()?;
 
         for _ in 0..PROFILE_ALLOCATION_ATTEMPTS {
@@ -138,6 +146,7 @@ impl AccountProfileStore {
         &self,
         id: &AccountProfileId,
     ) -> Result<AccountProfile, AccountProfileStoreError> {
+        let _lock = crate::account_file::lock(&self.codex_home)?;
         let mut manifest = self.load_manifest()?;
         let stored = manifest
             .profiles
@@ -157,6 +166,7 @@ impl AccountProfileStore {
         &self,
         id: &AccountProfileId,
     ) -> Result<bool, AccountProfileStoreError> {
+        let _lock = crate::account_file::lock(&self.codex_home)?;
         let mut manifest = self.load_manifest()?;
         let Some(index) = manifest
             .profiles
@@ -193,6 +203,7 @@ impl AccountProfileStore {
     ) -> Result<AccountProfile, AccountProfileStoreError> {
         let legacy_id = AccountProfileId::new(LEGACY_ROOT_PROFILE_ID)
             .map_err(AccountProfileStoreError::Pool)?;
+        let _lock = crate::account_file::lock(&self.codex_home)?;
         let mut manifest = self.load_manifest()?;
 
         if let Some(existing) = manifest
@@ -231,6 +242,7 @@ impl AccountProfileStore {
         id: &AccountProfileId,
         update: AccountProfileMetadataUpdate,
     ) -> Result<AccountProfile, AccountProfileStoreError> {
+        let _lock = crate::account_file::lock(&self.codex_home)?;
         let mut manifest = self.load_manifest()?;
         let stored = manifest
             .profiles
@@ -259,6 +271,7 @@ impl AccountProfileStore {
         &self,
         id: &AccountProfileId,
     ) -> Result<bool, AccountProfileStoreError> {
+        let _lock = crate::account_file::lock(&self.codex_home)?;
         let mut manifest = self.load_manifest()?;
         let before = manifest.profiles.len();
         manifest.profiles.retain(|profile| &profile.id != id);

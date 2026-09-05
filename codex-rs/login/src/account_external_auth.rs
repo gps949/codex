@@ -36,10 +36,23 @@ impl AccountPoolExternalAuth {
         // profiles is a hard upper bound on attempts and prevents malformed state from looping.
         let attempts = self.pool.snapshots().len().max(1);
         let mut last_reason = "no eligible account is available".to_string();
+        let mut allow_identity_fallback = true;
 
         for _ in 0..attempts {
             let lease = match self.pool.lease() {
                 Ok(lease) => lease,
+                Err(AccountPoolError::NoEligibleAccount) if allow_identity_fallback => {
+                    allow_identity_fallback = false;
+                    // Every profile may be cooling down. Still surface stored ChatGPT credentials
+                    // so startup does not pretend the user is logged out.
+                    match self.pool.identity_lease() {
+                        Ok(lease) => lease,
+                        Err(AccountPoolError::NoEligibleAccount) => {
+                            return Err(io::Error::other(last_reason));
+                        }
+                        Err(error) => return Err(pool_error(error)),
+                    }
+                }
                 Err(AccountPoolError::NoEligibleAccount) => {
                     return Err(io::Error::other(last_reason));
                 }

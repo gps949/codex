@@ -80,8 +80,8 @@ impl AccountPoolRuntime {
     /// AuthManager using Codex's native `ExternalAuth` extension point.
     ///
     /// When `include_existing_root_login` is true, a normal existing ChatGPT OAuth login in the
-    /// root `CODEX_HOME` is registered as the compatibility `legacy-root` profile without moving
-    /// or copying its credentials.
+    /// root `CODEX_HOME` is imported only when first creating a pool. An existing manifest is
+    /// authoritative, so explicitly removed root profiles are never silently re-added.
     pub async fn install(
         outer_auth_manager: Arc<AuthManager>,
         auth_config: AuthConfig,
@@ -96,7 +96,7 @@ impl AccountPoolRuntime {
 
         let store = AccountProfileStore::new(auth_config.codex_home.clone());
         let runtime_state_store = AccountRuntimeStateStore::new(auth_config.codex_home.clone());
-        let (runtime_state, runtime_state_issue) = match runtime_state_store.load() {
+        let (mut runtime_state, runtime_state_issue) = match runtime_state_store.load() {
             Ok(state) => (state, None),
             Err(error) => {
                 tracing::warn!("ignoring invalid account runtime state: {error}");
@@ -105,6 +105,7 @@ impl AccountPoolRuntime {
         };
 
         if include_existing_root_login
+            && !store.manifest_path().exists()
             && outer_auth_manager
                 .auth()
                 .await
@@ -174,7 +175,7 @@ impl AccountPoolRuntime {
             .lease()
             .map(|lease| lease.generation())
             .unwrap_or_default();
-        if let Err(error) = runtime_state_store.save_pool(&pool) {
+        if let Err(error) = runtime_state_store.synchronize_pool(&pool, &mut runtime_state) {
             tracing::warn!("failed to persist initial account runtime state: {error}");
         }
         let auth_sync_task = spawn_auth_sync_task(
@@ -182,6 +183,7 @@ impl AccountPoolRuntime {
             Arc::clone(&outer_auth_manager),
             runtime_state_store.clone(),
             initial_generation,
+            runtime_state,
         );
         let keepalive_task = spawn_auth_keepalive_task(Arc::clone(&pool));
 
@@ -287,11 +289,18 @@ fn spawn_auth_sync_task(
     auth_manager: Arc<AuthManager>,
     runtime_state_store: AccountRuntimeStateStore,
     mut observed_generation: u64,
+    mut runtime_state: AccountRuntimeState,
 ) -> JoinHandle<()> {
     let mut changes = pool.change_receiver();
     tokio::spawn(async move {
-        while changes.changed().await.is_ok() {
-            if let Err(error) = runtime_state_store.save_pool(&pool) {
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                result = changes.changed() => { if result.is_err() { break; } }
+                _ = poll.tick() => {}
+            }
+            if let Err(error) = runtime_state_store.synchronize_pool(&pool, &mut runtime_state) {
                 tracing::warn!("failed to persist account runtime state: {error}");
             }
 

@@ -4305,3 +4305,23 @@ async fn account_change_dismisses_the_previous_app_directory_snapshot() {
         format!("Before account change:\n{before}\n\nAfter account change:\n{after}")
     );
 }
+
+#[tokio::test]
+async fn account_pool_strategy_updates_in_open_chat() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let mut next = chat.config.clone();
+    next.account_pool.rotation_strategy =
+        Some(codex_config::AccountPoolRotationStrategy::EarliestReset);
+    chat.sync_plugin_mentions_config(&next);
+    assert_eq!(chat.config.account_pool, next.account_pool);
+    chat.open_account_pool_picker(Ok(codex_app_server_protocol::AccountPoolReadResponse {
+        enabled: true,
+        active_profile_id: None,
+        active_generation: None,
+        accounts: vec![],
+    }));
+    assert_chatwidget_snapshot!(
+        "account_pool_earliest_reset",
+        render_bottom_popup(&chat, /*width*/ 80)
+    );
+}

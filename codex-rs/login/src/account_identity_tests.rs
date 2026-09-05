@@ -141,3 +141,51 @@ fn duplicate_login_matches_chatgpt_user_id_not_workspace_account_id() {
             .all(|record| record.profile.id != pending.id)
     );
 }
+
+#[test]
+fn same_user_in_different_workspaces_does_not_overwrite_root_credentials() {
+    let home = TempDir::new().unwrap();
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    store
+        .ensure_legacy_root_profile(Some("Personal".to_string()), 0)
+        .unwrap();
+    let root_auth = chatgpt_auth_with_ids("user", "personal", "user@example.com");
+    save_auth(
+        home.path(),
+        &root_auth,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .unwrap();
+    let pending = store
+        .allocate_profile(Some("Work".to_string()), 10)
+        .unwrap();
+    let work_auth = chatgpt_auth_with_ids("user", "business", "user@example.com");
+    save_auth(
+        &pending.credential_home,
+        &work_auth,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        reconcile_duplicate_new_login(
+            &store,
+            &pending,
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default()
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        load_login_identity(
+            home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default()
+        )
+        .unwrap(),
+        login_identity_from_auth(&root_auth)
+    );
+    assert!(pending.credential_home.join("auth.json").exists());
+}

@@ -12,14 +12,16 @@ use crate::auth::AuthKeyringBackendKind;
 use crate::auth::load_auth_dot_json;
 use crate::auth::save_auth;
 
-/// Stable ChatGPT user identity used to detect duplicate account-pool logins.
+/// Stable ChatGPT seat identity used to detect duplicate account-pool logins.
 ///
-/// `chatgpt_user_id` distinguishes individual seats/users. Workspace-level identifiers such as
-/// `tokens.account_id` or `id_token.chatgpt_account_id` are intentionally ignored because multiple
-/// Business seats in the same workspace share them.
+/// `chatgpt_user_id` identifies the person. `chatgpt_account_id` (when present) identifies the
+/// workspace/seat so the same person can keep separate personal and work profiles without one
+/// login refreshing and overwriting the other. Two Business seats in one workspace still stay
+/// distinct because they have different user ids.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountLoginIdentity {
     pub chatgpt_user_id: String,
+    pub chatgpt_account_id: Option<String>,
     pub email: Option<String>,
 }
 
@@ -38,17 +40,21 @@ pub fn load_login_identity(
 }
 
 pub(crate) fn login_identity_from_auth(auth: &AuthDotJson) -> Option<AccountLoginIdentity> {
-    let chatgpt_user_id = auth
-        .tokens
-        .as_ref()
-        .and_then(|tokens| tokens.id_token.chatgpt_user_id.clone())
+    let tokens = auth.tokens.as_ref()?;
+    let chatgpt_user_id = tokens
+        .id_token
+        .chatgpt_user_id
+        .clone()
         .filter(|user_id| !user_id.trim().is_empty())?;
-    let email = auth
-        .tokens
-        .as_ref()
-        .and_then(|tokens| tokens.id_token.email.clone());
+    let chatgpt_account_id = tokens
+        .account_id
+        .clone()
+        .or_else(|| tokens.id_token.chatgpt_account_id.clone())
+        .filter(|account_id| !account_id.trim().is_empty());
+    let email = tokens.id_token.email.clone();
     Some(AccountLoginIdentity {
         chatgpt_user_id,
+        chatgpt_account_id,
         email,
     })
 }
@@ -74,7 +80,9 @@ pub fn find_existing_profile_with_identity(
         else {
             continue;
         };
-        if existing_identity.chatgpt_user_id == identity.chatgpt_user_id {
+        if existing_identity.chatgpt_user_id == identity.chatgpt_user_id
+            && existing_identity.chatgpt_account_id == identity.chatgpt_account_id
+        {
             return Ok(Some(record.profile));
         }
     }

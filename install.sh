@@ -41,14 +41,41 @@ fi
 asset="codex-$target.tar.gz"
 url="https://github.com/$REPO/releases/download/$tag/$asset"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+stage=""
+trap 'rm -rf "$tmp"; if [ -n "$stage" ]; then rm -rf "$stage"; fi' EXIT
 
 say "Downloading $tag ($asset)..."
 curl -fsSL "$url" -o "$tmp/$asset"
+# Validate the whole archive before touching an existing installation.
+tar tzf "$tmp/$asset" > "$tmp/members"
+while IFS= read -r member; do
+  case "$member" in
+    . | ./ | codex | ./codex | codex-code-mode-host | ./codex-code-mode-host | codex-responses-api-proxy | ./codex-responses-api-proxy | bwrap | ./bwrap) ;;
+    *) warn "Unexpected release archive member: $member"; exit 1 ;;
+  esac
+done < "$tmp/members"
 mkdir -p "$INSTALL_DIR"
-tar xzf "$tmp/$asset" -C "$INSTALL_DIR"
-chmod +x "$INSTALL_DIR"/codex* 2>/dev/null || true
-chmod +x "$INSTALL_DIR"/bwrap 2>/dev/null || true
+stage="$(mktemp -d "$INSTALL_DIR/.codex-install.XXXXXX")"
+tar xzf "$tmp/$asset" -C "$stage"
+required="codex codex-code-mode-host codex-responses-api-proxy"
+case "$target" in *linux*) required="$required bwrap" ;; esac
+for binary in $required; do
+  if [ ! -f "$stage/$binary" ] || [ -L "$stage/$binary" ]; then
+    warn "Release bundle is missing a regular binary: $binary"
+    exit 1
+  fi
+  chmod +x "$stage/$binary"
+  if [ -d "$INSTALL_DIR/$binary" ]; then
+    warn "Installation target is a directory: $INSTALL_DIR/$binary"
+    exit 1
+  fi
+done
+"$stage/codex" --version
+# Rename on the same filesystem, with the CLI last so helpers are present first.
+for binary in $required; do
+  [ "$binary" = codex ] || mv -f "$stage/$binary" "$INSTALL_DIR/$binary"
+done
+mv -f "$stage/codex" "$INSTALL_DIR/codex"
 say "Installed into $INSTALL_DIR."
 
 # --- PATH precedence: the fork must win over any previously installed codex.
@@ -104,8 +131,7 @@ fi
 # --- Stale managed app-server daemon: an old daemon does not know this
 # build's API. Stop it if it is daemon-managed; foreign app-servers (owned by
 # other tools) are left alone — this build refuses to reuse mismatched ones.
-# Also stop the official packages/standalone hourly updater if it is running;
-# that loop would reinstall upstream Codex and steal the control socket.
+# Report the standalone updater separately: stale PID files are not process identity.
 daemon_output="$("$INSTALL_DIR/codex" app-server daemon stop 2>&1 || true)"
 case "$daemon_output" in
   *"not managed"*)
@@ -118,11 +144,8 @@ case "$daemon_output" in
 esac
 updater_pid_file="${CODEX_HOME:-$HOME/.codex}/app-server-daemon/app-server-updater.pid"
 if [ -f "$updater_pid_file" ]; then
-  updater_pid="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$updater_pid_file" | head -n 1)"
-  if [ -n "${updater_pid:-}" ] && kill -0 "$updater_pid" 2>/dev/null; then
-    kill "$updater_pid" 2>/dev/null || true
-    say "Stopped the official standalone app-server updater (pid $updater_pid)."
-  fi
+  warn "A standalone updater PID file exists at $updater_pid_file."
+  warn "Stop that updater through its owning app or service before restarting remote control; a PID file alone cannot safely identify a process."
 fi
 
 say ""

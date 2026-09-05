@@ -157,6 +157,9 @@ fn account_description(account: &AccountPoolAccount) -> String {
         }
         AccountPoolAvailability::Disabled => "disabled".to_string(),
     });
+    if account.rate_limits.primary.is_none() && account.rate_limits.secondary.is_none() {
+        parts.push("quota unknown".to_string());
+    }
     if let Some(primary) = &account.rate_limits.primary {
         parts.push(format!("{:.0}% of 5h window used", primary.used_percent));
     }
@@ -165,6 +168,19 @@ fn account_description(account: &AccountPoolAccount) -> String {
             "{:.0}% of weekly window used",
             secondary.used_percent
         ));
+    }
+    match account
+        .rate_limits
+        .observed_at
+        .and_then(|time| chrono::DateTime::from_timestamp(time, 0))
+    {
+        Some(time) => parts.push(format!("checked {} UTC", time.format("%m-%d %H:%M"))),
+        None if account.rate_limits.primary.is_some()
+            || account.rate_limits.secondary.is_some() =>
+        {
+            parts.push("cached; check time unknown".to_string())
+        }
+        None => {}
     }
     parts.join(" · ")
 }

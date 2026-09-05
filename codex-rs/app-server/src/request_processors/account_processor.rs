@@ -13,7 +13,6 @@ use crate::mobile_account_bridge::mobile_slash_command;
 use crate::mobile_account_bridge::overlay_get_account_for_remote_client;
 use crate::mobile_account_bridge::overlay_get_account_rate_limits_for_remote_client;
 use crate::mobile_account_bridge::push_account_pool_warning;
-use crate::mobile_account_bridge::push_account_pool_warning_to_remote_clients;
 use chrono::DateTime;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
 use codex_app_server_protocol::TurnStartParams;
@@ -25,6 +24,7 @@ use codex_model_provider::is_supported_amazon_bedrock_region;
 use codex_protocol::ThreadId;
 
 mod bedrock_setup;
+mod pool_quota;
 mod rate_limit_resets;
 
 // Duration before a browser ChatGPT login attempt is abandoned.
@@ -193,13 +193,20 @@ impl AccountRequestProcessor {
             .await
             .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
         super::thread_input::ensure_direct_input_allowed(thread.as_ref()).await?;
+        if matches!(
+            thread.agent_status().await,
+            codex_protocol::protocol::AgentStatus::Running
+        ) {
+            return Err(invalid_request(
+                "A turn is running. Open the Status panel or wait for it to finish.",
+            ));
+        }
 
         let pool = self.get_account_pool_response().await?;
         let response = complete_mobile_slash_turn(
             &self.outgoing,
             &request_id,
             thread_id,
-            thread.as_ref(),
             &params,
             &pool,
             command,
@@ -254,9 +261,9 @@ impl AccountRequestProcessor {
     pub(crate) async fn get_account_pool(
         &self,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.get_account_pool_response()
-            .await
-            .map(|response| Some(response.into()))
+        let mut response = self.get_account_pool_response().await?;
+        pool_quota::refresh(&self.load_latest_config().await, &mut response).await;
+        Ok(Some(response.into()))
     }
 
     pub(crate) async fn use_account_pool(
@@ -1240,7 +1247,7 @@ impl AccountRequestProcessor {
         // Install the pool before reading account state. `account_state()` uses auth_cached(),
         // and pool-only logins have no root auth.json until AccountPoolExternalAuth is wired in.
         // Reading first made `codex account use` + TUI/`codex continue` show the login screen.
-        let account_pool = Some(self.get_account_pool_response().await?);
+        let _ = self.get_account_pool_response().await?;
 
         self.refresh_token_if_requested(do_refresh).await;
 
@@ -1252,6 +1259,10 @@ impl AccountRequestProcessor {
             Err(err) => return Err(invalid_request(err.to_string())),
         };
         let account = account_state.account.map(Account::from);
+
+        // Re-read the pool after auth so the snapshot matches the identity just reported.
+        // An earlier snapshot can race with the auth-sync task mid-selection.
+        let account_pool = Some(self.get_account_pool_response().await?);
 
         let mut response = GetAccountResponse {
             account,
@@ -1269,12 +1280,14 @@ impl AccountRequestProcessor {
     async fn get_account_pool_response(
         &self,
     ) -> Result<codex_app_server_protocol::AccountPoolReadResponse, JSONRPCErrorError> {
+        let config = self.load_latest_config().await;
         let enabled = self
             .execution_account_pool
-            .ensure_from_config(self.config.as_ref())
+            .ensure_from_config(&config)
             .await
             .map_err(|err| internal_error(format!("failed to initialize account pool: {err}")))?;
         if !enabled {
+            *self.remote_client_registry.caption.lock().await = None;
             return Ok(codex_app_server_protocol::AccountPoolReadResponse {
                 enabled: false,
                 active_profile_id: None,
@@ -1298,23 +1311,27 @@ impl AccountRequestProcessor {
                 rate_limits: account_pool_rate_limits(snapshot.rate_limits),
             });
         }
-        Ok(codex_app_server_protocol::AccountPoolReadResponse {
+        let response = codex_app_server_protocol::AccountPoolReadResponse {
             enabled: true,
             active_profile_id: active
                 .as_ref()
                 .map(|identity| identity.profile_id.to_string()),
             active_generation: active.map(|identity| identity.generation),
             accounts,
-        })
+        };
+        *self.remote_client_registry.caption.lock().await =
+            crate::mobile_account_status::pool_caption(&response);
+        Ok(response)
     }
 
     async fn use_account_pool_response(
         &self,
         params: codex_app_server_protocol::AccountPoolUseParams,
     ) -> Result<codex_app_server_protocol::AccountPoolUseResponse, JSONRPCErrorError> {
+        let config = self.load_latest_config().await;
         let enabled = self
             .execution_account_pool
-            .ensure_from_config(self.config.as_ref())
+            .ensure_from_config(&config)
             .await
             .map_err(|err| internal_error(format!("failed to initialize account pool: {err}")))?;
         if !enabled {
@@ -1716,12 +1733,8 @@ fn spawn_account_pool_updates_task(
                     },
                 ))
                 .await;
-            push_account_pool_warning_to_remote_clients(
-                &outgoing,
-                &remote_client_registry,
-                &account_pool,
-            )
-            .await;
+            *remote_client_registry.caption.lock().await =
+                crate::mobile_account_status::pool_caption(&account_pool);
             let notification = codex_app_server_protocol::AccountPoolUpdatedNotification {
                 active_profile_id: account_pool.active_profile_id.clone(),
                 active_generation: account_pool.active_generation,
@@ -1738,8 +1751,9 @@ async fn build_account_pool_read_response(
     config: &Config,
     pool: &ExecutionAccountPoolHandle,
 ) -> codex_app_server_protocol::AccountPoolReadResponse {
-    let enabled = pool.ensure_from_config(config).await.unwrap_or(false);
-    if !enabled {
+    // This watcher must not reapply its startup config over live strategy changes.
+    let snapshots = pool.snapshots();
+    if snapshots.is_empty() {
         return codex_app_server_protocol::AccountPoolReadResponse {
             enabled: false,
             active_profile_id: None,
@@ -1750,7 +1764,7 @@ async fn build_account_pool_read_response(
 
     let active = pool.active_identity();
     let mut accounts = Vec::new();
-    for snapshot in pool.snapshots() {
+    for snapshot in snapshots {
         let (plan_type, email) = load_pool_profile_identity(config, &snapshot).await;
         accounts.push(codex_app_server_protocol::AccountPoolAccount {
             profile_id: snapshot.profile.id.to_string(),

@@ -11,6 +11,7 @@ pub mod auth_env_telemetry;
 pub mod test_support;
 pub mod token_data;
 
+mod account_file;
 mod callback_params;
 mod device_code_auth;
 mod outbound_proxy;
@@ -48,6 +49,7 @@ pub use account_runtime_state::AccountRuntimeProfileState;
 pub use account_runtime_state::AccountRuntimeState;
 pub use account_runtime_state::AccountRuntimeStateError;
 pub use account_runtime_state::AccountRuntimeStateStore;
+pub use account_runtime_state::AccountSelectionMode;
 pub use account_store::AccountLabelUpdate;
 pub use account_store::AccountProfileMetadataUpdate;
 pub use account_store::AccountProfileRecord;

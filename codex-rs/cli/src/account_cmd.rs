@@ -306,7 +306,6 @@ pub(crate) async fn run_account_use(
     force: bool,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
-    let profile_id = parse_profile_id_or_exit(&profile_id);
     let store = AccountProfileStore::new(config.codex_home.to_path_buf());
     let records = match store.load_profile_records() {
         Ok(records) => records,
@@ -315,44 +314,45 @@ pub(crate) async fn run_account_use(
             std::process::exit(1);
         }
     };
-    let Some(record) = records
-        .iter()
-        .find(|record| record.profile.id == profile_id)
-    else {
-        eprintln!("Unknown Codex account profile: {profile_id}");
-        std::process::exit(1);
+    let record = match crate::account_selector::resolve_account(&records, &profile_id) {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
     };
+    let profile_id = record.profile.id.clone();
+    if record.profile.disabled {
+        eprintln!(
+            "Account profile {profile_id} is disabled. Enable it with `codex account enable {profile_id}` first."
+        );
+        std::process::exit(1);
+    }
     if record.state != AccountProfileState::Ready {
         eprintln!("Account profile {profile_id} has not completed login.");
         std::process::exit(1);
     }
 
     let runtime_store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
-    let mut runtime = runtime_store.load().unwrap_or_default();
-    let profile_state = runtime
-        .profiles
-        .iter_mut()
-        .find(|state| state.profile_id == profile_id);
-    if let Some(state) = profile_state {
-        if let Some(reset) = state.exhausted_until.as_ref()
-            && reset > &Utc::now()
-            && !force
-        {
-            eprintln!(
-                "Account profile {profile_id} is cooling down until {reset}. Use --force to probe it now."
-            );
-            std::process::exit(1);
-        }
+    if let Err(error) = runtime_store.select(
+        profile_id.clone(),
         if force {
-            state.exhausted_until = None;
-        }
-    }
-    runtime.active_profile_id = Some(profile_id.clone());
-    if let Err(error) = runtime_store.save(&runtime) {
-        eprintln!("Error persisting active account: {error}");
+            codex_login::AccountSelectionMode::ForceProbe
+        } else {
+            codex_login::AccountSelectionMode::AvailableOnly
+        },
+    ) {
+        eprintln!("Error selecting account: {error}");
         std::process::exit(1);
     }
-    eprintln!("Selected Codex account profile {profile_id}.");
+    eprintln!(
+        "Selected Codex account {} ({profile_id}). Running processes synchronize configured accounts shortly; restart a process to load newly added accounts.",
+        record
+            .profile
+            .label
+            .as_deref()
+            .unwrap_or(profile_id.as_str())
+    );
     std::process::exit(0);
 }
 
@@ -616,6 +616,9 @@ async fn register_existing_root_login(
     config: &Config,
     store: &AccountProfileStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if store.manifest_path().exists() {
+        return Ok(());
+    }
     let manager =
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
     if manager

@@ -1869,6 +1869,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn sync_plugin_mentions_config(&mut self, config: &Config) {
+        self.config.account_pool = config.account_pool.clone();
         self.config.features = config.features.clone();
         self.config.config_layer_stack = config.config_layer_stack.clone();
         self.config.memories = config.memories.clone();

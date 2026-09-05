@@ -1875,6 +1875,7 @@ impl Session {
                 .then(|| self.build_effective_session_config(&state.session_configuration));
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
             config.active_project = next_config.active_project.clone();
+            config.account_pool = next_config.account_pool.clone();
             config.config_layer_stack = config
                 .config_layer_stack
                 .with_user_layer_from(&next_config.config_layer_stack);

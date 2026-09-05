@@ -5,11 +5,10 @@
 //! - `account/read` (`account.email` overlay)
 //! - `account/workspaceMessages/read` (headline banners)
 //! - `warning` notifications (ephemeral status toasts)
-//! - `turn/start` for `/account` and `/status` (synthetic agent reply in the chat transcript)
+//! - `turn/start` for `/account` and `/status` (connection-local replies without model history)
 //! - `account/rateLimits/read` (`rateLimits.limitName` overlay for the status panel)
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -36,11 +35,8 @@ use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_app_server_protocol::WarningNotification;
 use codex_app_server_protocol::WorkspaceMessage;
 use codex_app_server_protocol::WorkspaceMessageType;
-use codex_core::CodexThread;
 use codex_login::format_exhausted_reset_unix;
 use codex_protocol::ThreadId;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ResponseItem;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -109,11 +105,11 @@ pub(crate) async fn complete_mobile_slash_turn(
     outgoing: &OutgoingMessageSender,
     request_id: &ConnectionRequestId,
     thread_id: ThreadId,
-    thread: &CodexThread,
     params: &TurnStartParams,
     pool: &AccountPoolReadResponse,
     command: MobileSlashCommand,
 ) -> TurnStartResponse {
+    let connection_ids = [request_id.connection_id];
     let turn_id = Uuid::new_v4().to_string();
     let user_item_id = Uuid::new_v4().to_string();
     let agent_item_id = Uuid::new_v4().to_string();
@@ -145,10 +141,13 @@ pub(crate) async fn complete_mobile_slash_turn(
         duration_ms: None,
     };
     outgoing
-        .send_server_notification(ServerNotification::TurnStarted(TurnStartedNotification {
-            thread_id: thread_id_string.clone(),
-            turn: in_progress_turn,
-        }))
+        .send_server_notification_to_connections(
+            &connection_ids,
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: thread_id_string.clone(),
+                turn: in_progress_turn,
+            }),
+        )
         .await;
 
     let user_item = ThreadItem::UserMessage {
@@ -161,6 +160,7 @@ pub(crate) async fn complete_mobile_slash_turn(
     };
     emit_item_lifecycle(
         outgoing,
+        &connection_ids,
         &thread_id_string,
         &turn_id,
         user_item.clone(),
@@ -178,6 +178,7 @@ pub(crate) async fn complete_mobile_slash_turn(
     };
     emit_item_lifecycle(
         outgoing,
+        &connection_ids,
         &thread_id_string,
         &turn_id,
         agent_item.clone(),
@@ -197,15 +198,14 @@ pub(crate) async fn complete_mobile_slash_turn(
         duration_ms: Some((completed_at_ms - started_at_ms).max(0)),
     };
     outgoing
-        .send_server_notification(ServerNotification::TurnCompleted(
-            TurnCompletedNotification {
+        .send_server_notification_to_connections(
+            &connection_ids,
+            ServerNotification::TurnCompleted(TurnCompletedNotification {
                 thread_id: thread_id_string,
                 turn: completed_turn.clone(),
-            },
-        ))
+            }),
+        )
         .await;
-
-    persist_mobile_account_slash_turn(thread, &user_text, &agent_text).await;
 
     TurnStartResponse {
         turn: completed_turn,
@@ -222,23 +222,14 @@ fn mobile_account_slash_reply(pool: &AccountPoolReadResponse) -> String {
 }
 
 fn mobile_status_slash_reply(pool: &AccountPoolReadResponse) -> String {
-    let mut lines = vec![
-        "Codex status".to_string(),
-        String::new(),
-        format_account_pool_summary(pool),
-    ];
-    if pool.enabled {
-        lines.push(String::new());
-        lines.push(
-            "Usage limits shown in Status reflect the active execution profile only.".to_string(),
-        );
-        lines.push(host_account_switch_hint());
-    }
-    lines.join("\n")
+    format!(
+        "{}\nUsage bars show the executing account's limits. Ready counts describe scheduler availability, not verified quota.",
+        crate::mobile_account_status::account_caption(pool)
+    )
 }
 
 fn host_account_switch_hint() -> String {
-    "Switch profiles on the host with `codex account use <profileId>`.".to_string()
+    r#"Switch profiles on the host with `codex account use "<label-or-id>"`."#.to_string()
 }
 
 pub(crate) fn overlay_get_account_rate_limits_for_remote_client(
@@ -248,75 +239,53 @@ pub(crate) fn overlay_get_account_rate_limits_for_remote_client(
     if !pool.enabled {
         return;
     }
-    let overlay = truncate_for_email_field(&format_account_pool_summary(pool));
-    response.rate_limits.limit_name = Some(overlay.clone());
+    let Some(overlay) = crate::mobile_account_status::pool_caption(pool) else {
+        return;
+    };
+    crate::mobile_account_status::overlay_snapshot(&mut response.rate_limits, &overlay);
     if let Some(rate_limits_by_limit_id) = response.rate_limits_by_limit_id.as_mut() {
         for snapshot in rate_limits_by_limit_id.values_mut() {
-            snapshot.limit_name = Some(overlay.clone());
+            crate::mobile_account_status::overlay_snapshot(snapshot, &overlay);
         }
     }
 }
 
 async fn emit_item_lifecycle(
     outgoing: &OutgoingMessageSender,
+    connection_ids: &[ConnectionId],
     thread_id: &str,
     turn_id: &str,
     item: ThreadItem,
     started_at_ms: i64,
 ) {
     outgoing
-        .send_server_notification(ServerNotification::ItemStarted(ItemStartedNotification {
-            item: item.clone(),
-            thread_id: thread_id.to_string(),
-            turn_id: turn_id.to_string(),
-            started_at_ms,
-        }))
+        .send_server_notification_to_connections(
+            connection_ids,
+            ServerNotification::ItemStarted(ItemStartedNotification {
+                item: item.clone(),
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+                started_at_ms,
+            }),
+        )
         .await;
     outgoing
-        .send_server_notification(ServerNotification::ItemCompleted(
-            ItemCompletedNotification {
+        .send_server_notification_to_connections(
+            connection_ids,
+            ServerNotification::ItemCompleted(ItemCompletedNotification {
                 item,
                 thread_id: thread_id.to_string(),
                 turn_id: turn_id.to_string(),
                 completed_at_ms: now_unix_timestamp_ms(),
-            },
-        ))
+            }),
+        )
         .await;
-}
-
-async fn persist_mobile_account_slash_turn(
-    thread: &CodexThread,
-    user_text: &str,
-    agent_text: &str,
-) {
-    let items = vec![
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: user_text.to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "assistant".to_string(),
-            content: vec![ContentItem::OutputText {
-                text: agent_text.to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-    if let Err(err) = thread.inject_response_items(items).await {
-        tracing::warn!(%err, "failed to persist mobile /account slash turn in thread history");
-    }
 }
 
 #[derive(Default)]
 pub(crate) struct RemoteClientRegistry {
     clients: Mutex<HashMap<ConnectionId, String>>,
+    pub(crate) caption: Mutex<Option<String>>,
 }
 
 impl RemoteClientRegistry {
@@ -330,8 +299,17 @@ impl RemoteClientRegistry {
         self.clients.lock().await.remove(&connection_id);
     }
 
-    pub(crate) async fn remote_connection_ids(&self) -> Vec<ConnectionId> {
-        self.clients.lock().await.keys().copied().collect()
+    pub(crate) async fn decorate_notification(
+        &self,
+        connection_id: ConnectionId,
+        notification: &mut ServerNotification,
+    ) {
+        if let ServerNotification::AccountRateLimitsUpdated(update) = notification
+            && self.clients.lock().await.contains_key(&connection_id)
+            && let Some(caption) = self.caption.lock().await.as_deref()
+        {
+            crate::mobile_account_status::overlay_snapshot(&mut update.rate_limits, caption);
+        }
     }
 }
 
@@ -342,14 +320,23 @@ pub(crate) fn format_account_pool_summary(pool: &AccountPoolReadResponse) -> Str
 
     let mut lines = vec![format!(
         "Codex account pool · active: {}",
-        pool.active_profile_id.as_deref().unwrap_or("automatic")
+        crate::mobile_account_status::compact_label(
+            pool.active_profile_id.as_deref().unwrap_or("automatic"),
+            48
+        )
     )];
-    for account in &pool.accounts {
+    for account in pool.accounts.iter().take(8) {
         lines.push(format!(
             "· {} (priority {}) — {}",
             account_display_label(account),
             account.priority,
             availability_label(account)
+        ));
+    }
+    if pool.accounts.len() > 8 {
+        lines.push(format!(
+            "{} more accounts. Run `codex account list` on the host.",
+            pool.accounts.len() - 8
         ));
     }
     lines.join("\n")
@@ -362,7 +349,7 @@ pub(crate) fn overlay_get_account_for_remote_client(
     if !pool.enabled {
         return;
     }
-    let summary = truncate_for_email_field(&format_account_pool_summary(pool));
+    let summary = crate::mobile_account_status::account_caption(pool);
     if let Some(Account::Chatgpt { email, .. }) = response.account.as_mut() {
         *email = Some(summary);
     }
@@ -380,7 +367,7 @@ pub(crate) fn inject_workspace_messages_for_remote_client(
         WorkspaceMessage {
             message_id: LOCAL_WORKSPACE_MESSAGE_ID.to_string(),
             message_type: WorkspaceMessageType::Headline,
-            message_body: format_account_pool_summary(pool),
+            message_body: crate::mobile_account_status::account_caption(pool),
             created_at: Some(Utc::now().timestamp()),
             archived_at: None,
         },
@@ -397,27 +384,21 @@ pub(crate) async fn push_account_pool_warning(
     }
     let notification = ServerNotification::Warning(WarningNotification {
         thread_id: None,
-        message: format_account_pool_summary(pool),
+        message: crate::mobile_account_status::account_caption(pool),
     });
     outgoing
         .send_server_notification_to_connections(connection_ids, notification)
         .await;
 }
 
-pub(crate) async fn push_account_pool_warning_to_remote_clients(
-    outgoing: &OutgoingMessageSender,
-    registry: &RemoteClientRegistry,
-    pool: &AccountPoolReadResponse,
-) {
-    let connection_ids = registry.remote_connection_ids().await;
-    push_account_pool_warning(outgoing, &connection_ids, pool).await;
-}
-
 fn account_display_label(account: &AccountPoolAccount) -> String {
-    match (&account.label, &account.email) {
-        (Some(label), _) => format!("{} ({label})", account.profile_id),
-        (None, Some(email)) => format!("{} ({email})", account.profile_id),
-        (None, None) => account.profile_id.clone(),
+    let id = crate::mobile_account_status::compact_label(&account.profile_id, 48);
+    match account.label.as_deref().or(account.email.as_deref()) {
+        Some(label) => format!(
+            "{id} ({})",
+            crate::mobile_account_status::compact_label(label, 32)
+        ),
+        None => id,
     }
 }
 
@@ -433,23 +414,6 @@ fn availability_label(account: &AccountPoolAccount) -> String {
         }
         AccountPoolAvailability::Disabled => "disabled".to_string(),
     }
-}
-
-fn truncate_for_email_field(text: &str) -> String {
-    const MAX_LEN: usize = 240;
-    if text.len() <= MAX_LEN {
-        return text.to_string();
-    }
-    let mut truncated = text
-        .chars()
-        .take(MAX_LEN.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    truncated
-}
-
-pub(crate) fn shared_remote_client_registry() -> Arc<RemoteClientRegistry> {
-    Arc::new(RemoteClientRegistry::default())
 }
 
 #[cfg(test)]
@@ -510,8 +474,57 @@ mod tests {
                 .rate_limits
                 .limit_name
                 .as_deref()
-                .is_some_and(|name| name.contains("primary"))
+                .is_some_and(|name| name == "Codex · 0/0 ready")
         );
+    }
+
+    #[test]
+    fn status_overlay_keeps_progress_windows_and_other_buckets() {
+        let pool = AccountPoolReadResponse {
+            enabled: true,
+            active_profile_id: Some("primary".to_string()),
+            active_generation: Some(1),
+            accounts: vec![AccountPoolAccount {
+                profile_id: "primary".to_string(),
+                label: Some("Work".to_string()),
+                priority: 0,
+                is_active: true,
+                availability: AccountPoolAvailability::Available,
+                plan_type: None,
+                email: None,
+                rate_limits: AccountPoolRateLimits::default(),
+            }],
+        };
+        let snapshot: codex_app_server_protocol::RateLimitSnapshot = serde_json::from_value(serde_json::json!({
+            "limitId": "codex", "limitName": "Codex",
+            "primary": {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1900000000},
+            "secondary": {"usedPercent": 10, "windowDurationMins": 10080, "resetsAt": 1900100000}
+        })).unwrap();
+        let mut other = snapshot.clone();
+        other.limit_id = Some("other".to_string());
+        other.limit_name = Some("Other model".to_string());
+        let mut response = GetAccountRateLimitsResponse {
+            rate_limits: snapshot.clone(),
+            rate_limits_by_limit_id: Some(HashMap::from([
+                ("codex".to_string(), snapshot.clone()),
+                ("other".to_string(), other.clone()),
+            ])),
+            rate_limit_reset_credits: None,
+            account_id: None,
+            rate_limit_upsell: None,
+        };
+        overlay_get_account_rate_limits_for_remote_client(&mut response, &pool);
+        let mut expected = snapshot;
+        expected.limit_name = Some("Codex · 1/1 ready".to_string());
+        assert_eq!(response.rate_limits, expected);
+        assert_eq!(
+            response.rate_limits_by_limit_id,
+            Some(HashMap::from([
+                ("codex".to_string(), expected),
+                ("other".to_string(), other)
+            ]))
+        );
+        insta::assert_snapshot!(response.rate_limits.limit_name.unwrap(), @"Codex · 1/1 ready");
     }
 
     #[test]
@@ -587,6 +600,10 @@ mod tests {
         inject_workspace_messages_for_remote_client(&mut response, &pool);
         assert_eq!(response.messages.len(), 2);
         assert_eq!(response.messages[0].message_id, LOCAL_WORKSPACE_MESSAGE_ID);
-        assert!(response.messages[0].message_body.contains("primary"));
+        assert!(response.messages[0].message_body.contains("Team"));
     }
 }
+
+#[cfg(test)]
+#[path = "mobile_account_bridge_tests.rs"]
+mod ux_tests;

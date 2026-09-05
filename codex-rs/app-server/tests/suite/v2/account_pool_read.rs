@@ -211,3 +211,177 @@ async fn rate_limits_use_pool_profile_credentials_without_root_auth() -> Result<
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_pool_external_selection_updates_running_server() -> Result<()> {
+    let home = TempDir::new()?;
+    create_config_toml(home.path(), /*chatgpt_base_url*/ None)?;
+    write_models_cache(home.path())?;
+    write_pool_only_fixture(home.path());
+    write_profile_credentials(home.path(), "second", "access-second");
+    let path = home.path().join("account-profiles.json");
+    let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let mut second = manifest["profiles"][0].clone();
+    second["id"] = json!("second");
+    second["priority"] = json!(1);
+    manifest["profiles"].as_array_mut().unwrap().push(second);
+    std::fs::write(path, serde_json::to_vec(&manifest)?)?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let id = mcp
+        .send_get_account_request(GetAccountParams {
+            refresh_token: false,
+        })
+        .await?;
+    let before: GetAccountResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+    assert_eq!(
+        before.account_pool.unwrap().active_profile_id.as_deref(),
+        Some("selected-acct")
+    );
+    codex_login::AccountRuntimeStateStore::new(home.path().to_path_buf()).select(
+        codex_login::AccountProfileId::new("second")?,
+        codex_login::AccountSelectionMode::AvailableOnly,
+    )?;
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let id = mcp
+                .send_get_account_request(GetAccountParams {
+                    refresh_token: false,
+                })
+                .await?;
+            let after: GetAccountResponse = mcp.read_response(id).await?;
+            let pool = after.account_pool.as_ref();
+            if after.account
+                == Some(Account::Chatgpt {
+                    email: Some("second@example.com".to_string()),
+                    plan_type: AccountPlanType::Pro,
+                })
+                && pool.is_some_and(|pool| pool.active_profile_id.as_deref() == Some("second"))
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_pool_read_fetches_quota_before_first_model_request() -> Result<()> {
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+    let home = TempDir::new()?;
+    let server = MockServer::start().await;
+    create_config_toml(home.path(), Some(&server.uri()))?;
+    write_models_cache(home.path())?;
+    write_pool_only_fixture(home.path());
+    Mock::given(method("GET")).and(path("/api/codex/usage"))
+        .and(header("authorization", "Bearer access-selected"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "plan_type": "pro", "rate_limit": {"allowed": true, "limit_reached": false,
+                "primary_window": {"used_percent": 17, "limit_window_seconds": 18000, "reset_after_seconds": 3600, "reset_at": chrono::Utc::now().timestamp() + 3600}
+            }
+        }))).expect(1).mount(&server).await;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let id = mcp.send_raw_request("accountPool/read", None).await?;
+    let response: codex_app_server_protocol::AccountPoolReadResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+    let account = response
+        .accounts
+        .iter()
+        .find(|account| account.profile_id == "selected-acct")
+        .unwrap();
+    assert_eq!(
+        account
+            .rate_limits
+            .primary
+            .as_ref()
+            .map(|window| window.used_percent),
+        Some(17.0)
+    );
+    assert!(account.rate_limits.observed_at.is_some());
+    let observed = account.rate_limits.clone();
+    assert_eq!(response.active_profile_id.as_deref(), Some("selected-acct"));
+    server.verify().await;
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let id = mcp
+        .send_raw_request("accountPool/read", /*params*/ None)
+        .await?;
+    let cached: codex_app_server_protocol::AccountPoolReadResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+    assert_eq!(
+        cached
+            .accounts
+            .iter()
+            .find(|account| account.profile_id == "selected-acct")
+            .unwrap()
+            .rate_limits,
+        observed
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_pool_mobile_query_does_not_add_model_history() -> Result<()> {
+    use codex_app_server_protocol::ClientInfo;
+    use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadStartParams;
+    use codex_app_server_protocol::ThreadStartResponse;
+    use codex_app_server_protocol::TurnStartResponse;
+    let home = TempDir::new()?;
+    create_config_toml(home.path(), /*chatgpt_base_url*/ None)?;
+    write_models_cache(home.path())?;
+    write_pool_only_fixture(home.path());
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
+    mcp.initialize_with_client_info(ClientInfo {
+        name: "codex_chatgpt_ios_remote".to_string(),
+        title: None,
+        version: "1.0".to_string(),
+    })
+    .await?;
+    let id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .await?;
+    let thread: ThreadStartResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+    let id = mcp.send_raw_request("turn/start", Some(json!({"threadId": thread.thread.id, "input": [{"type": "text", "text": "/account", "textElements": []}]}))).await?;
+    let turn: TurnStartResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+    assert_eq!(
+        turn.turn.status,
+        codex_app_server_protocol::TurnStatus::Completed
+    );
+    // `/account` is answered locally for remote clients; it must not depend on model sampling.
+    let status_text = turn
+        .turn
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ThreadItem::AgentMessage { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .expect("local /account status message");
+    assert!(status_text.contains("Codex account pool"));
+    assert!(status_text.contains("selected-acct"));
+    Ok(())
+}

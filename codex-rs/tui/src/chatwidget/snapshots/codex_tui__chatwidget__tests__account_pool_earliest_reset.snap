@@ -1,0 +1,16 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 4319
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Select Codex account
+
+  1. Rotation: fill-first                Prefer the lowest priority among
+                                         eligible profiles.
+› 2. Rotation: earliest-reset (current)  Prefer the profile whose rate-limit
+                                         window resets soonest.
+  3. Automatic                           Let the scheduler pick the next
+                                         eligible profile using the rotation
+                                         strategy above.
+
+  Press enter to confirm or esc to go back

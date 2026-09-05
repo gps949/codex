@@ -12766,3 +12766,29 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
 
     Ok(())
 }
+
+#[tokio::test]
+async fn account_pool_strategy_refreshes_in_existing_session() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let mut next = (*session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .original_config_do_not_use)
+        .clone();
+    next.account_pool.rotation_strategy =
+        Some(codex_config::AccountPoolRotationStrategy::EarliestReset);
+    let expected = next.account_pool.clone();
+    session.refresh_runtime_config(next).await;
+    assert_eq!(
+        session
+            .state
+            .lock()
+            .await
+            .session_configuration
+            .original_config_do_not_use
+            .account_pool,
+        expected
+    );
+}

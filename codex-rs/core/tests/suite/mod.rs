@@ -37,6 +37,7 @@ pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
 mod abort_tasks;
 mod account_failover;
 mod account_failover_recovery;
+mod account_pool_strategy;
 mod account_request_auth;
 mod additional_context;
 mod agent_execution;

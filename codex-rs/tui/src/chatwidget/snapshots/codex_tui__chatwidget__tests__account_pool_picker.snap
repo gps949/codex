@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3564
 expression: popup
 ---
   Select Codex account
@@ -12,7 +13,9 @@ expression: popup
                                          eligible profile using the rotation
                                          strategy above.
   4. primary-acct (Team plan) (current)  priority 0 · available · 42% of 5h
-                                         window used
-  5. backup-acct (backup@example.com)    priority 10 · cooling down
+                                         window used · cached; check time
+                                         unknown
+  5. backup-acct (backup@example.com)    priority 10 · cooling down · quota
+                                         unknown
 
   Press enter to confirm or esc to go back

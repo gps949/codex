@@ -2535,7 +2535,7 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `account/rateLimits/updated` (notify) — emitted whenever a user's ChatGPT rate limits change. This is a sparse rolling update; merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot.
   `spendControlReached` is `true` or `false` when the backend reports spend-control state; `null` means unavailable and must not clear a previously observed value in a sparse update.
 - `account/sendAddCreditsNudgeEmail` — ask ChatGPT to email the workspace owner about depleted credits or a reached usage limit.
-- `accountPool/read` — experimental; report whether the native multi-account pool is enabled, the active profile and scheduler generation, and per-profile availability, plan, email, and observed rate-limit windows. Prefer the stable `accountPool` field on `account/read` and `account/updated` for new clients.
+- `accountPool/read` — experimental; explicitly refresh quota for ready/cooling accounts with up to four concurrent probes, a three-second per-profile timeout, and an eight-second total budget. Failed probes retain cached values and their original observation time. This includes root-backed profiles and never changes execution identity. Report whether the native multi-account pool is enabled, the active profile and scheduler generation, and per-profile availability, plan, email, and observed rate-limit windows. Prefer the stable `accountPool` field on `account/read` and `account/updated` for new clients.
 - `accountPool/use` — experimental; activate a specific account profile (`profileId`, optionally `force` to clear a quota cooldown) or, when `profileId` is omitted, re-enter automatic scheduling using `[account_pool].rotation_strategy` (`fill_first` or `earliest_reset`).
 - `accountPool/updated` (notify) — pushed whenever the pool's scheduling state changes (activation, automatic failover, exhaustion, recovery, or observed rate limits). Stable clients can rely on `account/updated.accountPool` instead; this slimmer notification remains for incremental UI updates.
 
@@ -2543,11 +2543,11 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 
 ChatGPT iOS/Android remote clients (`codex_chatgpt_ios_remote`, `codex_chatgpt_android_remote`) that have not yet been updated to read `accountPool` still receive account-pool status through stable surfaces they already render:
 
-- `account/read` — when authenticated as ChatGPT, `account.email` is temporarily overlaid with a multi-line pool summary (active profile, per-profile availability, cooldowns).
-- `account/workspaceMessages/read` — a local `Headline` workspace message (`messageId: codex-local-account-pool`) is prepended with the same summary.
-- `warning` (notify) — pool changes push a concise text update to connected mobile remote clients only.
-- `account/rateLimits/read` — when the iOS/Android status panel refreshes limits, `rateLimits.limitName` is overlaid with the same pool summary so account-pool state appears beside usage meters without parsing new JSON fields.
-- `turn/start` — when the user sends `/account` or `/status` in chat, the server completes a synthetic turn that streams the pool summary as an `agentMessage` instead of calling the model. Profile switching still requires `codex account use` on the host.
+- `account/read` — when authenticated as ChatGPT, `account.email` shows a bounded active label and a compact ready/total count.
+- `account/workspaceMessages/read` — a local `Headline` workspace message (`messageId: codex-local-account-pool`) contains the same compact account caption.
+- `warning` (notify) — a compact account caption is sent on mobile initialization; ordinary quota updates do not produce repeated pool warnings.
+- `account/rateLimits/read` and thread-scoped `account/rateLimits/updated` — the Codex bucket uses a short `Codex · 2/3 ready` heading. Numeric windows and other model buckets retain their original values. Readiness means scheduler eligibility, not a verified quota balance.
+- `turn/start` — `/account` returns at most eight bounded account rows; `/status` returns a compact caption. These synthetic replies go only to the requesting connection and are not added to model history or persisted rollouts. A running turn rejects these chat queries; the native Status panel remains available. Profile switching supports `codex account use "<label-or-id>"` on the host.
 
 These bridges are server-side only; they do not require App Store updates. Prefer the structured `accountPool` fields for new clients.
 - `mcpServer/oauthLogin/completed` (notify) — emitted after a `mcpServer/oauth/login` flow finishes for a server; payload includes `{ name, threadId, success, error? }`.

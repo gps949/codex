@@ -56,6 +56,13 @@ impl ExecutionAccountPoolHandle {
         self.inner.active_auth_change_receiver()
     }
 
+    pub fn auth_managers(&self) -> Vec<(AccountProfileId, Arc<AuthManager>)> {
+        self.inner
+            .account_pool()
+            .map(|pool| pool.auth_managers())
+            .unwrap_or_default()
+    }
+
     pub async fn activate(
         &self,
         profile_id: &AccountProfileId,

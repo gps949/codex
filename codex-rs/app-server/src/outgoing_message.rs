@@ -102,6 +102,7 @@ pub(crate) enum OutgoingEnvelope {
 
 /// Sends messages to the client and manages request callbacks.
 pub(crate) struct OutgoingMessageSender {
+    pub(crate) remote_clients: Arc<crate::mobile_account_bridge::RemoteClientRegistry>,
     next_server_request_id: AtomicI64,
     sender: mpsc::Sender<OutgoingEnvelope>,
     request_id_to_callback: Mutex<HashMap<RequestId, PendingCallbackEntry>>,
@@ -221,6 +222,7 @@ impl OutgoingMessageSender {
         analytics_events_client: AnalyticsEventsClient,
     ) -> Self {
         Self {
+            remote_clients: Arc::default(),
             next_server_request_id: AtomicI64::new(0),
             sender,
             request_id_to_callback: Mutex::new(HashMap::new()),
@@ -617,11 +619,17 @@ impl OutgoingMessageSender {
             return;
         }
         for connection_id in connection_ids {
+            let mut message = outgoing_message.clone();
+            if let OutgoingMessage::AppServerNotification(envelope) = &mut message {
+                self.remote_clients
+                    .decorate_notification(*connection_id, &mut envelope.notification)
+                    .await;
+            }
             if let Err(err) = self
                 .sender
                 .send(OutgoingEnvelope::ToConnection {
                     connection_id: *connection_id,
-                    message: outgoing_message.clone(),
+                    message,
                     write_complete_tx: None,
                 })
                 .await

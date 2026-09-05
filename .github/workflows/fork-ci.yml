@@ -44,6 +44,11 @@ jobs:
       - name: Prettier on fork-owned files
         run: npx --yes prettier@3.5.3 --check FORK_MAINTENANCE.md .github/workflows/fork-ci.yml .github/workflows/fork-release.yml .github/workflows/upstream-sync-check.yml
 
+      - name: Fork installer and release gate regressions
+        run: |
+          python3 -m unittest discover -s scripts -p test_fork_install.py
+          python3 -m unittest discover -s .github/scripts -p test_fork_release_gate.py
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -79,3 +84,5 @@ jobs:
         run: |
           cargo nextest run --no-fail-fast -p codex-login -p codex-config -p codex-history -p codex-app-server-protocol
           cargo nextest run --no-fail-fast -p codex-core -E 'test(account_failover) or test(failover) or test(account_transition) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration)'
+          cargo nextest run --no-fail-fast -p codex-cli --test account_selection
+          cargo nextest run --no-fail-fast -p codex-app-server -E 'test(account_pool) or test(mobile_account) or test(status_overlay)'

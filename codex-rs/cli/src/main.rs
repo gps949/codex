@@ -45,6 +45,7 @@ use supports_color::Stream;
 
 mod account_cmd;
 mod account_config;
+mod account_selector;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
 mod cloud_config;
@@ -618,7 +619,8 @@ enum AccountSubcommand {
 
     /// Select the active account profile.
     Use {
-        /// Account profile id to activate.
+        /// Exact profile ID or unique label to activate (IDs take precedence).
+        #[arg(value_name = "ID_OR_LABEL")]
         profile_id: String,
 
         /// Clear a quota cooldown on the target profile before activating it.

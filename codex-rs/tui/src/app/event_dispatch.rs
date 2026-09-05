@@ -1265,6 +1265,7 @@ impl App {
                             format!("Account rotation strategy set to {label}."),
                             /*hint*/ None,
                         );
+                        self.refresh_account_pool(app_server);
                     }
                     Err(error) => {
                         self.chat_widget.add_error_message(format!(
