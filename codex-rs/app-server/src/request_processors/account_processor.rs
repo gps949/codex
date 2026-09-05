@@ -1405,6 +1405,16 @@ impl AccountRequestProcessor {
                 })
         });
 
+        // Match desktop's account readiness check before exposing account-bound CTA content.
+        // Normal rate limits remain available when older backends omit identity or banner data.
+        let rate_limit_upsell = response.rate_limit_upsell.filter(|_| {
+            !auth.is_fedramp_account()
+                && response.account_id.is_some()
+                && response.account_id == auth.get_account_id()
+                && response.user_id.is_some()
+                && response.user_id == auth.get_chatgpt_user_id()
+        });
+
         let mut response = GetAccountRateLimitsResponse {
             rate_limits: rate_limits.into(),
             rate_limits_by_limit_id: Some(
@@ -1414,6 +1424,8 @@ impl AccountRequestProcessor {
                     .collect(),
             ),
             rate_limit_reset_credits,
+            account_id: response.account_id,
+            rate_limit_upsell,
         };
         if is_chatgpt_remote_client(client_name)
             && let Ok(pool) = self.get_account_pool_response().await
