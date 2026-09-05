@@ -1159,6 +1159,10 @@ impl AccountRequestProcessor {
         let include_token = params.include_token.unwrap_or(false);
         let do_refresh = params.refresh_token.unwrap_or(false);
 
+        // Pool credentials live under per-profile homes and are presented through ExternalAuth.
+        // Install before reading auth so pool-only setups are not reported as logged out.
+        let _ = self.get_account_pool_response().await?;
+
         self.refresh_token_if_requested(do_refresh).await;
 
         // Determine whether auth is required based on the active model provider.
@@ -1233,6 +1237,11 @@ impl AccountRequestProcessor {
     ) -> Result<GetAccountResponse, JSONRPCErrorError> {
         let do_refresh = params.refresh_token;
 
+        // Install the pool before reading account state. `account_state()` uses auth_cached(),
+        // and pool-only logins have no root auth.json until AccountPoolExternalAuth is wired in.
+        // Reading first made `codex account use` + TUI/`codex continue` show the login screen.
+        let account_pool = Some(self.get_account_pool_response().await?);
+
         self.refresh_token_if_requested(do_refresh).await;
 
         let config = self.load_latest_config().await;
@@ -1243,8 +1252,6 @@ impl AccountRequestProcessor {
             Err(err) => return Err(invalid_request(err.to_string())),
         };
         let account = account_state.account.map(Account::from);
-
-        let account_pool = Some(self.get_account_pool_response().await?);
 
         let mut response = GetAccountResponse {
             account,
@@ -1347,6 +1354,10 @@ impl AccountRequestProcessor {
         &self,
         client_name: Option<&str>,
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
+        // Same ordering requirement as account/read: pool ExternalAuth must be installed before
+        // resolving ChatGPT credentials from per-profile credential homes.
+        let account_pool = self.get_account_pool_response().await?;
+
         let Some(auth) = self.auth_manager.auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to read rate limits",
@@ -1427,10 +1438,8 @@ impl AccountRequestProcessor {
             account_id: response.account_id,
             rate_limit_upsell,
         };
-        if is_chatgpt_remote_client(client_name)
-            && let Ok(pool) = self.get_account_pool_response().await
-        {
-            overlay_get_account_rate_limits_for_remote_client(&mut response, &pool);
+        if is_chatgpt_remote_client(client_name) {
+            overlay_get_account_rate_limits_for_remote_client(&mut response, &account_pool);
         }
         Ok(response)
     }
@@ -1446,6 +1455,8 @@ impl AccountRequestProcessor {
                     .map_err(|err| invalid_request(format!("invalid thread id: {err}")))
             })
             .transpose()?;
+
+        let _ = self.get_account_pool_response().await?;
 
         let Some(auth) = self.auth_manager.auth().await else {
             return Err(invalid_request(
@@ -1533,6 +1544,8 @@ impl AccountRequestProcessor {
         &self,
         client_name: Option<&str>,
     ) -> Result<GetWorkspaceMessagesResponse, JSONRPCErrorError> {
+        let account_pool = self.get_account_pool_response().await?;
+
         let Some(auth) = self.auth_manager.auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to read workspace messages",
@@ -1575,10 +1588,8 @@ impl AccountRequestProcessor {
                 )));
             }
         };
-        if is_chatgpt_remote_client(client_name)
-            && let Ok(pool) = self.get_account_pool_response().await
-        {
-            inject_workspace_messages_for_remote_client(&mut response, &pool);
+        if is_chatgpt_remote_client(client_name) {
+            inject_workspace_messages_for_remote_client(&mut response, &account_pool);
         }
         Ok(response)
     }
@@ -1633,6 +1644,8 @@ impl AccountRequestProcessor {
         &self,
         params: SendAddCreditsNudgeEmailParams,
     ) -> Result<AddCreditsNudgeEmailStatus, JSONRPCErrorError> {
+        let _ = self.get_account_pool_response().await?;
+
         let Some(auth) = self.auth_manager.auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to notify workspace owner",
