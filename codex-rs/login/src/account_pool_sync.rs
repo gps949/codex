@@ -168,6 +168,28 @@ impl AccountPool {
         }) {
             merged.active_profile_id = state.active_profile.clone();
         }
+        // HashMap iteration order is nondeterministic; keep persisted profiles stable and
+        // aligned with AccountPool::snapshots (priority, then id).
+        merged.profiles.sort_by(|left, right| {
+            let priority_for = |profile_id: &AccountProfileId| {
+                state
+                    .accounts
+                    .get(profile_id)
+                    .map(|account| account.profile.priority)
+                    .or_else(|| {
+                        profiles.and_then(|records| {
+                            records
+                                .iter()
+                                .find(|record| &record.profile.id == profile_id)
+                                .map(|record| record.profile.priority)
+                        })
+                    })
+                    .unwrap_or(u32::MAX)
+            };
+            priority_for(&left.profile_id)
+                .cmp(&priority_for(&right.profile_id))
+                .then_with(|| left.profile_id.as_str().cmp(right.profile_id.as_str()))
+        });
         drop(state);
         if changed {
             self.notify_change();

@@ -407,6 +407,32 @@ async fn running_pool_applies_external_disable_and_metadata_updates() {
 }
 
 #[tokio::test]
+async fn synchronize_pool_persists_profiles_in_priority_order() {
+    let home = TempDir::new().unwrap();
+    let pool = AccountPool::new();
+    let manager = test_auth_manager(home.path()).await;
+    // Register higher priority second so HashMap insertion order differs from priority order.
+    pool.register(profile("backup", 10), Arc::clone(&manager))
+        .unwrap();
+    pool.register(profile("primary", 0), manager).unwrap();
+    pool.activate(&AccountProfileId::new("primary").unwrap())
+        .unwrap();
+    let store = crate::AccountRuntimeStateStore::new(home.path().to_path_buf());
+    let mut previous = AccountRuntimeState::default();
+    store.synchronize_pool(&pool, &mut previous).unwrap();
+    assert_eq!(
+        store
+            .load()
+            .unwrap()
+            .profiles
+            .iter()
+            .map(|profile| profile.profile_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["primary", "backup"]
+    );
+}
+
+#[tokio::test]
 async fn explicitly_removed_root_profile_stays_out_of_pool_after_restart() {
     let home = TempDir::new().unwrap();
     save_auth(

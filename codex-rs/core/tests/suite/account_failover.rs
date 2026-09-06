@@ -834,17 +834,28 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::R
         json!("backup-acct"),
         "unexpected runtime state: {runtime_state:#}"
     );
+    let profiles = runtime_state["profiles"]
+        .as_array()
+        .expect("persisted runtime profiles");
     assert_eq!(
-        runtime_state["profiles"][0]["profile_id"],
-        json!("primary-acct")
+        profiles
+            .iter()
+            .map(|profile| profile["profile_id"].as_str())
+            .collect::<Vec<_>>(),
+        vec![Some("primary-acct"), Some("backup-acct")],
+        "runtime profiles must stay priority-ordered: {runtime_state:#}"
     );
-    assert!(runtime_state["profiles"][0]["exhausted_until"].is_string());
-    assert_eq!(
-        runtime_state["profiles"][1]["profile_id"],
-        json!("backup-acct")
-    );
+    let primary_state = profiles
+        .iter()
+        .find(|profile| profile["profile_id"] == "primary-acct")
+        .expect("persisted primary runtime state");
+    assert!(primary_state["exhausted_until"].is_string());
+    let backup_state = profiles
+        .iter()
+        .find(|profile| profile["profile_id"] == "backup-acct")
+        .expect("persisted backup runtime state");
     assert!(
-        runtime_state["profiles"][1]["exhausted_until"].is_null(),
+        backup_state["exhausted_until"].is_null(),
         "the backup profile must remain available: {runtime_state:#}"
     );
 
