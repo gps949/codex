@@ -171,6 +171,32 @@ jobs:
             cargo build --release --target ${{ matrix.target }} --bin bwrap
           fi
 
+      # Upstream release builds keep `strip = false` so debug info can be archived
+      # into separate symbols packages, then strips the shipped binaries. The fork
+      # does not publish symbols archives, so strip here or installers stay ~30%+
+      # larger than the official CLI tarball for the same target.
+      - name: Strip release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="codex-rs/target/${{ matrix.target }}/release"
+          case "${{ matrix.target }}" in
+            *apple-darwin)
+              for binary in codex codex-code-mode-host codex-responses-api-proxy; do
+                strip -S -x "$release_dir/$binary"
+              done
+              ;;
+            *linux*)
+              for binary in codex codex-code-mode-host codex-responses-api-proxy bwrap; do
+                strip --strip-debug --strip-unneeded "$release_dir/$binary"
+              done
+              ;;
+            *windows*)
+              # MSVC release artifacts are already smaller without a separate strip
+              # pass; PDBs stay out of the zip because we only copy the .exe files.
+              ;;
+          esac
+
       - name: Package
         shell: bash
         run: |

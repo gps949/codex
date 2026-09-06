@@ -619,11 +619,14 @@ impl OutgoingMessageSender {
             return;
         }
         for connection_id in connection_ids {
-            let mut message = outgoing_message.clone();
-            if let OutgoingMessage::AppServerNotification(envelope) = &mut message {
-                self.remote_clients
-                    .decorate_notification(*connection_id, &mut envelope.notification)
-                    .await;
+            let message = outgoing_message.clone();
+            if let OutgoingMessage::AppServerNotification(envelope) = &message
+                && self
+                    .remote_clients
+                    .suppress_unattributed_quota(*connection_id, &envelope.notification)
+                    .await
+            {
+                continue;
             }
             if let Err(err) = self
                 .sender

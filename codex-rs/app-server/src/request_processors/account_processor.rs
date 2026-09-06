@@ -24,6 +24,7 @@ use codex_model_provider::is_supported_amazon_bedrock_region;
 use codex_protocol::ThreadId;
 
 mod bedrock_setup;
+mod mobile_commands;
 mod pool_quota;
 mod rate_limit_resets;
 
@@ -173,46 +174,6 @@ impl AccountRequestProcessor {
             return;
         };
         push_account_pool_warning(&self.outgoing, &[connection_id], &pool).await;
-    }
-
-    pub(crate) async fn try_handle_mobile_slash_turn(
-        &self,
-        request_id: ConnectionRequestId,
-        params: TurnStartParams,
-        client_name: Option<&str>,
-    ) -> Result<Option<TurnStartResponse>, JSONRPCErrorError> {
-        let Some(command) = mobile_slash_command(&params.input, client_name) else {
-            return Ok(None);
-        };
-
-        let thread_id = ThreadId::from_string(&params.thread_id)
-            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
-        let thread = self
-            .thread_manager
-            .get_thread(thread_id)
-            .await
-            .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
-        super::thread_input::ensure_direct_input_allowed(thread.as_ref()).await?;
-        if matches!(
-            thread.agent_status().await,
-            codex_protocol::protocol::AgentStatus::Running
-        ) {
-            return Err(invalid_request(
-                "A turn is running. Open the Status panel or wait for it to finish.",
-            ));
-        }
-
-        let pool = self.get_account_pool_response().await?;
-        let response = complete_mobile_slash_turn(
-            &self.outgoing,
-            &request_id,
-            thread_id,
-            &params,
-            &pool,
-            command,
-        )
-        .await;
-        Ok(Some(response))
     }
 
     pub(crate) async fn login_account(
@@ -1373,13 +1334,28 @@ impl AccountRequestProcessor {
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
         // Same ordering requirement as account/read: pool ExternalAuth must be installed before
         // resolving ChatGPT credentials from per-profile credential homes.
-        let account_pool = self.get_account_pool_response().await?;
+        let mut account_pool = self.get_account_pool_response().await?;
 
         let Some(auth) = self.auth_manager.auth().await else {
             return Err(invalid_request(
                 "codex account authentication required to read rate limits",
             ));
         };
+
+        let requested_token = auth.get_token().ok();
+        let snapshot_auth_matches = requested_token.as_ref().is_some_and(|token| {
+            self.execution_account_pool
+                .auth_managers()
+                .iter()
+                .any(|(id, manager)| {
+                    Some(id.as_str()) == account_pool.active_profile_id.as_deref()
+                        && manager
+                            .auth_cached()
+                            .and_then(|auth| auth.get_token().ok())
+                            .as_ref()
+                            == Some(token)
+                })
+        });
 
         if !auth.uses_codex_backend() {
             return Err(invalid_request(
@@ -1456,6 +1432,20 @@ impl AccountRequestProcessor {
             rate_limit_upsell,
         };
         if is_chatgpt_remote_client(client_name) {
+            // A selection can change while authentication or the network request is awaiting.
+            // Never apply the earlier account's name to an unproven quota identity.
+            let active = self.execution_account_pool.active_identity();
+            if !snapshot_auth_matches
+                || active.as_ref().map(|identity| identity.profile_id.as_str())
+                    != account_pool.active_profile_id.as_deref()
+                || active.as_ref().map(|identity| identity.generation)
+                    != account_pool.active_generation
+            {
+                for account in &mut account_pool.accounts {
+                    account.is_active = false;
+                }
+                account_pool.active_profile_id = None;
+            }
             overlay_get_account_rate_limits_for_remote_client(&mut response, &account_pool);
         }
         Ok(response)
@@ -1584,14 +1574,13 @@ impl AccountRequestProcessor {
             ACCOUNT_WORKSPACE_MESSAGES_FETCH_TIMEOUT,
             client.list_workspace_messages(),
         )
-        .await
-        .map_err(|_| internal_error("workspace messages fetch timed out"))?;
+        .await;
 
         let mut response = match messages {
-            Ok(messages) => {
+            Ok(Ok(messages)) => {
                 Self::workspace_messages_response(messages, /*feature_enabled*/ true)?
             }
-            Err(err) if workspace_messages_feature_disabled(&err) => {
+            Ok(Err(err)) if workspace_messages_feature_disabled(&err) => {
                 Self::workspace_messages_response(
                     BackendWorkspaceMessagesResponse {
                         messages: Vec::new(),
@@ -1599,11 +1588,21 @@ impl AccountRequestProcessor {
                     /*feature_enabled*/ false,
                 )?
             }
-            Err(err) => {
+            Ok(Err(_)) | Err(_)
+                if is_chatgpt_remote_client(client_name) && account_pool.enabled =>
+            {
+                // Local account status must survive an unavailable optional banner service.
+                GetWorkspaceMessagesResponse {
+                    feature_enabled: true,
+                    messages: Vec::new(),
+                }
+            }
+            Ok(Err(err)) => {
                 return Err(internal_error(format!(
                     "failed to fetch workspace messages: {err}"
                 )));
             }
+            Err(_) => return Err(internal_error("workspace messages fetch timed out")),
         };
         if is_chatgpt_remote_client(client_name) {
             inject_workspace_messages_for_remote_client(&mut response, &account_pool);

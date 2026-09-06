@@ -14,8 +14,6 @@ use std::time::UNIX_EPOCH;
 
 use chrono::Utc;
 use codex_app_server_protocol::Account;
-use codex_app_server_protocol::AccountPoolAccount;
-use codex_app_server_protocol::AccountPoolAvailability;
 use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
@@ -35,7 +33,6 @@ use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_app_server_protocol::WarningNotification;
 use codex_app_server_protocol::WorkspaceMessage;
 use codex_app_server_protocol::WorkspaceMessageType;
-use codex_login::format_exhausted_reset_unix;
 use codex_protocol::ThreadId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -106,8 +103,7 @@ pub(crate) async fn complete_mobile_slash_turn(
     request_id: &ConnectionRequestId,
     thread_id: ThreadId,
     params: &TurnStartParams,
-    pool: &AccountPoolReadResponse,
-    command: MobileSlashCommand,
+    agent_text: String,
 ) -> TurnStartResponse {
     let connection_ids = [request_id.connection_id];
     let turn_id = Uuid::new_v4().to_string();
@@ -115,18 +111,10 @@ pub(crate) async fn complete_mobile_slash_turn(
     let agent_item_id = Uuid::new_v4().to_string();
     let thread_id_string = thread_id.to_string();
     let started_at_ms = now_unix_timestamp_ms();
-    let default_command = match command {
-        MobileSlashCommand::Account => "/account",
-        MobileSlashCommand::Status => "/status",
-    };
     let user_text = single_text_input(&params.input)
         .map(str::trim)
-        .unwrap_or(default_command)
+        .unwrap_or("/account")
         .to_string();
-    let agent_text = match command {
-        MobileSlashCommand::Account => mobile_account_slash_reply(pool),
-        MobileSlashCommand::Status => mobile_status_slash_reply(pool),
-    };
 
     outgoing.record_request_turn_id(request_id, &turn_id).await;
 
@@ -212,26 +200,6 @@ pub(crate) async fn complete_mobile_slash_turn(
     }
 }
 
-fn mobile_account_slash_reply(pool: &AccountPoolReadResponse) -> String {
-    let mut lines = vec![format_account_pool_summary(pool)];
-    if pool.enabled {
-        lines.push(String::new());
-        lines.push(host_account_switch_hint());
-    }
-    lines.join("\n")
-}
-
-fn mobile_status_slash_reply(pool: &AccountPoolReadResponse) -> String {
-    format!(
-        "{}\nUsage bars show the executing account's limits. Ready counts describe scheduler availability, not verified quota.",
-        crate::mobile_account_status::account_caption(pool)
-    )
-}
-
-fn host_account_switch_hint() -> String {
-    r#"Switch profiles on the host with `codex account use "<label-or-id>"`."#.to_string()
-}
-
 pub(crate) fn overlay_get_account_rate_limits_for_remote_client(
     response: &mut GetAccountRateLimitsResponse,
     pool: &AccountPoolReadResponse,
@@ -299,47 +267,20 @@ impl RemoteClientRegistry {
         self.clients.lock().await.remove(&connection_id);
     }
 
-    pub(crate) async fn decorate_notification(
+    pub(crate) async fn suppress_unattributed_quota(
         &self,
         connection_id: ConnectionId,
-        notification: &mut ServerNotification,
-    ) {
-        if let ServerNotification::AccountRateLimitsUpdated(update) = notification
-            && self.clients.lock().await.contains_key(&connection_id)
-            && let Some(caption) = self.caption.lock().await.as_deref()
-        {
-            crate::mobile_account_status::overlay_snapshot(&mut update.rate_limits, caption);
-        }
+        notification: &ServerNotification,
+    ) -> bool {
+        // Streaming quota updates carry no profile identity. After a concurrent account
+        // switch they may belong to an old in-flight request. Mobile must refetch the
+        // authenticated snapshot instead of assigning these numbers to the new caption.
+        matches!(
+            notification,
+            ServerNotification::AccountRateLimitsUpdated(_)
+        ) && self.clients.lock().await.contains_key(&connection_id)
+            && self.caption.lock().await.is_some()
     }
-}
-
-pub(crate) fn format_account_pool_summary(pool: &AccountPoolReadResponse) -> String {
-    if !pool.enabled {
-        return "Multi-account pool is not configured. Add profiles with `codex account add` on the host.".to_string();
-    }
-
-    let mut lines = vec![format!(
-        "Codex account pool · active: {}",
-        crate::mobile_account_status::compact_label(
-            pool.active_profile_id.as_deref().unwrap_or("automatic"),
-            48
-        )
-    )];
-    for account in pool.accounts.iter().take(8) {
-        lines.push(format!(
-            "· {} (priority {}) — {}",
-            account_display_label(account),
-            account.priority,
-            availability_label(account)
-        ));
-    }
-    if pool.accounts.len() > 8 {
-        lines.push(format!(
-            "{} more accounts. Run `codex account list` on the host.",
-            pool.accounts.len() - 8
-        ));
-    }
-    lines.join("\n")
 }
 
 pub(crate) fn overlay_get_account_for_remote_client(
@@ -362,6 +303,7 @@ pub(crate) fn inject_workspace_messages_for_remote_client(
     if !pool.enabled {
         return;
     }
+    response.feature_enabled = true;
     response.messages.insert(
         0,
         WorkspaceMessage {
@@ -391,34 +333,11 @@ pub(crate) async fn push_account_pool_warning(
         .await;
 }
 
-fn account_display_label(account: &AccountPoolAccount) -> String {
-    let id = crate::mobile_account_status::compact_label(&account.profile_id, 48);
-    match account.label.as_deref().or(account.email.as_deref()) {
-        Some(label) => format!(
-            "{id} ({})",
-            crate::mobile_account_status::compact_label(label, 32)
-        ),
-        None => id,
-    }
-}
-
-fn availability_label(account: &AccountPoolAccount) -> String {
-    match &account.availability {
-        AccountPoolAvailability::Available => "available".to_string(),
-        AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
-            Some(until) => format!("cooldown until {}", format_exhausted_reset_unix(*until)),
-            None => "cooling down".to_string(),
-        },
-        AccountPoolAvailability::AuthenticationUnavailable { .. } => {
-            "login required on host".to_string()
-        }
-        AccountPoolAvailability::Disabled => "disabled".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_app_server_protocol::AccountPoolAccount;
+    use codex_app_server_protocol::AccountPoolAvailability;
     use codex_app_server_protocol::AccountPoolRateLimits;
     use pretty_assertions::assert_eq;
 
@@ -515,7 +434,7 @@ mod tests {
         };
         overlay_get_account_rate_limits_for_remote_client(&mut response, &pool);
         let mut expected = snapshot;
-        expected.limit_name = Some("Codex · 1/1 ready".to_string());
+        expected.limit_name = Some("Work · 1/1 ready".to_string());
         assert_eq!(response.rate_limits, expected);
         assert_eq!(
             response.rate_limits_by_limit_id,
@@ -524,7 +443,7 @@ mod tests {
                 ("other".to_string(), other)
             ]))
         );
-        insta::assert_snapshot!(response.rate_limits.limit_name.unwrap(), @"Codex · 1/1 ready");
+        insta::assert_snapshot!(response.rate_limits.limit_name.unwrap(), @"Work · 1/1 ready");
     }
 
     #[test]
@@ -559,18 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn mobile_account_slash_reply_includes_host_switch_hint_when_pool_enabled() {
-        let pool = AccountPoolReadResponse {
-            enabled: true,
-            active_profile_id: Some("primary".to_string()),
-            active_generation: Some(1),
-            accounts: vec![],
-        };
-        let reply = mobile_account_slash_reply(&pool);
-        assert!(reply.contains("codex account use"));
-    }
-
-    #[test]
     fn workspace_message_injection_prepends_pool_headline() {
         let pool = AccountPoolReadResponse {
             enabled: true,
@@ -588,7 +495,7 @@ mod tests {
             }],
         };
         let mut response = GetWorkspaceMessagesResponse {
-            feature_enabled: true,
+            feature_enabled: false,
             messages: vec![WorkspaceMessage {
                 message_id: "backend-1".to_string(),
                 message_type: WorkspaceMessageType::Announcement,
@@ -598,6 +505,7 @@ mod tests {
             }],
         };
         inject_workspace_messages_for_remote_client(&mut response, &pool);
+        assert!(response.feature_enabled);
         assert_eq!(response.messages.len(), 2);
         assert_eq!(response.messages[0].message_id, LOCAL_WORKSPACE_MESSAGE_ID);
         assert!(response.messages[0].message_body.contains("Team"));

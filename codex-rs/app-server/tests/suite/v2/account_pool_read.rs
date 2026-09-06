@@ -381,7 +381,191 @@ async fn account_pool_mobile_query_does_not_add_model_history() -> Result<()> {
             _ => None,
         })
         .expect("local /account status message");
-    assert!(status_text.contains("Codex account pool"));
+    assert!(status_text.contains("Accounts"));
     assert!(status_text.contains("selected-acct"));
+    Ok(())
+}
+
+#[test_case::test_case(false; "effective")]
+#[test_case::test_case(true; "overridden")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool) -> Result<()> {
+    use codex_app_server_protocol::ClientInfo;
+    use codex_app_server_protocol::ThreadStartParams;
+    use codex_app_server_protocol::ThreadStartResponse;
+    use codex_app_server_protocol::TurnStartResponse;
+    let home = TempDir::new()?;
+    create_config_toml(home.path(), Some("http://127.0.0.1:9"))?;
+    write_models_cache(home.path())?;
+    write_pool_only_fixture(home.path());
+    write_profile_credentials(home.path(), "work", "access-work");
+    let manifest = home.path().join("account-profiles.json");
+    let mut profiles: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+    profiles["profiles"]
+        .as_array_mut()
+        .expect("profile array")
+        .push(json!({
+            "id": "work", "label": "Work Pro", "priority": 10,
+            "credential_location": "managed_profile", "state": "ready", "disabled": false
+        }));
+    std::fs::write(manifest, serde_json::to_vec(&profiles)?)?;
+    let mut builder = TestAppServer::builder().with_codex_home(home.path());
+    if overridden {
+        builder = builder.with_args(&["-c", "account_pool.rotation_strategy=\"fill_first\""]);
+    }
+    let mut mcp = builder.build().await?;
+    mcp.initialize_with_client_info(ClientInfo {
+        name: "codex_chatgpt_ios_remote".to_string(),
+        title: None,
+        version: "1.0".to_string(),
+    })
+    .await?;
+    let id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .await?;
+    let thread: ThreadStartResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+    for (command, expected) in [
+        ("/account use \"Work Pro\"", "Selected: Work Pro"),
+        (
+            "/account strategy earliest-reset",
+            if overridden {
+                "overridden"
+            } else {
+                "Strategy: earliest-reset"
+            },
+        ),
+        (
+            "/account strategy",
+            if overridden {
+                "Strategy: fill-first"
+            } else {
+                "Strategy: earliest-reset"
+            },
+        ),
+        ("/account show \"Work Pro\"", "Work Pro"),
+        ("/account nonsense", "Unknown /account command"),
+        ("/account list 0", "Usage: /account list"),
+        ("/account list 999", "Page out of range"),
+        ("/account auto extra", "Usage: /account auto"),
+        ("/account use missing", "Account not found"),
+        ("/account strategy invalid", "Usage: /account strategy"),
+        ("/status extra", "Usage: /status"),
+    ] {
+        let id = mcp
+            .send_raw_request(
+                "turn/start",
+                Some(json!({
+                    "threadId": thread.thread.id,
+                    "input": [{"type":"text", "text": command, "textElements": []}]
+                })),
+            )
+            .await?;
+        let reply: TurnStartResponse =
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+        let text = serde_json::to_string(&reply.turn.items)?;
+        assert!(text.contains(expected), "{command}: {text}");
+    }
+    let id = mcp
+        .send_raw_request("account/workspaceMessages/read", None)
+        .await?;
+    let messages: codex_app_server_protocol::GetWorkspaceMessagesResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+    assert!(messages.feature_enabled);
+    assert!(
+        messages
+            .messages
+            .iter()
+            .any(|message| message.message_body.contains("Work Pro"))
+    );
+    let runtime: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        home.path().join("account-runtime-state.json"),
+    )?)?;
+    assert_eq!(runtime["active_profile_id"], json!("work"));
+    let config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(home.path().join("config.toml"))?)?;
+    assert_eq!(
+        config["account_pool"]["rotation_strategy"].as_str(),
+        Some("earliest_reset")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_pool_mobile_quota_read_during_switch_does_not_mislabel() -> Result<()> {
+    use codex_app_server_protocol::ClientInfo;
+    use codex_app_server_protocol::GetAccountRateLimitsResponse;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+    let home = TempDir::new()?;
+    let server = MockServer::start().await;
+    create_config_toml(home.path(), Some(&server.uri()))?;
+    write_models_cache(home.path())?;
+    write_pool_only_fixture(home.path());
+    write_profile_credentials(home.path(), "work", "access-work");
+    let manifest = home.path().join("account-profiles.json");
+    let mut profiles: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+    profiles["profiles"].as_array_mut().expect("profiles").push(json!({
+        "id":"work", "label":"Work", "priority":10, "credential_location":"managed_profile", "state":"ready", "disabled":false
+    }));
+    std::fs::write(manifest, serde_json::to_vec(&profiles)?)?;
+    Mock::given(method("GET")).and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(1)).set_body_json(json!({
+            "account_id":"account-selected-acct", "plan_type":"pro", "rate_limit":{
+                "allowed":true, "limit_reached":false, "primary_window":{
+                    "used_percent":77, "limit_window_seconds":3600, "reset_after_seconds":3600,
+                    "reset_at":chrono::Utc::now().timestamp()+3600
+                }
+            }
+        }))).mount(&server).await;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .build()
+        .await?;
+    mcp.initialize_with_client_info(ClientInfo {
+        name: "codex_chatgpt_ios_remote".into(),
+        title: None,
+        version: "1.0".into(),
+    })
+    .await?;
+    let read_id = mcp.send_get_account_rate_limits_request().await?;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            if server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|request| request.url.path() == "/api/codex/usage")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let use_id = mcp
+        .send_raw_request("accountPool/use", Some(json!({"profileId":"work"})))
+        .await?;
+    let selected: codex_app_server_protocol::AccountPoolUseResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(use_id)).await??;
+    assert_eq!(selected.active_profile_id, "work");
+    let response: GetAccountRateLimitsResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
+    assert_eq!(
+        response.rate_limits.limit_name.as_deref(),
+        Some("Codex · 2/2 ready")
+    );
+    assert_eq!(
+        response
+            .rate_limits
+            .primary
+            .expect("primary quota")
+            .used_percent,
+        77
+    );
     Ok(())
 }
