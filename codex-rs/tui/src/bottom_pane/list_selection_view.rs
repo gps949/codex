@@ -137,6 +137,9 @@ pub(crate) struct SelectionItem {
     pub toggle_placeholder: Option<&'static str>,
     pub display_shortcut: Option<ShortcutHint>,
     pub description: Option<String>,
+    /// Styled alternative to `description`. When non-empty, these spans are
+    /// rendered in the description column and preserve their colors while wrapping.
+    pub description_spans: Vec<Span<'static>>,
     pub selected_description: Option<String>,
     pub is_current: bool,
     pub is_default: bool,
@@ -618,13 +621,20 @@ impl ListSelectionView {
                         .then(|| item.selected_description.clone())
                         .flatten()
                         .or_else(|| item.description.clone());
-                    let wrap_indent = description.is_none().then_some(wrap_prefix_width);
+                    let description_spans = if is_selected && item.selected_description.is_some() {
+                        Vec::new()
+                    } else {
+                        item.description_spans.clone()
+                    };
+                    let wrap_indent = (description.is_none() && description_spans.is_empty())
+                        .then_some(wrap_prefix_width);
                     GenericDisplayRow {
                         name: name_with_marker,
                         name_prefix_spans,
                         display_shortcut: item.display_shortcut,
                         match_indices: None,
                         description,
+                        description_spans,
                         category_tag: None,
                         wrap_indent,
                         is_disabled,

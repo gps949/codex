@@ -92,6 +92,19 @@ impl ExecutionAccountPoolHandle {
         self.inner.compatibility_auth_manager().reload().await;
         Ok(identity)
     }
+
+    pub async fn force_activate_automatic(
+        &self,
+    ) -> Result<ExecutionAccountIdentity, AccountPoolError> {
+        let pool = self
+            .inner
+            .account_pool()
+            .ok_or(AccountPoolError::NoEligibleAccount)?;
+        let lease = pool.force_activate_automatic()?;
+        let identity = identity_from_lease(&lease);
+        self.inner.compatibility_auth_manager().reload().await;
+        Ok(identity)
+    }
 }
 
 fn identity_from_lease(lease: &AccountLease) -> ExecutionAccountIdentity {

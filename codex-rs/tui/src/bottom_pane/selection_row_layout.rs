@@ -50,33 +50,41 @@ pub(super) fn line_to_owned(line: Line<'_>) -> Line<'static> {
     }
 }
 
-fn combined_description(
+pub(super) fn combined_description_line(
     row: &GenericDisplayRow,
     description_layout: SelectionDescriptionLayout,
-) -> Option<String> {
-    match (&row.description, &row.disabled_reason) {
-        (Some(desc), Some(reason)) => Some(format!("{desc} (disabled: {reason})")),
-        (Some(desc), None) => Some(desc.clone()),
-        (None, Some(reason))
-            if matches!(
-                description_layout,
-                SelectionDescriptionLayout::StackBelowWhenNarrow { .. }
-            ) =>
-        {
-            Some(reason.clone())
+) -> Option<Line<'static>> {
+    let mut spans = if row.description_spans.is_empty() {
+        row.description
+            .as_ref()
+            .map(|description| vec![description.clone().dim()])
+            .unwrap_or_default()
+    } else {
+        row.description_spans.clone()
+    };
+    if let Some(reason) = &row.disabled_reason {
+        if !spans.is_empty() {
+            spans.push(" ".into());
+            spans.push(format!("(disabled: {reason})").dim());
+        } else if matches!(
+            description_layout,
+            SelectionDescriptionLayout::StackBelowWhenNarrow { .. }
+        ) {
+            spans.push(reason.clone().dim());
+        } else {
+            spans.push(format!("disabled: {reason}").dim());
         }
-        (None, Some(reason)) => Some(format!("disabled: {reason}")),
-        (None, None) => None,
     }
+    (!spans.is_empty()).then(|| Line::from(spans))
 }
 
-fn stacked_description(row: &GenericDisplayRow) -> Option<String> {
-    match (&row.description, &row.disabled_reason) {
-        (Some(desc), Some(reason)) => Some(format!("{desc} (disabled: {reason})")),
-        (Some(desc), None) => Some(desc.clone()),
-        (None, Some(reason)) => Some(reason.clone()),
-        (None, None) => None,
-    }
+fn stacked_description(row: &GenericDisplayRow) -> Option<Line<'static>> {
+    combined_description_line(
+        row,
+        SelectionDescriptionLayout::StackBelowWhenNarrow {
+            min_description_width: 0,
+        },
+    )
 }
 
 fn build_name_spans(row: &GenericDisplayRow, name_limit: usize) -> Vec<Span<'static>> {
@@ -139,7 +147,7 @@ pub(super) fn build_full_line(
     desc_col: usize,
     description_layout: SelectionDescriptionLayout,
 ) -> Line<'static> {
-    let description = combined_description(row, description_layout);
+    let description = combined_description_line(row, description_layout);
     let name_prefix_width = line_width(&Line::from(row.name_prefix_spans.clone()));
     let name_limit = description
         .as_ref()
@@ -156,7 +164,7 @@ pub(super) fn build_full_line(
         if gap > 0 {
             spans.push(" ".repeat(gap).into());
         }
-        spans.push(description.dim());
+        spans.extend(description.spans);
     }
     append_category_tag(row, &mut spans);
     Line::from(spans)
@@ -183,7 +191,6 @@ pub(super) fn wrap_stacked_row(row: &GenericDisplayRow, width: u16) -> Vec<Line<
         .collect::<Vec<_>>();
 
     if let Some(description) = stacked_description(row) {
-        let description = Line::from(description.dim());
         let description_options = RtOptions::new(width as usize)
             .initial_indent(Line::from(indent.clone()))
             .subsequent_indent(Line::from(indent));

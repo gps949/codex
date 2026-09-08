@@ -134,15 +134,27 @@ impl App {
         });
     }
 
+    /// Refreshes every usable account's quota cache after startup without
+    /// delaying the first frame or opening the account picker.
+    pub(super) fn prefetch_account_pool(&self, app_server: &AppServerSession) {
+        let request_handle = app_server.request_handle();
+        tokio::spawn(async move {
+            if let Err(error) = refresh_account_pool_quotas(request_handle).await {
+                tracing::warn!(%error, "failed to prefetch account-pool quotas");
+            }
+        });
+    }
+
     pub(super) fn activate_account_pool_profile(
         &mut self,
         app_server: &AppServerSession,
         profile_id: Option<String>,
+        force: bool,
     ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            let result = use_account_pool_profile(request_handle, profile_id)
+            let result = use_account_pool_profile(request_handle, profile_id, force)
                 .await
                 .map_err(|err| format!("{err:#}"));
             app_event_tx.send(AppEvent::AccountPoolActivated { result });
@@ -873,6 +885,12 @@ pub(super) async fn fetch_account_pool(
         return Ok(pool);
     }
 
+    refresh_account_pool_quotas(request_handle).await
+}
+
+async fn refresh_account_pool_quotas(
+    request_handle: AppServerRequestHandle,
+) -> Result<codex_app_server_protocol::AccountPoolReadResponse> {
     let request_id = RequestId::String(format!("account-pool-read-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::AccountPoolRead {
@@ -896,15 +914,13 @@ async fn update_account_pool_rotation_strategy(
 pub(super) async fn use_account_pool_profile(
     request_handle: AppServerRequestHandle,
     profile_id: Option<String>,
+    force: bool,
 ) -> Result<codex_app_server_protocol::AccountPoolUseResponse> {
     let request_id = RequestId::String(format!("account-pool-use-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::AccountPoolUse {
             request_id,
-            params: codex_app_server_protocol::AccountPoolUseParams {
-                profile_id,
-                force: false,
-            },
+            params: codex_app_server_protocol::AccountPoolUseParams { profile_id, force },
         })
         .await
         .wrap_err("accountPool/use failed in TUI")

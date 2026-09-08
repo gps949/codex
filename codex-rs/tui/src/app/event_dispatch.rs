@@ -1225,8 +1225,8 @@ impl App {
             AppEvent::AccountPoolLoaded { result } => {
                 self.chat_widget.open_account_pool_picker(result);
             }
-            AppEvent::ActivateAccountPoolProfile { profile_id } => {
-                self.activate_account_pool_profile(app_server, profile_id);
+            AppEvent::ActivateAccountPoolProfile { profile_id, force } => {
+                self.activate_account_pool_profile(app_server, profile_id, force);
             }
             AppEvent::AccountPoolActivated { result } => {
                 let switched = result.is_ok();

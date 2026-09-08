@@ -5,12 +5,16 @@
 //! scheduling). Activation goes through the app-server `accountPool/use`
 //! RPC, so it drives the exact same scheduler used by model requests.
 
+use chrono::DateTime;
+use chrono::Utc;
 use codex_app_server_protocol::AccountPoolAccount;
 use codex_app_server_protocol::AccountPoolAvailability;
+use codex_app_server_protocol::AccountPoolRateLimitWindow;
 use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::AccountPoolUseResponse;
 use codex_config::AccountPoolRotationStrategy;
 use codex_login::format_exhausted_reset_unix;
+use ratatui::text::Span;
 
 use super::*;
 use crate::bottom_pane::SelectionAction;
@@ -39,6 +43,7 @@ impl ChatWidget {
         }
 
         let rotation_strategy = self.config_ref().account_pool.effective_rotation_strategy();
+        let now = Utc::now();
         let mut items: Vec<SelectionItem> =
             Vec::with_capacity(pool.accounts.len() + rotation_strategy_items().len() + 1);
         for (strategy, name, description) in rotation_strategy_items() {
@@ -55,7 +60,10 @@ impl ChatWidget {
             });
         }
         let automatic_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
-            tx.send(AppEvent::ActivateAccountPoolProfile { profile_id: None });
+            tx.send(AppEvent::ActivateAccountPoolProfile {
+                profile_id: None,
+                force: true,
+            });
         })];
         items.push(SelectionItem {
             name: "Automatic".to_string(),
@@ -72,11 +80,12 @@ impl ChatWidget {
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::ActivateAccountPoolProfile {
                     profile_id: Some(profile_id.clone()),
+                    force: false,
                 });
             })];
             items.push(SelectionItem {
                 name: account_display_name(account),
-                description: Some(account_description(account)),
+                description_spans: account_description(account, now),
                 is_current: account.is_active,
                 actions,
                 dismiss_on_select: true,
@@ -138,51 +147,106 @@ fn account_display_name(account: &AccountPoolAccount) -> String {
     }
 }
 
-fn account_description(account: &AccountPoolAccount) -> String {
-    let mut parts = vec![format!("priority {}", account.priority)];
+fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<Span<'static>> {
+    let mut parts: Vec<Vec<Span<'static>>> =
+        vec![vec![format!("priority {}", account.priority).dim()]];
     if let Some(plan) = &account.plan_type {
-        parts.push(format!("{plan:?}").to_lowercase());
+        parts.push(vec![format!("{plan:?}").to_lowercase().dim()]);
     }
-    parts.push(match &account.availability {
-        AccountPoolAvailability::Available => "available".to_string(),
+    parts.push(vec![match &account.availability {
+        AccountPoolAvailability::Available => "available".dim(),
         AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
             Some(resets_at) => format!(
                 "cooling down until {}",
                 format_exhausted_reset_unix(*resets_at)
-            ),
-            None => "cooling down".to_string(),
+            )
+            .dim(),
+            None => "cooling down".dim(),
         },
         AccountPoolAvailability::AuthenticationUnavailable { .. } => {
-            "login broken; run `codex account login <id>`".to_string()
+            "login broken; run `codex account login <id>`".dim()
         }
-        AccountPoolAvailability::Disabled => "disabled".to_string(),
-    });
+        AccountPoolAvailability::Disabled => "disabled".dim(),
+    }]);
     if account.rate_limits.primary.is_none() && account.rate_limits.secondary.is_none() {
-        parts.push("quota unknown".to_string());
+        parts.push(vec!["quota unknown".dim()]);
     }
     if let Some(primary) = &account.rate_limits.primary {
-        parts.push(format!("{:.0}% of 5h window used", primary.used_percent));
-    }
-    if let Some(secondary) = &account.rate_limits.secondary {
-        parts.push(format!(
-            "{:.0}% of weekly window used",
-            secondary.used_percent
+        parts.push(account_rate_limit_description(
+            primary,
+            AccountRateLimitKind::FiveHour,
+            now,
         ));
     }
-    match account
-        .rate_limits
-        .observed_at
-        .and_then(|time| chrono::DateTime::from_timestamp(time, 0))
-    {
-        Some(time) => parts.push(format!("checked {} UTC", time.format("%m-%d %H:%M"))),
-        None if account.rate_limits.primary.is_some()
-            || account.rate_limits.secondary.is_some() =>
-        {
-            parts.push("cached; check time unknown".to_string())
-        }
-        None => {}
+    if let Some(secondary) = &account.rate_limits.secondary {
+        parts.push(account_rate_limit_description(
+            secondary,
+            AccountRateLimitKind::Weekly,
+            now,
+        ));
     }
-    parts.join(" · ")
+
+    let mut description = Vec::new();
+    for part in parts {
+        if !description.is_empty() {
+            description.push(" · ".dim());
+        }
+        description.extend(part);
+    }
+    description
+}
+
+#[derive(Clone, Copy)]
+enum AccountRateLimitKind {
+    FiveHour,
+    Weekly,
+}
+
+fn account_rate_limit_description(
+    window: &AccountPoolRateLimitWindow,
+    kind: AccountRateLimitKind,
+    now: DateTime<Utc>,
+) -> Vec<Span<'static>> {
+    let colorize = |text: String| match kind {
+        AccountRateLimitKind::FiveHour => text.cyan(),
+        AccountRateLimitKind::Weekly => text.magenta(),
+    };
+    let label = match kind {
+        AccountRateLimitKind::FiveHour => " 5h used",
+        AccountRateLimitKind::Weekly => " weekly used",
+    };
+    let mut spans = vec![
+        colorize(format!("{:.0}%", window.used_percent)),
+        label.dim(),
+    ];
+    if let Some(resets_at) = window.resets_at {
+        let remaining_seconds = resets_at.saturating_sub(now.timestamp());
+        let (prefix, countdown) = if remaining_seconds <= 0 {
+            (", reset ", "now".to_string())
+        } else {
+            (
+                ", reset in ",
+                format_reset_countdown(remaining_seconds as u64),
+            )
+        };
+        spans.push(prefix.dim());
+        spans.push(colorize(countdown));
+    }
+    spans
+}
+
+fn format_reset_countdown(remaining_seconds: u64) -> String {
+    let total_minutes = remaining_seconds.saturating_add(59) / 60;
+    let days = total_minutes / (24 * 60);
+    let hours = total_minutes / 60 % 24;
+    let minutes = total_minutes % 60;
+    if days > 0 {
+        format!("{days}d{hours:02}h{minutes:02}m")
+    } else if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else {
+        format!("{minutes}m")
+    }
 }
 
 fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 2] {
@@ -211,3 +275,7 @@ pub(crate) fn active_pool_profile_label(pool: &AccountPoolReadResponse) -> Optio
                 .unwrap_or_else(|| account.profile_id.clone())
         })
 }
+
+#[cfg(test)]
+#[path = "account_popups_tests.rs"]
+mod tests;
