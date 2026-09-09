@@ -150,6 +150,26 @@ pub struct AccountPoolSnapshot {
     pub availability: AccountAvailability,
     pub rate_limits: AccountRateLimits,
     pub is_active: bool,
+    /// Latest identity-preserving 5h-window warmup observation for this profile, if any.
+    pub window_warmup: Option<WindowWarmupObservation>,
+}
+
+/// Outcome of an identity-preserving standby 5h-window warmup attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowWarmupOutcome {
+    Succeeded,
+    Failed,
+    SkippedNoAuth,
+}
+
+/// Persisted warmup attempt so UIs can show status and the scheduler can honor backoff.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowWarmupObservation {
+    pub outcome: WindowWarmupOutcome,
+    pub attempted_at: DateTime<Utc>,
+    /// When set and still in the future, this profile is skipped by warmup candidate selection.
+    pub retry_after: Option<DateTime<Utc>>,
 }
 
 /// Immutable execution binding handed to account-scoped clients.
@@ -202,6 +222,7 @@ struct ManagedAccount {
     availability: AccountAvailability,
     rate_limits: AccountRateLimits,
     last_active_generation: Option<u64>,
+    window_warmup: Option<WindowWarmupObservation>,
 }
 
 struct AccountPoolState {
@@ -285,6 +306,7 @@ impl AccountPool {
                 availability,
                 rate_limits: AccountRateLimits::default(),
                 last_active_generation: None,
+                window_warmup: None,
             },
         );
         drop(state);
@@ -602,6 +624,11 @@ impl AccountPool {
                         None => true,
                         Some(window) => window.used_percent <= 0.0,
                     }
+                    && account
+                        .window_warmup
+                        .as_ref()
+                        .and_then(|observation| observation.retry_after)
+                        .is_none_or(|retry_after| retry_after <= now)
             })
             .map(|account| {
                 // Probe unknown quota before known-idle so we learn state sooner.
@@ -620,6 +647,24 @@ impl AccountPool {
                 .then_with(|| left.2.as_str().cmp(right.2.as_str()))
         });
         candidates.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    /// Records a warmup attempt so UIs can show status and subsequent passes honor backoff.
+    pub fn record_window_warmup(
+        &self,
+        profile_id: &AccountProfileId,
+        observation: WindowWarmupObservation,
+    ) -> Result<(), AccountPoolError> {
+        let mut state = self.lock_state();
+        let account = state
+            .accounts
+            .get_mut(profile_id)
+            .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+        account.window_warmup = Some(observation);
+        clear_started_window_warmup(account);
+        drop(state);
+        self.notify_change();
+        Ok(())
     }
 
     /// True when the active account is near the preemptive switch threshold and at least one
@@ -744,6 +789,7 @@ impl AccountPool {
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
         let changed = account.rate_limits != rate_limits;
         account.rate_limits = rate_limits;
+        clear_started_window_warmup(account);
         drop(state);
         if changed {
             self.notify_change();
@@ -769,6 +815,7 @@ impl AccountPool {
         }
         let changed = account.rate_limits != rate_limits;
         account.rate_limits = rate_limits;
+        clear_started_window_warmup(account);
         drop(state);
         if changed {
             self.notify_change();
@@ -788,6 +835,7 @@ impl AccountPool {
                 availability: account.availability.clone(),
                 rate_limits: account.rate_limits.clone(),
                 is_active: active_profile.as_ref() == Some(&account.profile.id),
+                window_warmup: account.window_warmup.clone(),
             })
             .collect::<Vec<_>>();
         snapshots.sort_by(|left, right| {
@@ -1051,6 +1099,17 @@ fn earliest_reset_key(account: &ManagedAccount, now: &DateTime<Utc>) -> Earliest
 
 fn has_due_rate_limit_window(account: &ManagedAccount, now: &DateTime<Utc>) -> bool {
     earliest_reset_key(account, now) == EarliestResetKey::Due
+}
+
+fn clear_started_window_warmup(account: &mut ManagedAccount) {
+    if account
+        .rate_limits
+        .primary
+        .as_ref()
+        .is_some_and(|window| window.used_percent > 0.0)
+    {
+        account.window_warmup = None;
+    }
 }
 
 fn set_active_profile(state: &mut AccountPoolState, profile_id: &AccountProfileId) -> bool {
@@ -1371,6 +1430,64 @@ mod tests {
         .expect("active near threshold");
         assert!(pool.needs_urgent_window_warmup(Some(80.0)));
         assert!(!pool.needs_urgent_window_warmup(None));
+    }
+
+    #[tokio::test]
+    async fn window_warmup_backoff_skips_candidates_until_retry_after() {
+        let pool = AccountPool::new();
+        let active = profile("active", 0);
+        let idle = profile("idle", 10);
+        for account in [&active, &idle] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let _lease = pool.lease().expect("activate preferred");
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &idle.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    resets_at: Some(now + chrono::Duration::hours(5)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("idle limits");
+        assert_eq!(pool.window_warmup_candidates(), vec![idle.id]);
+
+        pool.record_window_warmup(
+            &idle.id,
+            WindowWarmupObservation {
+                outcome: WindowWarmupOutcome::Failed,
+                attempted_at: now,
+                retry_after: Some(now + chrono::Duration::minutes(15)),
+            },
+        )
+        .expect("record failure");
+        assert!(pool.window_warmup_candidates().is_empty());
+        assert_eq!(
+            pool.snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.profile.id == idle.id)
+                .and_then(|snapshot| snapshot.window_warmup)
+                .map(|observation| observation.outcome),
+            Some(WindowWarmupOutcome::Failed)
+        );
+
+        pool.record_window_warmup(
+            &idle.id,
+            WindowWarmupObservation {
+                outcome: WindowWarmupOutcome::Failed,
+                attempted_at: now,
+                retry_after: Some(now - chrono::Duration::seconds(1)),
+            },
+        )
+        .expect("record expired backoff");
+        assert_eq!(pool.window_warmup_candidates(), vec![idle.id]);
     }
 
     #[tokio::test]

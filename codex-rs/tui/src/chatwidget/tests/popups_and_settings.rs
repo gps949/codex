@@ -3550,6 +3550,7 @@ async fn account_pool_picker_snapshot() {
                     }),
                     observed_at: Some(now - 24 * 60 * 60),
                 },
+                window_warmup: None,
             },
             AccountPoolAccount {
                 profile_id: "backup-acct".to_string(),
@@ -3560,6 +3561,7 @@ async fn account_pool_picker_snapshot() {
                 plan_type: None,
                 email: Some("backup@example.com".to_string()),
                 rate_limits: AccountPoolRateLimits::default(),
+                window_warmup: None,
             },
         ],
     }));

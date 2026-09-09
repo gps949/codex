@@ -464,7 +464,7 @@ pub(crate) async fn run_account_pool(cli_config_overrides: CliConfigOverrides) -
     println!(
         "rotation_strategy={rotation}\treturn_to_preferred={return_to_preferred}\tpreemptive_switch={preemptive}"
     );
-    println!("ACTIVE\tPRIORITY\tPROFILE\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tLABEL");
+    println!("ACTIVE\tPRIORITY\tPROFILE\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL");
     for snapshot in pool_handle.snapshots() {
         let (plan, email) = load_profile_identity(&config, &snapshot.profile).await;
         let availability = match &snapshot.availability {
@@ -490,8 +490,13 @@ pub(crate) async fn run_account_pool(cli_config_overrides: CliConfigOverrides) -
             .secondary
             .map(|window| format!("{:.0}", window.used_percent))
             .unwrap_or_else(|| "-".to_string());
+        let warmup = snapshot
+            .window_warmup
+            .as_ref()
+            .map(|observation| codex_login::format_window_warmup_status(observation, Utc::now()))
+            .unwrap_or_else(|| "-".to_string());
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             if snapshot.is_active { "*" } else { "" },
             snapshot.profile.priority,
             snapshot.profile.id,
@@ -500,6 +505,7 @@ pub(crate) async fn run_account_pool(cli_config_overrides: CliConfigOverrides) -
             email.unwrap_or_else(|| "-".to_string()),
             primary,
             secondary,
+            warmup,
             snapshot.profile.label.as_deref().unwrap_or("-"),
         );
     }

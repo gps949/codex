@@ -1270,6 +1270,7 @@ impl AccountRequestProcessor {
                 plan_type,
                 email,
                 rate_limits: account_pool_rate_limits(snapshot.rate_limits),
+                window_warmup: account_pool_window_warmup(snapshot.window_warmup),
             });
         }
         let response = codex_app_server_protocol::AccountPoolReadResponse {
@@ -1771,6 +1772,7 @@ async fn build_account_pool_read_response(
             plan_type,
             email,
             rate_limits: account_pool_rate_limits(snapshot.rate_limits),
+            window_warmup: account_pool_window_warmup(snapshot.window_warmup),
         });
     }
     codex_app_server_protocol::AccountPoolReadResponse {
@@ -1845,6 +1847,26 @@ fn account_pool_rate_limit_window(
         used_percent: window.used_percent,
         resets_at: window.resets_at.map(|value| value.timestamp()),
     }
+}
+
+fn account_pool_window_warmup(
+    observation: Option<codex_login::WindowWarmupObservation>,
+) -> Option<codex_app_server_protocol::AccountPoolWindowWarmup> {
+    observation.map(|observation| codex_app_server_protocol::AccountPoolWindowWarmup {
+        outcome: match observation.outcome {
+            codex_login::WindowWarmupOutcome::Succeeded => {
+                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Succeeded
+            }
+            codex_login::WindowWarmupOutcome::Failed => {
+                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Failed
+            }
+            codex_login::WindowWarmupOutcome::SkippedNoAuth => {
+                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::SkippedNoAuth
+            }
+        },
+        attempted_at: observation.attempted_at.timestamp(),
+        retry_after: observation.retry_after.map(|value| value.timestamp()),
+    })
 }
 
 fn workspace_message_from_backend(

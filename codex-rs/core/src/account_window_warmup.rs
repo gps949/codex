@@ -5,11 +5,8 @@
 //! Responses request with each standby profile's own AuthManager without calling `activate` /
 //! `lease`, so the active execution identity and prompt cache stay put.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
-use std::time::Instant;
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -21,6 +18,8 @@ use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::WindowWarmupObservation;
+use codex_login::WindowWarmupOutcome;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
@@ -50,13 +49,14 @@ const WARMUP_ORIGINATOR: &str = "codex_account_window_warmup";
 const DEFAULT_WARMUP_MODEL: &str = "gpt-5.2";
 const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(45);
 const FAILURE_BACKOFF: Duration = Duration::from_secs(15 * 60);
+const SUCCESS_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
+const SKIPPED_AUTH_BACKOFF: Duration = Duration::from_secs(30 * 60);
 const GET_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 const URGENT_WARMUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Spawns the periodic standby-window warmup loop. The caller owns the handle and may abort it.
 pub(crate) fn spawn_window_warmup_task(pool: Arc<AccountPool>, config: Config) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let backoff = Mutex::new(HashMap::<AccountProfileId, Instant>::new());
         // Settle install/quota probes before the first pass.
         tokio::time::sleep(
             config
@@ -70,7 +70,7 @@ pub(crate) fn spawn_window_warmup_task(pool: Arc<AccountPool>, config: Config) -
                 tokio::time::sleep(config.account_pool.effective_window_warmup_interval()).await;
                 continue;
             }
-            if let Err(error) = run_warmup_pass(&pool, &config, &backoff).await {
+            if let Err(error) = run_warmup_pass(&pool, &config).await {
                 debug!(error = %error, "account window warmup pass failed");
             }
             let sleep_for = if pool.needs_urgent_window_warmup(
@@ -85,23 +85,8 @@ pub(crate) fn spawn_window_warmup_task(pool: Arc<AccountPool>, config: Config) -
     })
 }
 
-async fn run_warmup_pass(
-    pool: &AccountPool,
-    config: &Config,
-    backoff: &Mutex<HashMap<AccountProfileId, Instant>>,
-) -> anyhow::Result<()> {
-    let now = Instant::now();
-    let Some(profile_id) = pool
-        .window_warmup_candidates()
-        .into_iter()
-        .find(|profile_id| {
-            backoff
-                .lock()
-                .ok()
-                .and_then(|guard| guard.get(profile_id).copied())
-                .is_none_or(|until| until <= now)
-        })
-    else {
+async fn run_warmup_pass(pool: &AccountPool, config: &Config) -> anyhow::Result<()> {
+    let Some(profile_id) = pool.window_warmup_candidates().into_iter().next() else {
         return Ok(());
     };
     let Some((_, auth_manager)) = pool
@@ -111,20 +96,7 @@ async fn run_warmup_pass(
     else {
         return Ok(());
     };
-    match warm_profile(pool, config, &profile_id, auth_manager).await {
-        Ok(()) => {
-            if let Ok(mut guard) = backoff.lock() {
-                guard.remove(&profile_id);
-            }
-        }
-        Err(error) => {
-            if let Ok(mut guard) = backoff.lock() {
-                guard.insert(profile_id.clone(), now + FAILURE_BACKOFF);
-            }
-            warn!(%profile_id, error = %error, "standby window warmup failed; backing off");
-        }
-    }
-    Ok(())
+    warm_profile(pool, config, &profile_id, auth_manager).await
 }
 
 async fn warm_profile(
@@ -133,8 +105,23 @@ async fn warm_profile(
     profile_id: &AccountProfileId,
     auth_manager: Arc<AuthManager>,
 ) -> anyhow::Result<()> {
-    let Some(auth) = auth_manager.auth().await.filter(CodexAuth::is_chatgpt_auth) else {
+    let attempted_at = Utc::now();
+    let Some(auth) = auth_manager
+        .auth()
+        .await
+        .filter(CodexAuth::is_chatgpt_auth)
+    else {
         debug!(%profile_id, "skipping window warmup without ChatGPT auth");
+        let _ = pool.record_window_warmup(
+            profile_id,
+            WindowWarmupObservation {
+                outcome: WindowWarmupOutcome::SkippedNoAuth,
+                attempted_at,
+                retry_after: Some(
+                    attempted_at + chrono::Duration::seconds(SKIPPED_AUTH_BACKOFF.as_secs() as i64),
+                ),
+            },
+        );
         return Ok(());
     };
 
@@ -229,13 +216,18 @@ async fn warm_profile(
         anyhow::Ok(observed)
     };
 
-    let stream_limits = match tokio::time::timeout(PER_PROFILE_TIMEOUT, warm).await {
+    let stream_result = tokio::time::timeout(PER_PROFILE_TIMEOUT, warm).await;
+    let stream_limits = match stream_result {
         Ok(Ok(observed)) => observed,
         Ok(Err(error)) => {
-            return Err(error);
+            record_failure(pool, profile_id, attempted_at);
+            warn!(%profile_id, error = %error, "standby window warmup request failed");
+            return Ok(());
         }
         Err(_elapsed) => {
-            anyhow::bail!("standby window warmup timed out");
+            record_failure(pool, profile_id, attempted_at);
+            warn!(%profile_id, "standby window warmup timed out");
+            return Ok(());
         }
     };
 
@@ -253,7 +245,29 @@ async fn warm_profile(
         debug!(%profile_id, "refreshed standby rate limits after window warmup");
     }
 
+    let _ = pool.record_window_warmup(
+        profile_id,
+        WindowWarmupObservation {
+            outcome: WindowWarmupOutcome::Succeeded,
+            attempted_at,
+            retry_after: Some(
+                attempted_at + chrono::Duration::seconds(SUCCESS_DEBOUNCE.as_secs() as i64),
+            ),
+        },
+    );
     Ok(())
+}
+
+fn record_failure(pool: &AccountPool, profile_id: &AccountProfileId, attempted_at: DateTime<Utc>) {
+    let retry_after = attempted_at + chrono::Duration::seconds(FAILURE_BACKOFF.as_secs() as i64);
+    let _ = pool.record_window_warmup(
+        profile_id,
+        WindowWarmupObservation {
+            outcome: WindowWarmupOutcome::Failed,
+            attempted_at,
+            retry_after: Some(retry_after),
+        },
+    );
 }
 
 async fn refresh_rate_limits_via_get(

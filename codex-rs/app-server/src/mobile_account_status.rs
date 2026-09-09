@@ -165,6 +165,30 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
         "Checked: {}",
         timestamp(account.rate_limits.observed_at)
     ));
+    if let Some(warmup) = &account.window_warmup {
+        let observation = codex_login::WindowWarmupObservation {
+            outcome: match warmup.outcome {
+                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Succeeded => {
+                    codex_login::WindowWarmupOutcome::Succeeded
+                }
+                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Failed => {
+                    codex_login::WindowWarmupOutcome::Failed
+                }
+                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::SkippedNoAuth => {
+                    codex_login::WindowWarmupOutcome::SkippedNoAuth
+                }
+            },
+            attempted_at: DateTime::<Utc>::from_timestamp(warmup.attempted_at, 0)
+                .unwrap_or(now),
+            retry_after: warmup
+                .retry_after
+                .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+        };
+        lines.push(format!(
+            "Warmup: {}",
+            codex_login::format_window_warmup_status(&observation, now)
+        ));
+    }
     lines.push("Cached values remain if refresh fails.".into());
     Ok(lines.join("\n"))
 }
@@ -205,7 +229,13 @@ fn reset_label(
     if primary && window.used_percent <= 0.0 {
         return format_primary_window_reset(window.used_percent, window.resets_at, now);
     }
-    timestamp(window.resets_at)
+    match window
+        .resets_at
+        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+    {
+        Some(reset) => format_relative_reset(reset, now),
+        None => "unknown".into(),
+    }
 }
 
 fn timestamp(value: Option<i64>) -> String {

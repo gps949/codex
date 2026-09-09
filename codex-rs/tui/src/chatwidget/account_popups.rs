@@ -10,10 +10,16 @@ use chrono::Utc;
 use codex_app_server_protocol::AccountPoolAccount;
 use codex_app_server_protocol::AccountPoolAvailability;
 use codex_app_server_protocol::AccountPoolRateLimitWindow;
+use codex_app_server_protocol::AccountPoolRateLimits;
 use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::AccountPoolUseResponse;
+use codex_app_server_protocol::AccountPoolWindowWarmup;
+use codex_app_server_protocol::AccountPoolWindowWarmupOutcome;
 use codex_config::AccountPoolRotationStrategy;
 use codex_login::format_reset_countdown;
+use codex_login::format_window_warmup_status;
+use codex_login::WindowWarmupObservation;
+use codex_login::WindowWarmupOutcome;
 use ratatui::text::Span;
 
 use super::*;
@@ -192,6 +198,17 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
             now,
         ));
     }
+    if let Some(warmup) = account.window_warmup.as_ref().and_then(|warmup| {
+        if account.is_active {
+            return None;
+        }
+        Some(format_window_warmup_status(
+            &protocol_warmup_to_login(warmup),
+            now,
+        ))
+    }) {
+        parts.push(vec![warmup.dim()]);
+    }
 
     let mut description = Vec::new();
     for part in parts {
@@ -263,6 +280,21 @@ fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 
                 .to_string(),
         ),
     ]
+}
+
+fn protocol_warmup_to_login(warmup: &AccountPoolWindowWarmup) -> WindowWarmupObservation {
+    WindowWarmupObservation {
+        outcome: match warmup.outcome {
+            AccountPoolWindowWarmupOutcome::Succeeded => WindowWarmupOutcome::Succeeded,
+            AccountPoolWindowWarmupOutcome::Failed => WindowWarmupOutcome::Failed,
+            AccountPoolWindowWarmupOutcome::SkippedNoAuth => WindowWarmupOutcome::SkippedNoAuth,
+        },
+        attempted_at: DateTime::<Utc>::from_timestamp(warmup.attempted_at, 0)
+            .unwrap_or_else(Utc::now),
+        retry_after: warmup
+            .retry_after
+            .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+    }
 }
 
 pub(crate) fn active_pool_profile_label(pool: &AccountPoolReadResponse) -> Option<String> {

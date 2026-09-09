@@ -101,3 +101,37 @@ fn elapsed_and_unknown_resets_have_compact_output() {
         vec!["40%".magenta(), " weekly used".dim()]
     );
 }
+
+#[test]
+fn standby_warmup_status_appears_in_account_description() {
+    let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
+    let account = AccountPoolAccount {
+        profile_id: "backup".to_string(),
+        label: None,
+        priority: 10,
+        is_active: false,
+        availability: AccountPoolAvailability::Available,
+        plan_type: None,
+        email: None,
+        rate_limits: AccountPoolRateLimits {
+            primary: Some(AccountPoolRateLimitWindow {
+                used_percent: 0.0,
+                resets_at: Some(now.timestamp() + 5 * 3600),
+            }),
+            secondary: None,
+            observed_at: None,
+        },
+        window_warmup: Some(AccountPoolWindowWarmup {
+            outcome: AccountPoolWindowWarmupOutcome::Succeeded,
+            attempted_at: now.timestamp(),
+            retry_after: Some(now.timestamp() + 300),
+        }),
+    };
+    let description = account_description(&account, now);
+    assert!(
+        description
+            .iter()
+            .any(|span| span.content.contains("5h warmed")),
+        "{description:?}"
+    );
+}

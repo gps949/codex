@@ -71,6 +71,24 @@ pub fn format_relative_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> String
     format!("in {}", format_reset_countdown(remaining_seconds as u64))
 }
 
+/// Compact status line for the latest standby 5h-window warmup observation.
+pub fn format_window_warmup_status(
+    observation: &crate::account_pool::WindowWarmupObservation,
+    now: DateTime<Utc>,
+) -> String {
+    use crate::account_pool::WindowWarmupOutcome;
+    match observation.outcome {
+        WindowWarmupOutcome::Succeeded => "5h warmed".to_string(),
+        WindowWarmupOutcome::SkippedNoAuth => "warmup skipped (no auth)".to_string(),
+        WindowWarmupOutcome::Failed => match observation.retry_after {
+            Some(retry_after) if retry_after > now => {
+                format!("warmup retry {}", format_relative_reset(retry_after, now))
+            }
+            _ => "warmup failed".to_string(),
+        },
+    }
+}
+
 pub fn format_plan_type_label(plan_type: Option<&str>) -> String {
     match plan_type {
         Some(plan) if !plan.trim().is_empty() => plan.to_string(),
@@ -118,6 +136,27 @@ mod tests {
                 /*remaining_seconds*/ 3 * 24 * 60 * 60 + 21 * 60 * 60 + 2 * 60
             ),
             "3:21:02"
+        );
+    }
+
+    #[test]
+    fn format_window_warmup_status_summarizes_outcomes() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap();
+        let succeeded = crate::account_pool::WindowWarmupObservation {
+            outcome: crate::account_pool::WindowWarmupOutcome::Succeeded,
+            attempted_at: now,
+            retry_after: None,
+        };
+        assert_eq!(format_window_warmup_status(&succeeded, now), "5h warmed");
+
+        let failed = crate::account_pool::WindowWarmupObservation {
+            outcome: crate::account_pool::WindowWarmupOutcome::Failed,
+            attempted_at: now,
+            retry_after: Some(now + chrono::Duration::minutes(15)),
+        };
+        assert_eq!(
+            format_window_warmup_status(&failed, now),
+            "warmup retry in 0:15"
         );
     }
 }
