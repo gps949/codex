@@ -1305,12 +1305,9 @@ impl AccountRequestProcessor {
             self.execution_account_pool
                 .activate(&profile_id, params.force)
                 .await
+        } else if params.force {
+            self.execution_account_pool.force_activate_automatic().await
         } else {
-            if params.force {
-                return Err(invalid_request(
-                    "force is only valid when selecting a specific account profile",
-                ));
-            }
             self.execution_account_pool.activate_fill_first().await
         }
         .map_err(|err| invalid_request(err.to_string()))?;

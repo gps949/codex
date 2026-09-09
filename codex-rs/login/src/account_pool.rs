@@ -432,11 +432,38 @@ impl AccountPool {
     /// Explicitly re-enters automatic scheduling, selecting the next eligible profile even if
     /// another profile is currently active.
     pub fn activate_fill_first(&self) -> Result<AccountLease, AccountPoolError> {
+        self.activate_automatic(AutomaticSelectionEligibility::AvailableOnly)
+    }
+
+    /// Re-enters automatic scheduling while allowing one user-requested probe of a quota-cooled
+    /// profile whose observed rate-limit window has already reached its reset time.
+    pub fn force_activate_automatic(&self) -> Result<AccountLease, AccountPoolError> {
+        self.activate_automatic(AutomaticSelectionEligibility::IncludeDueResetCooldowns)
+    }
+
+    fn activate_automatic(
+        &self,
+        eligibility: AutomaticSelectionEligibility,
+    ) -> Result<AccountLease, AccountPoolError> {
         let mut state = self.lock_state();
         let refreshed = refresh_expired_exhaustion(&mut state);
         let now = Utc::now();
         let selected_id =
-            select_eligible_account(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
+            select_account(&state, &now, eligibility).ok_or(AccountPoolError::NoEligibleAccount)?;
+        let forced = if eligibility == AutomaticSelectionEligibility::IncludeDueResetCooldowns {
+            let account = state
+                .accounts
+                .get_mut(&selected_id)
+                .ok_or_else(|| AccountPoolError::UnknownProfile(selected_id.clone()))?;
+            if !account.availability.is_eligible(&now) {
+                account.availability = AccountAvailability::Available;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let active_changed = set_active_profile(&mut state, &selected_id);
         let account = state
             .accounts
@@ -444,7 +471,7 @@ impl AccountPool {
             .ok_or_else(|| AccountPoolError::UnknownProfile(selected_id.clone()))?;
         let lease = make_lease(account, state.generation);
         drop(state);
-        if refreshed || active_changed {
+        if refreshed || forced || active_changed {
             self.notify_change();
         }
         Ok(lease)
@@ -841,17 +868,37 @@ fn select_eligible_account(
     state: &AccountPoolState,
     now: &DateTime<Utc>,
 ) -> Option<AccountProfileId> {
+    select_account(state, now, AutomaticSelectionEligibility::AvailableOnly)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AutomaticSelectionEligibility {
+    AvailableOnly,
+    IncludeDueResetCooldowns,
+}
+
+fn select_account(
+    state: &AccountPoolState,
+    now: &DateTime<Utc>,
+    eligibility: AutomaticSelectionEligibility,
+) -> Option<AccountProfileId> {
     match state.rotation_strategy {
-        AccountPoolRotationStrategy::FillFirst => select_fill_first(state, now),
-        AccountPoolRotationStrategy::EarliestReset => select_earliest_reset(state, now),
+        AccountPoolRotationStrategy::FillFirst => select_fill_first(state, now, eligibility),
+        AccountPoolRotationStrategy::EarliestReset => {
+            select_earliest_reset(state, now, eligibility)
+        }
     }
 }
 
-fn select_fill_first(state: &AccountPoolState, now: &DateTime<Utc>) -> Option<AccountProfileId> {
+fn select_fill_first(
+    state: &AccountPoolState,
+    now: &DateTime<Utc>,
+    eligibility: AutomaticSelectionEligibility,
+) -> Option<AccountProfileId> {
     state
         .accounts
         .values()
-        .filter(|account| account.availability.is_eligible(now))
+        .filter(|account| account_is_eligible(account, now, eligibility))
         .min_by(|left, right| {
             left.profile
                 .priority
@@ -864,11 +911,12 @@ fn select_fill_first(state: &AccountPoolState, now: &DateTime<Utc>) -> Option<Ac
 fn select_earliest_reset(
     state: &AccountPoolState,
     now: &DateTime<Utc>,
+    eligibility: AutomaticSelectionEligibility,
 ) -> Option<AccountProfileId> {
     state
         .accounts
         .values()
-        .filter(|account| account.availability.is_eligible(now))
+        .filter(|account| account_is_eligible(account, now, eligibility))
         .min_by(|left, right| {
             earliest_reset_key(left, now)
                 .cmp(&earliest_reset_key(right, now))
@@ -878,25 +926,47 @@ fn select_earliest_reset(
         .map(|account| account.profile.id.clone())
 }
 
-fn earliest_reset_key(account: &ManagedAccount, now: &DateTime<Utc>) -> i64 {
-    let mut upcoming = Vec::new();
-    if let Some(primary) = account.rate_limits.primary.as_ref()
-        && let Some(resets_at) = primary.resets_at
-        && resets_at > *now
+fn account_is_eligible(
+    account: &ManagedAccount,
+    now: &DateTime<Utc>,
+    eligibility: AutomaticSelectionEligibility,
+) -> bool {
+    account.availability.is_eligible(now)
+        || (eligibility == AutomaticSelectionEligibility::IncludeDueResetCooldowns
+            && matches!(account.availability, AccountAvailability::Exhausted { .. })
+            && has_due_rate_limit_window(account, now))
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum EarliestResetKey {
+    Due,
+    Future(i64),
+    Unknown,
+}
+
+fn earliest_reset_key(account: &ManagedAccount, now: &DateTime<Utc>) -> EarliestResetKey {
+    let mut earliest_future = None;
+    for resets_at in account
+        .rate_limits
+        .primary
+        .iter()
+        .chain(account.rate_limits.secondary.iter())
+        .filter_map(|window| window.resets_at)
     {
-        upcoming.push(resets_at);
+        if resets_at <= *now {
+            return EarliestResetKey::Due;
+        }
+        earliest_future = Some(
+            earliest_future.map_or(resets_at, |current: DateTime<Utc>| current.min(resets_at)),
+        );
     }
-    if let Some(secondary) = account.rate_limits.secondary.as_ref()
-        && let Some(resets_at) = secondary.resets_at
-        && resets_at > *now
-    {
-        upcoming.push(resets_at);
-    }
-    upcoming
-        .into_iter()
-        .min()
-        .map(|reset| reset.timestamp())
-        .unwrap_or_else(|| now.timestamp())
+    earliest_future
+        .map(|reset| EarliestResetKey::Future(reset.timestamp()))
+        .unwrap_or(EarliestResetKey::Unknown)
+}
+
+fn has_due_rate_limit_window(account: &ManagedAccount, now: &DateTime<Utc>) -> bool {
+    earliest_reset_key(account, now) == EarliestResetKey::Due
 }
 
 fn set_active_profile(state: &mut AccountPoolState, profile_id: &AccountProfileId) -> bool {
@@ -1161,6 +1231,177 @@ mod tests {
 
         let lease = pool.lease().expect("earliest-reset lease");
         assert_eq!(lease.profile().id, second.id);
+    }
+
+    #[tokio::test]
+    async fn earliest_reset_prefers_due_windows_then_priority() {
+        let pool = AccountPool::new();
+        pool.set_rotation_strategy(AccountPoolRotationStrategy::EarliestReset);
+        let future = profile("future", 0);
+        let due_later_priority = profile("due-later-priority", 20);
+        let due_preferred = profile("due-preferred", 10);
+        for account in [&future, &due_later_priority, &due_preferred] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &future.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 10.0,
+                    resets_at: Some(now + chrono::Duration::minutes(30)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("future rate limits");
+        for account in [&due_later_priority, &due_preferred] {
+            pool.update_rate_limits(
+                &account.id,
+                AccountRateLimits {
+                    primary: Some(AccountRateLimitWindow {
+                        used_percent: 10.0,
+                        resets_at: Some(now - chrono::Duration::minutes(1)),
+                    }),
+                    ..AccountRateLimits::default()
+                },
+            )
+            .expect("due rate limits");
+        }
+
+        let lease = pool.lease().expect("due lease");
+        assert_eq!(lease.profile().id, due_preferred.id);
+    }
+
+    #[tokio::test]
+    async fn earliest_reset_prefers_known_future_window_over_unknown_quota() {
+        let pool = AccountPool::new();
+        pool.set_rotation_strategy(AccountPoolRotationStrategy::EarliestReset);
+        let unknown = profile("unknown", 0);
+        let future = profile("future", 10);
+        for account in [&unknown, &future] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        pool.update_rate_limits(
+            &future.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 10.0,
+                    resets_at: Some(Utc::now() + chrono::Duration::minutes(30)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("future rate limits");
+
+        let lease = pool.lease().expect("known reset lease");
+        assert_eq!(lease.profile().id, future.id);
+    }
+
+    #[tokio::test]
+    async fn forced_automatic_selection_probes_due_quota_cooldown_once() {
+        let pool = AccountPool::new();
+        let due = profile("due", 10);
+        let fallback = profile("fallback", 20);
+        for account in [&due, &fallback] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        pool.update_rate_limits(
+            &due.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 90.0,
+                    resets_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("due rate limits");
+        let due_lease = pool.lease().expect("due initial lease");
+        pool.mark_exhausted(&due_lease, Some(Utc::now() + chrono::Duration::hours(1)))
+            .expect("cool down due account");
+        assert_eq!(
+            pool.lease().expect("normal fallback lease").profile().id,
+            fallback.id
+        );
+
+        let forced = pool
+            .force_activate_automatic()
+            .expect("force automatic due reset");
+        assert_eq!(forced.profile().id, due.id);
+        assert!(pool.snapshots().into_iter().any(|snapshot| {
+            snapshot.profile.id == due.id && snapshot.availability == AccountAvailability::Available
+        }));
+    }
+
+    #[tokio::test]
+    async fn forced_automatic_selection_never_bypasses_disabled_or_broken_auth() {
+        let disabled_pool = AccountPool::new();
+        let mut disabled = profile("disabled", 10);
+        disabled.disabled = true;
+        disabled_pool
+            .register(
+                disabled.clone(),
+                test_auth_manager(&disabled.credential_home).await,
+            )
+            .expect("register disabled account");
+        disabled_pool
+            .update_rate_limits(
+                &disabled.id,
+                AccountRateLimits {
+                    primary: Some(AccountRateLimitWindow {
+                        used_percent: 90.0,
+                        resets_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+                    }),
+                    ..AccountRateLimits::default()
+                },
+            )
+            .expect("disabled rate limits");
+        assert!(matches!(
+            disabled_pool.force_activate_automatic(),
+            Err(AccountPoolError::NoEligibleAccount)
+        ));
+
+        let broken_pool = AccountPool::new();
+        let broken = profile("broken", 10);
+        broken_pool
+            .register(
+                broken.clone(),
+                test_auth_manager(&broken.credential_home).await,
+            )
+            .expect("register broken account");
+        broken_pool
+            .update_rate_limits(
+                &broken.id,
+                AccountRateLimits {
+                    primary: Some(AccountRateLimitWindow {
+                        used_percent: 90.0,
+                        resets_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+                    }),
+                    ..AccountRateLimits::default()
+                },
+            )
+            .expect("broken rate limits");
+        let broken_lease = broken_pool.lease().expect("broken initial lease");
+        broken_pool
+            .mark_authentication_unavailable(&broken_lease, "expired credentials")
+            .expect("mark broken auth");
+        assert!(matches!(
+            broken_pool.force_activate_automatic(),
+            Err(AccountPoolError::NoEligibleAccount)
+        ));
     }
 
     #[tokio::test]

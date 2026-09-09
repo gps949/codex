@@ -209,6 +209,7 @@ impl App {
         let feedback_audience = bootstrap.feedback_audience;
         let auth_mode = bootstrap.auth_mode;
         let has_chatgpt_account = bootstrap.has_chatgpt_account;
+        let account_pool_enabled = bootstrap.account_pool_enabled;
         let has_codex_backend_auth = matches!(auth_mode, Some(TelemetryAuthMode::Chatgpt));
         let requires_openai_auth = bootstrap.requires_openai_auth;
         let status_account_display = bootstrap.status_account_display.clone();
@@ -686,6 +687,9 @@ See the Codex keymap documentation for supported actions and examples."
                     reset_hint_request_id,
                 },
             );
+        }
+        if account_pool_enabled {
+            app.prefetch_account_pool(&app_server);
         }
 
         let mut listen_for_app_server_events = true;

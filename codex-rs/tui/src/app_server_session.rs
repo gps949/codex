@@ -288,6 +288,9 @@ pub(crate) struct AppServerBootstrap {
     pub(crate) default_model: String,
     pub(crate) feedback_audience: FeedbackAudience,
     pub(crate) has_chatgpt_account: bool,
+    /// Whether native multi-account pooling is configured. Used to trigger a
+    /// non-blocking full-pool quota refresh after the first frame renders.
+    pub(crate) account_pool_enabled: bool,
     pub(crate) available_models: Vec<ModelPreset>,
 }
 
@@ -546,6 +549,10 @@ impl AppServerSession {
         account: GetAccountResponse,
     ) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
+        let account_pool_enabled = account
+            .account_pool
+            .as_ref()
+            .is_some_and(|pool| pool.enabled);
         // `hooks/list` holds the global config queue during startup. Submit models and config
         // requirements together so an uncached model fetch can overlap both config requests.
         let model_request_id = self.next_request_id();
@@ -658,6 +665,7 @@ impl AppServerSession {
             default_model,
             feedback_audience,
             has_chatgpt_account,
+            account_pool_enabled,
             available_models,
         })
     }

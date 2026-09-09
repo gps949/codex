@@ -20,6 +20,7 @@ use crate::width::display_width;
 use super::scroll_state::ScrollState;
 use super::selection_row_layout::SelectionDescriptionLayout;
 use super::selection_row_layout::build_full_line;
+use super::selection_row_layout::combined_description_line;
 use super::selection_row_layout::line_to_owned;
 use super::selection_row_layout::wrap_stacked_row;
 
@@ -35,6 +36,7 @@ pub(crate) struct GenericDisplayRow {
     pub display_shortcut: Option<ShortcutHint>,
     pub match_indices: Option<Vec<usize>>, // indices to bold (char positions)
     pub description: Option<String>,       // optional grey text after the name
+    pub description_spans: Vec<Span<'static>>, // optional styled description after the name
     pub category_tag: Option<String>,      // optional right-side category label
     pub disabled_reason: Option<String>,   // optional disabled message
     pub is_disabled: bool,
@@ -204,7 +206,10 @@ fn compute_desc_col(
 fn wrap_indent(row: &GenericDisplayRow, desc_col: usize, max_width: u16) -> usize {
     let max_indent = max_width.saturating_sub(1) as usize;
     let indent = row.wrap_indent.unwrap_or_else(|| {
-        if row.description.is_some() || row.disabled_reason.is_some() {
+        if row.description.is_some()
+            || !row.description_spans.is_empty()
+            || row.disabled_reason.is_some()
+        {
             desc_col
         } else {
             0
@@ -217,7 +222,7 @@ fn should_wrap_name_in_column(row: &GenericDisplayRow) -> bool {
     // This path intentionally targets plain option rows that opt into wrapped
     // labels. Styled/fuzzy-matched rows keep the legacy combined-line path.
     row.wrap_indent.is_some()
-        && row.description.is_some()
+        && (row.description.is_some() || !row.description_spans.is_empty())
         && row.disabled_reason.is_none()
         && row.match_indices.is_none()
         && row.display_shortcut.is_none()
@@ -227,9 +232,11 @@ fn should_wrap_name_in_column(row: &GenericDisplayRow) -> bool {
 
 fn wrap_two_column_row(row: &GenericDisplayRow, desc_col: usize, width: u16) -> Vec<Line<'static>> {
     use crate::wrapping::RtOptions;
+    use crate::wrapping::word_wrap_line;
     use crate::wrapping::word_wrap_lines;
 
-    let Some(description) = row.description.as_deref() else {
+    let Some(description) = combined_description_line(row, SelectionDescriptionLayout::Columns)
+    else {
         return Vec::new();
     };
 
@@ -255,7 +262,10 @@ fn wrap_two_column_row(row: &GenericDisplayRow, desc_col: usize, width: u16) -> 
     let name_lines = word_wrap_lines(row.name.lines(), name_options);
 
     let desc_options = RtOptions::new(right_width).initial_indent(Line::from(""));
-    let desc_lines = word_wrap_lines(description.lines(), desc_options);
+    let desc_lines = word_wrap_line(&description, desc_options)
+        .into_iter()
+        .map(line_to_owned)
+        .collect::<Vec<_>>();
 
     let rows = name_lines.len().max(desc_lines.len()).max(1);
     let mut out = Vec::with_capacity(rows);
@@ -278,7 +288,7 @@ fn wrap_two_column_row(row: &GenericDisplayRow, desc_col: usize, width: u16) -> 
             if gap > 0 {
                 spans.push(" ".repeat(gap).into());
             }
-            spans.push(desc.to_string().dim());
+            spans.extend(desc.spans.clone());
         }
 
         out.push(Line::from(spans));
@@ -812,6 +822,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use ratatui::style::Color;
     use ratatui::style::Modifier;
 
     #[test]
@@ -965,5 +976,43 @@ mod tests {
         let expected = accent_style();
         assert_eq!(style.fg, expected.fg);
         assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn styled_descriptions_preserve_colors_until_selected() {
+        let rows = vec![GenericDisplayRow {
+            name: "item".to_string(),
+            description_spans: vec!["5h".cyan(), " weekly".magenta()],
+            ..Default::default()
+        }];
+        let area = Rect::new(0, 0, /*width*/ 24, /*height*/ 1);
+        let mut buf = Buffer::empty(area);
+
+        render_rows(
+            area,
+            &mut buf,
+            &rows,
+            &ScrollState::default(),
+            /*max_results*/ 1,
+            "no rows",
+        );
+        assert_eq!(buf[(6, 0)].style().fg, Some(Color::Cyan));
+        assert_eq!(buf[(9, 0)].style().fg, Some(Color::Magenta));
+
+        let mut selected = Buffer::empty(area);
+        render_rows(
+            area,
+            &mut selected,
+            &rows,
+            &ScrollState {
+                selected_idx: Some(0),
+                ..Default::default()
+            },
+            /*max_results*/ 1,
+            "no rows",
+        );
+        let expected = accent_style();
+        assert_eq!(selected[(6, 0)].style().fg, expected.fg);
+        assert_eq!(selected[(9, 0)].style().fg, expected.fg);
     }
 }

@@ -3525,6 +3525,7 @@ async fn account_pool_picker_snapshot() {
     use codex_app_server_protocol::AccountPoolReadResponse;
 
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let now = chrono::Utc::now().timestamp();
     chat.open_account_pool_picker(Ok(AccountPoolReadResponse {
         enabled: true,
         active_profile_id: Some("primary-acct".to_string()),
@@ -3540,11 +3541,14 @@ async fn account_pool_picker_snapshot() {
                 email: None,
                 rate_limits: AccountPoolRateLimits {
                     primary: Some(AccountPoolRateLimitWindow {
-                        used_percent: 42.0,
-                        resets_at: None,
+                        used_percent: 38.0,
+                        resets_at: Some(now + 3 * 60 * 60 + 46 * 60),
                     }),
-                    secondary: None,
-                    observed_at: None,
+                    secondary: Some(AccountPoolRateLimitWindow {
+                        used_percent: 40.0,
+                        resets_at: Some(now + 3 * 24 * 60 * 60 + 21 * 60 * 60 + 2 * 60),
+                    }),
+                    observed_at: Some(now - 24 * 60 * 60),
                 },
             },
             AccountPoolAccount {
