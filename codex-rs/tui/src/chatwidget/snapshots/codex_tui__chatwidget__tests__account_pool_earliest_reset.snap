@@ -7,8 +7,9 @@ expression: "render_bottom_popup(&chat, 80)"
 
   1. Rotation: fill-first                Prefer the lowest priority among
                                          eligible profiles.
-› 2. Rotation: earliest-reset (current)  Prefer the profile whose rate-limit
-                                         window resets soonest.
+› 2. Rotation: earliest-reset (current)  Prefer due cooldowns, idle
+                                         (not-yet-started) 5h windows, then
+                                         the soonest reset.
   3. Automatic                           Let the scheduler pick the next
                                          eligible profile using the rotation
                                          strategy above.

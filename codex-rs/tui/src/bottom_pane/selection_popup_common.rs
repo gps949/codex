@@ -336,12 +336,30 @@ fn wrap_row_lines(
     wrap_standard_row(row, desc_col, width, description_layout)
 }
 
-fn apply_row_state_style(lines: &mut [Line<'static>], selected: bool, is_disabled: bool) {
+fn apply_row_state_style(
+    lines: &mut [Line<'static>],
+    selected: bool,
+    is_disabled: bool,
+    preserve_description_colors: bool,
+    desc_col: usize,
+) {
     if selected {
         for line in lines.iter_mut() {
-            line.spans.iter_mut().for_each(|span| {
-                span.style = accent_style();
-            });
+            if !preserve_description_colors {
+                line.spans.iter_mut().for_each(|span| {
+                    span.style = accent_style();
+                });
+                continue;
+            }
+            // Keep styled description colors readable: accent only the name column.
+            let mut col = 0usize;
+            for span in line.spans.iter_mut() {
+                let width = display_width(span.content.as_ref());
+                if col < desc_col {
+                    span.style = accent_style();
+                }
+                col = col.saturating_add(width);
+            }
         }
     }
     if is_disabled {
@@ -530,6 +548,8 @@ fn render_rows_inner(
             &mut wrapped,
             Some(i) == state.selected_idx && !row.is_disabled,
             row.is_disabled,
+            /*preserve_description_colors*/ !row.description_spans.is_empty(),
+            desc_col,
         );
 
         // Render the wrapped lines.
@@ -695,16 +715,13 @@ pub(crate) fn render_rows_single_line_with_col_width_mode(
         }
 
         let mut full_line = build_full_line(row, desc_col, column_width.description_layout);
-        if Some(i) == state.selected_idx && !row.is_disabled {
-            full_line.spans.iter_mut().for_each(|span| {
-                span.style = accent_style();
-            });
-        }
-        if row.is_disabled {
-            full_line.spans.iter_mut().for_each(|span| {
-                span.style = span.style.dim();
-            });
-        }
+        apply_row_state_style(
+            std::slice::from_mut(&mut full_line),
+            Some(i) == state.selected_idx && !row.is_disabled,
+            row.is_disabled,
+            /*preserve_description_colors*/ !row.description_spans.is_empty(),
+            desc_col,
+        );
 
         let full_line = truncate_line_with_ellipsis_if_overflow(full_line, area.width as usize);
         full_line.render(
@@ -979,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn styled_descriptions_preserve_colors_until_selected() {
+    fn styled_descriptions_keep_colors_when_name_is_selected() {
         let rows = vec![GenericDisplayRow {
             name: "item".to_string(),
             description_spans: vec!["5h".cyan(), " weekly".magenta()],
@@ -1012,7 +1029,8 @@ mod tests {
             "no rows",
         );
         let expected = accent_style();
-        assert_eq!(selected[(6, 0)].style().fg, expected.fg);
-        assert_eq!(selected[(9, 0)].style().fg, expected.fg);
+        assert_eq!(selected[(0, 0)].style().fg, expected.fg);
+        assert_eq!(selected[(6, 0)].style().fg, Some(Color::Cyan));
+        assert_eq!(selected[(9, 0)].style().fg, Some(Color::Magenta));
     }
 }

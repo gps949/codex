@@ -33,6 +33,8 @@ pub enum AccountPoolRotationStrategy {
     #[default]
     FillFirst,
     /// Prefer the eligible profile whose observed rate-limit window resets soonest.
+    /// Idle 5h windows (0% used) are preferred over already-started future windows so real
+    /// traffic can start their countdown earlier for multi-account durability.
     EarliestReset,
 }
 

@@ -13,7 +13,6 @@ use codex_app_server_protocol::AccountPoolRateLimitWindow;
 use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::AccountPoolUseResponse;
 use codex_config::AccountPoolRotationStrategy;
-use codex_login::format_exhausted_reset_unix;
 use ratatui::text::Span;
 
 use super::*;
@@ -156,11 +155,18 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
     parts.push(vec![match &account.availability {
         AccountPoolAvailability::Available => "available".dim(),
         AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
-            Some(resets_at) => format!(
-                "cooling down until {}",
-                format_exhausted_reset_unix(*resets_at)
-            )
-            .dim(),
+            Some(resets_at) => {
+                let remaining_seconds = (*resets_at).saturating_sub(now.timestamp());
+                if remaining_seconds <= 0 {
+                    "cooling down, reset now".dim()
+                } else {
+                    format!(
+                        "cooling down, reset in {}",
+                        format_reset_countdown(remaining_seconds as u64)
+                    )
+                    .dim()
+                }
+            }
             None => "cooling down".dim(),
         },
         AccountPoolAvailability::AuthenticationUnavailable { .. } => {
@@ -219,6 +225,13 @@ fn account_rate_limit_description(
         colorize(format!("{:.0}%", window.used_percent)),
         label.dim(),
     ];
+    // A 0% primary window has not started ticking; the backend still reports a full-window
+    // reset which would otherwise look stuck at ~5h until the first real request.
+    if matches!(kind, AccountRateLimitKind::FiveHour) && window.used_percent <= 0.0 {
+        spans.push(", ".dim());
+        spans.push(colorize("not started".to_string()));
+        return spans;
+    }
     if let Some(resets_at) = window.resets_at {
         let remaining_seconds = resets_at.saturating_sub(now.timestamp());
         let (prefix, countdown) = if remaining_seconds <= 0 {
@@ -241,11 +254,9 @@ fn format_reset_countdown(remaining_seconds: u64) -> String {
     let hours = total_minutes / 60 % 24;
     let minutes = total_minutes % 60;
     if days > 0 {
-        format!("{days}d{hours:02}h{minutes:02}m")
-    } else if hours > 0 {
-        format!("{hours}h{minutes:02}m")
+        format!("{days}:{hours:02}:{minutes:02}")
     } else {
-        format!("{minutes}m")
+        format!("{hours}:{minutes:02}")
     }
 }
 
@@ -259,7 +270,8 @@ fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 
         (
             AccountPoolRotationStrategy::EarliestReset,
             "Rotation: earliest-reset".to_string(),
-            "Prefer the profile whose rate-limit window resets soonest.".to_string(),
+            "Prefer due cooldowns, idle (not-yet-started) 5h windows, then the soonest reset."
+                .to_string(),
         ),
     ]
 }

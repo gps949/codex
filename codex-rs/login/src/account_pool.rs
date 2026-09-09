@@ -940,11 +940,23 @@ fn account_is_eligible(
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum EarliestResetKey {
     Due,
+    /// Primary (5h) usage is still 0%, so the backend countdown has not started ticking.
+    /// Prefer these when selecting so real traffic starts the window earlier for the pool.
+    Unstarted,
     Future(i64),
     Unknown,
 }
 
 fn earliest_reset_key(account: &ManagedAccount, now: &DateTime<Utc>) -> EarliestResetKey {
+    if let Some(primary) = account.rate_limits.primary.as_ref()
+        && primary.used_percent <= 0.0
+    {
+        if primary.resets_at.is_some_and(|resets_at| resets_at <= *now) {
+            return EarliestResetKey::Due;
+        }
+        return EarliestResetKey::Unstarted;
+    }
+
     let mut earliest_future = None;
     for resets_at in account
         .rate_limits
@@ -1189,6 +1201,89 @@ mod tests {
             pool.lease(),
             Err(AccountPoolError::NoEligibleAccount)
         ));
+    }
+
+    #[tokio::test]
+    async fn earliest_reset_prefers_unstarted_five_hour_window_over_future() {
+        let pool = AccountPool::new();
+        pool.set_rotation_strategy(AccountPoolRotationStrategy::EarliestReset);
+        let started = profile("started", 0);
+        let idle = profile("idle", 10);
+        for account in [&started, &idle] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &started.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 20.0,
+                    resets_at: Some(now + chrono::Duration::hours(2)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("started rate limits");
+        pool.update_rate_limits(
+            &idle.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    // Backend reports a full-window reset while usage is still 0%.
+                    resets_at: Some(now + chrono::Duration::hours(5)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("idle rate limits");
+
+        let lease = pool.lease().expect("unstarted lease");
+        assert_eq!(lease.profile().id, idle.id);
+    }
+
+    #[tokio::test]
+    async fn earliest_reset_prefers_due_over_unstarted() {
+        let pool = AccountPool::new();
+        pool.set_rotation_strategy(AccountPoolRotationStrategy::EarliestReset);
+        let idle = profile("idle", 0);
+        let due = profile("due", 10);
+        for account in [&idle, &due] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &idle.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    resets_at: Some(now + chrono::Duration::hours(5)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("idle rate limits");
+        pool.update_rate_limits(
+            &due.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 90.0,
+                    resets_at: Some(now - chrono::Duration::minutes(1)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("due rate limits");
+
+        let lease = pool.lease().expect("due lease");
+        assert_eq!(lease.profile().id, due.id);
     }
 
     #[tokio::test]
