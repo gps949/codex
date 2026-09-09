@@ -6,6 +6,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod account_transition;
+mod account_window_warmup;
 mod apply_patch;
 mod apps;
 mod client;
