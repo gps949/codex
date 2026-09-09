@@ -625,7 +625,8 @@ impl AccountPool {
     /// True when the active account is near the preemptive switch threshold and at least one
     /// standby still needs its 5h window started — warmup should run more aggressively.
     pub fn needs_urgent_window_warmup(&self, preemptive_switch_percent: Option<f64>) -> bool {
-        let Some(threshold) = preemptive_switch_percent.filter(|percent| percent.is_finite()) else {
+        let Some(threshold) = preemptive_switch_percent.filter(|percent| percent.is_finite())
+        else {
             return false;
         };
         let state = self.lock_state();

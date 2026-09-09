@@ -471,10 +471,7 @@ pub(crate) async fn run_account_pool(cli_config_overrides: CliConfigOverrides) -
             codex_login::AccountAvailability::Available => "available".to_string(),
             codex_login::AccountAvailability::Exhausted { resets_at } => match resets_at {
                 Some(until) if *until > Utc::now() => {
-                    format!(
-                        "cooling down {}",
-                        format_relative_reset(*until, Utc::now())
-                    )
+                    format!("cooling down {}", format_relative_reset(*until, Utc::now()))
                 }
                 _ => "available".to_string(),
             },

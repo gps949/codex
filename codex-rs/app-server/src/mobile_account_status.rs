@@ -181,7 +181,10 @@ fn availability(account: &AccountPoolAccount) -> String {
         AccountPoolAvailability::Available => String::new(),
         AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
             Some(resets_at) => match DateTime::<Utc>::from_timestamp(*resets_at, 0) {
-                Some(reset) => format!(" · Cooling down {}", format_relative_reset(reset, Utc::now())),
+                Some(reset) => format!(
+                    " · Cooling down {}",
+                    format_relative_reset(reset, Utc::now())
+                ),
                 None => " · Cooling down".into(),
             },
             None => " · Cooling down".into(),

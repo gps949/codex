@@ -58,7 +58,13 @@ pub(crate) fn spawn_window_warmup_task(pool: Arc<AccountPool>, config: Config) -
     tokio::spawn(async move {
         let backoff = Mutex::new(HashMap::<AccountProfileId, Instant>::new());
         // Settle install/quota probes before the first pass.
-        tokio::time::sleep(config.account_pool.effective_window_warmup_interval().min(URGENT_WARMUP_INTERVAL)).await;
+        tokio::time::sleep(
+            config
+                .account_pool
+                .effective_window_warmup_interval()
+                .min(URGENT_WARMUP_INTERVAL),
+        )
+        .await;
         loop {
             if !config.account_pool.effective_window_warmup() {
                 tokio::time::sleep(config.account_pool.effective_window_warmup_interval()).await;
@@ -127,11 +133,7 @@ async fn warm_profile(
     profile_id: &AccountProfileId,
     auth_manager: Arc<AuthManager>,
 ) -> anyhow::Result<()> {
-    let Some(auth) = auth_manager
-        .auth()
-        .await
-        .filter(CodexAuth::is_chatgpt_auth)
-    else {
+    let Some(auth) = auth_manager.auth().await.filter(CodexAuth::is_chatgpt_auth) else {
         debug!(%profile_id, "skipping window warmup without ChatGPT auth");
         return Ok(());
     };
