@@ -1,10 +1,14 @@
 //! Bounded account views for narrow mobile surfaces. Quota values are observations, not balances.
 
+use chrono::DateTime;
+use chrono::Utc;
 use codex_app_server_protocol::AccountPoolAccount;
 use codex_app_server_protocol::AccountPoolAvailability;
 use codex_app_server_protocol::AccountPoolRateLimitWindow;
 use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::RateLimitSnapshot;
+use codex_login::format_primary_window_reset;
+use codex_login::format_relative_reset;
 
 pub(crate) fn pool_caption(pool: &AccountPoolReadResponse) -> Option<String> {
     pool.enabled.then(|| {
@@ -146,20 +150,44 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
     let state = availability(account);
     let current = if account.is_active { " · Current" } else { "" };
     let mut lines = vec![format!("{name}{current}{state}")];
-    for (name, window) in [
-        ("Primary", account.rate_limits.primary.as_ref()),
-        ("Secondary", account.rate_limits.secondary.as_ref()),
+    let now = Utc::now();
+    for (name, window, primary) in [
+        ("Primary", account.rate_limits.primary.as_ref(), true),
+        ("Secondary", account.rate_limits.secondary.as_ref(), false),
     ] {
         lines.push(format!(
             "{name}: {} used\nReset: {}",
             usage(window),
-            timestamp(window.and_then(|window| window.resets_at))
+            reset_label(window, primary, now)
         ));
     }
     lines.push(format!(
         "Checked: {}",
         timestamp(account.rate_limits.observed_at)
     ));
+    if let Some(warmup) = &account.window_warmup {
+        let observation = codex_login::WindowWarmupObservation {
+            outcome: match warmup.outcome {
+                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Succeeded => {
+                    codex_login::WindowWarmupOutcome::Succeeded
+                }
+                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Failed => {
+                    codex_login::WindowWarmupOutcome::Failed
+                }
+                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::SkippedNoAuth => {
+                    codex_login::WindowWarmupOutcome::SkippedNoAuth
+                }
+            },
+            attempted_at: DateTime::<Utc>::from_timestamp(warmup.attempted_at, 0).unwrap_or(now),
+            retry_after: warmup
+                .retry_after
+                .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+        };
+        lines.push(format!(
+            "Warmup: {}",
+            codex_login::format_window_warmup_status(&observation, now)
+        ));
+    }
     lines.push("Cached values remain if refresh fails.".into());
     Ok(lines.join("\n"))
 }
@@ -171,18 +199,47 @@ fn usage(window: Option<&AccountPoolRateLimitWindow>) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn availability(account: &AccountPoolAccount) -> &'static str {
-    match account.availability {
-        AccountPoolAvailability::Available => "",
-        AccountPoolAvailability::Exhausted { .. } => " · Cooling down",
-        AccountPoolAvailability::Disabled => " · Disabled",
-        AccountPoolAvailability::AuthenticationUnavailable { .. } => " · Login required",
+fn availability(account: &AccountPoolAccount) -> String {
+    match &account.availability {
+        AccountPoolAvailability::Available => String::new(),
+        AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
+            Some(resets_at) => match DateTime::<Utc>::from_timestamp(*resets_at, 0) {
+                Some(reset) => format!(
+                    " · Cooling down {}",
+                    format_relative_reset(reset, Utc::now())
+                ),
+                None => " · Cooling down".into(),
+            },
+            None => " · Cooling down".into(),
+        },
+        AccountPoolAvailability::Disabled => " · Disabled".into(),
+        AccountPoolAvailability::AuthenticationUnavailable { .. } => " · Login required".into(),
+    }
+}
+
+fn reset_label(
+    window: Option<&AccountPoolRateLimitWindow>,
+    primary: bool,
+    now: DateTime<Utc>,
+) -> String {
+    let Some(window) = window else {
+        return "unknown".into();
+    };
+    if primary && window.used_percent <= 0.0 {
+        return format_primary_window_reset(window.used_percent, window.resets_at, now);
+    }
+    match window
+        .resets_at
+        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+    {
+        Some(reset) => format_relative_reset(reset, now),
+        None => "unknown".into(),
     }
 }
 
 fn timestamp(value: Option<i64>) -> String {
     value
-        .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
+        .and_then(|value| DateTime::from_timestamp(value, 0))
         .map(|time| time.format("%m-%d %H:%M UTC").to_string())
         .unwrap_or_else(|| "unknown".into())
 }

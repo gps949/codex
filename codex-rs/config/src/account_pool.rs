@@ -33,8 +33,13 @@ pub enum AccountPoolRotationStrategy {
     #[default]
     FillFirst,
     /// Prefer the eligible profile whose observed rate-limit window resets soonest.
+    /// Idle 5h windows (0% used) are preferred over already-started future windows so real
+    /// traffic can start their countdown earlier for multi-account durability.
     EarliestReset,
 }
+
+/// Default cadence for identity-preserving 5h-window warmup of standby accounts.
+const DEFAULT_WINDOW_WARMUP_INTERVAL_MINUTES: u64 = 30;
 
 /// Scheduling knobs for the native multi-account execution pool.
 ///
@@ -61,6 +66,14 @@ pub struct AccountPoolConfigToml {
     /// natural reset across the pool is within this many minutes (waiting is free). Defaults
     /// to 60.
     pub auto_reset_credit_min_wait_minutes: Option<i64>,
+    /// Start idle primary (5h) rate-limit windows on standby accounts with a tiny generating
+    /// request that never switches the active execution identity. This helps `fill_first` pools
+    /// keep backup clocks ticking so a later failover waits less than a full 5h. Defaults to
+    /// true when a multi-account pool is installed.
+    pub window_warmup: Option<bool>,
+    /// Minutes between identity-preserving window-warmup passes. Defaults to 30. Values below 5
+    /// are clamped to 5.
+    pub window_warmup_interval_minutes: Option<u64>,
 }
 
 impl AccountPoolConfigToml {
@@ -88,6 +101,18 @@ impl AccountPoolConfigToml {
         self.auto_reset_credit_min_wait_minutes
             .unwrap_or(DEFAULT_RESET_CREDIT_MIN_WAIT_MINUTES)
             .max(0)
+    }
+
+    pub fn effective_window_warmup(&self) -> bool {
+        self.window_warmup.unwrap_or(true)
+    }
+
+    pub fn effective_window_warmup_interval(&self) -> std::time::Duration {
+        let minutes = self
+            .window_warmup_interval_minutes
+            .unwrap_or(DEFAULT_WINDOW_WARMUP_INTERVAL_MINUTES)
+            .max(5);
+        std::time::Duration::from_secs(minutes.saturating_mul(60))
     }
 }
 
@@ -121,5 +146,27 @@ mod tests {
             };
             assert_eq!(config.effective_preemptive_switch_percent(), None);
         }
+    }
+
+    #[test]
+    fn window_warmup_defaults_on_with_30_minute_interval() {
+        let config = AccountPoolConfigToml::default();
+        assert!(config.effective_window_warmup());
+        assert_eq!(
+            config.effective_window_warmup_interval(),
+            std::time::Duration::from_secs(30 * 60)
+        );
+    }
+
+    #[test]
+    fn window_warmup_interval_clamps_below_five_minutes() {
+        let config = AccountPoolConfigToml {
+            window_warmup_interval_minutes: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.effective_window_warmup_interval(),
+            std::time::Duration::from_secs(5 * 60)
+        );
     }
 }

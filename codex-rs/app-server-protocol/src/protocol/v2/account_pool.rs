@@ -58,6 +58,29 @@ pub struct AccountPoolAccount {
     pub plan_type: Option<PlanType>,
     pub email: Option<String>,
     pub rate_limits: AccountPoolRateLimits,
+    /// Latest identity-preserving 5h-window warmup observation for standby accounts.
+    #[serde(default)]
+    pub window_warmup: Option<AccountPoolWindowWarmup>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountPoolWindowWarmup {
+    pub outcome: AccountPoolWindowWarmupOutcome,
+    #[ts(type = "number")]
+    pub attempted_at: i64,
+    #[ts(type = "number | null")]
+    pub retry_after: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AccountPoolWindowWarmupOutcome {
+    Succeeded,
+    Failed,
+    SkippedNoAuth,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

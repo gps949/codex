@@ -12,8 +12,13 @@ use codex_app_server_protocol::AccountPoolAvailability;
 use codex_app_server_protocol::AccountPoolRateLimitWindow;
 use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::AccountPoolUseResponse;
+use codex_app_server_protocol::AccountPoolWindowWarmup;
+use codex_app_server_protocol::AccountPoolWindowWarmupOutcome;
 use codex_config::AccountPoolRotationStrategy;
-use codex_login::format_exhausted_reset_unix;
+use codex_login::WindowWarmupObservation;
+use codex_login::WindowWarmupOutcome;
+use codex_login::format_reset_countdown;
+use codex_login::format_window_warmup_status;
 use ratatui::text::Span;
 
 use super::*;
@@ -156,11 +161,18 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
     parts.push(vec![match &account.availability {
         AccountPoolAvailability::Available => "available".dim(),
         AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
-            Some(resets_at) => format!(
-                "cooling down until {}",
-                format_exhausted_reset_unix(*resets_at)
-            )
-            .dim(),
+            Some(resets_at) => {
+                let remaining_seconds = (*resets_at).saturating_sub(now.timestamp());
+                if remaining_seconds <= 0 {
+                    "cooling down, reset now".dim()
+                } else {
+                    format!(
+                        "cooling down, reset in {}",
+                        format_reset_countdown(remaining_seconds as u64)
+                    )
+                    .dim()
+                }
+            }
             None => "cooling down".dim(),
         },
         AccountPoolAvailability::AuthenticationUnavailable { .. } => {
@@ -184,6 +196,17 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
             AccountRateLimitKind::Weekly,
             now,
         ));
+    }
+    if let Some(warmup) = account.window_warmup.as_ref().and_then(|warmup| {
+        if account.is_active {
+            return None;
+        }
+        Some(format_window_warmup_status(
+            &protocol_warmup_to_login(warmup),
+            now,
+        ))
+    }) {
+        parts.push(vec![warmup.dim()]);
     }
 
     let mut description = Vec::new();
@@ -219,6 +242,13 @@ fn account_rate_limit_description(
         colorize(format!("{:.0}%", window.used_percent)),
         label.dim(),
     ];
+    // A 0% primary window has not started ticking; the backend still reports a full-window
+    // reset which would otherwise look stuck at ~5h until the first real request.
+    if matches!(kind, AccountRateLimitKind::FiveHour) && window.used_percent <= 0.0 {
+        spans.push(", ".dim());
+        spans.push(colorize("not started".to_string()));
+        return spans;
+    }
     if let Some(resets_at) = window.resets_at {
         let remaining_seconds = resets_at.saturating_sub(now.timestamp());
         let (prefix, countdown) = if remaining_seconds <= 0 {
@@ -235,20 +265,6 @@ fn account_rate_limit_description(
     spans
 }
 
-fn format_reset_countdown(remaining_seconds: u64) -> String {
-    let total_minutes = remaining_seconds.saturating_add(59) / 60;
-    let days = total_minutes / (24 * 60);
-    let hours = total_minutes / 60 % 24;
-    let minutes = total_minutes % 60;
-    if days > 0 {
-        format!("{days}d{hours:02}h{minutes:02}m")
-    } else if hours > 0 {
-        format!("{hours}h{minutes:02}m")
-    } else {
-        format!("{minutes}m")
-    }
-}
-
 fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 2] {
     [
         (
@@ -259,9 +275,25 @@ fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 
         (
             AccountPoolRotationStrategy::EarliestReset,
             "Rotation: earliest-reset".to_string(),
-            "Prefer the profile whose rate-limit window resets soonest.".to_string(),
+            "Prefer due cooldowns, idle (not-yet-started) 5h windows, then the soonest reset."
+                .to_string(),
         ),
     ]
+}
+
+fn protocol_warmup_to_login(warmup: &AccountPoolWindowWarmup) -> WindowWarmupObservation {
+    WindowWarmupObservation {
+        outcome: match warmup.outcome {
+            AccountPoolWindowWarmupOutcome::Succeeded => WindowWarmupOutcome::Succeeded,
+            AccountPoolWindowWarmupOutcome::Failed => WindowWarmupOutcome::Failed,
+            AccountPoolWindowWarmupOutcome::SkippedNoAuth => WindowWarmupOutcome::SkippedNoAuth,
+        },
+        attempted_at: DateTime::<Utc>::from_timestamp(warmup.attempted_at, 0)
+            .unwrap_or_else(Utc::now),
+        retry_after: warmup
+            .retry_after
+            .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+    }
 }
 
 pub(crate) fn active_pool_profile_label(pool: &AccountPoolReadResponse) -> Option<String> {

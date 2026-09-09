@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use crate::account_window_warmup::spawn_window_warmup_task;
 use crate::config::Config;
 use crate::execution_request_auth::ExecutionRequestAuth;
 use crate::reset_credit_singleflight::ResetCreditRescueAttempt;
@@ -30,6 +31,7 @@ use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use tokio::sync::OnceCell;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 /// Process-local registry that preserves one execution-auth coordinator for every live AuthManager.
 ///
@@ -57,6 +59,7 @@ pub(crate) struct ExecutionAuth {
     runtime: OnceCell<Arc<AccountPoolRuntime>>,
     change_tx: watch::Sender<u64>,
     reset_credit_rescue_attempt: ResetCreditRescueSingleflight,
+    window_warmup_task: StdMutex<Option<JoinHandle<()>>>,
 }
 
 /// Private outcome of one lazy pool-install attempt. `NotConfigured` keeps the cell empty so a
@@ -178,6 +181,7 @@ impl ExecutionAuth {
             runtime: OnceCell::new(),
             change_tx,
             reset_credit_rescue_attempt: ResetCreditRescueSingleflight::default(),
+            window_warmup_task: StdMutex::new(None),
         }
     }
 
@@ -248,6 +252,7 @@ impl ExecutionAuth {
             let pool = runtime.pool();
             pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
             pool.set_rotation_strategy(config.account_pool.effective_rotation_strategy());
+            self.sync_window_warmup_task(Arc::clone(&pool), config);
             return Ok(());
         }
 
@@ -280,12 +285,32 @@ impl ExecutionAuth {
                 pool.set_rotation_strategy(config.account_pool.effective_rotation_strategy());
                 if newly_installed.load(Ordering::Acquire) {
                     self.notify_change();
-                    self.spawn_pool_change_bridge(pool);
+                    self.spawn_pool_change_bridge(Arc::clone(&pool));
                 }
+                self.sync_window_warmup_task(Arc::clone(&pool), config);
                 Ok(())
             }
             Err(RuntimeInitError::NotConfigured) => Ok(()),
             Err(RuntimeInitError::Failed(error)) => Err(error),
+        }
+    }
+
+    fn sync_window_warmup_task(&self, pool: Arc<AccountPool>, config: &Config) {
+        let enabled = config.account_pool.effective_window_warmup();
+        let Ok(mut slot) = self.window_warmup_task.lock() else {
+            return;
+        };
+        let running = slot.as_ref().is_some_and(|handle| !handle.is_finished());
+        match (enabled, running) {
+            (true, false) => {
+                *slot = Some(spawn_window_warmup_task(pool, config.clone()));
+            }
+            (false, true) => {
+                if let Some(previous) = slot.take() {
+                    previous.abort();
+                }
+            }
+            (true, true) | (false, false) => {}
         }
     }
 

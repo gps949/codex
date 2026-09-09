@@ -7,14 +7,15 @@ expression: popup
 
 › 1. Rotation: fill-first (current)      Prefer the lowest priority among
                                          eligible profiles.
-  2. Rotation: earliest-reset            Prefer the profile whose rate-limit
-                                         window resets soonest.
+  2. Rotation: earliest-reset            Prefer due cooldowns, idle (not-yet-
+                                         started) 5h windows, then the soonest
+                                         reset.
   3. Automatic                           Let the scheduler pick the next
                                          eligible profile using the rotation
                                          strategy above.
   4. primary-acct (Team plan) (current)  priority 0 · available · 38% 5h used,
-                                         reset in 3h46m · 40% weekly used,
-                                         reset in 3d21h02m
+                                         reset in 3:46 · 40% weekly used,
+                                         reset in 3:21:02
   5. backup-acct (backup@example.com)    priority 10 · cooling down · quota
                                          unknown
 

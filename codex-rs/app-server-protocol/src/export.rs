@@ -64,6 +64,8 @@ const EXPERIMENTAL_TYPES_PROMOTED_TO_STABLE: &[&str] = &[
     "AccountPoolRateLimitWindow",
     "AccountPoolRateLimits",
     "AccountPoolReadResponse",
+    "AccountPoolWindowWarmup",
+    "AccountPoolWindowWarmupOutcome",
 ];
 const SPECIAL_DEFINITIONS: &[&str] = &[
     "ClientNotification",

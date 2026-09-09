@@ -412,6 +412,7 @@ mod tests {
                 plan_type: None,
                 email: None,
                 rate_limits: AccountPoolRateLimits::default(),
+                window_warmup: None,
             }],
         };
         let snapshot: codex_app_server_protocol::RateLimitSnapshot = serde_json::from_value(serde_json::json!({
@@ -492,6 +493,7 @@ mod tests {
                 plan_type: None,
                 email: None,
                 rate_limits: AccountPoolRateLimits::default(),
+                window_warmup: None,
             }],
         };
         let mut response = GetWorkspaceMessagesResponse {

@@ -78,6 +78,18 @@
         },
         "rateLimits": {
           "$ref": "#/definitions/AccountPoolRateLimits"
+        },
+        "windowWarmup": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountPoolWindowWarmup"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Latest identity-preserving 5h-window warmup observation for standby accounts."
         }
       },
       "required": [
@@ -247,6 +259,37 @@
         "accounts"
       ],
       "type": "object"
+    },
+    "AccountPoolWindowWarmup": {
+      "properties": {
+        "attemptedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/definitions/AccountPoolWindowWarmupOutcome"
+        },
+        "retryAfter": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attemptedAt",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "AccountPoolWindowWarmupOutcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "skippedNoAuth"
+      ],
+      "type": "string"
     },
     "AccountRateLimitsUpdatedNotification": {
       "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does not clear a previously observed value.",

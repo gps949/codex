@@ -7,7 +7,8 @@ fn pool() -> AccountPoolReadResponse {
         "enabled": true, "activeProfileId": "secret-work-id", "activeGeneration": 1,
         "accounts": [{"profileId":"secret-work-id", "label":"Work", "priority":10,
         "isActive":true, "availability":{"type":"available"}, "planType":null, "email":null,
-        "rateLimits":{"primary":{"usedPercent":37.0,"resetsAt":1900000000},"secondary":null,"observedAt":null}}]
+        "rateLimits":{"primary":{"usedPercent":37.0,"resetsAt":1900000000},"secondary":null,"observedAt":null},
+        "windowWarmup":null}]
     })).unwrap()
 }
 
@@ -47,16 +48,39 @@ fn mobile_account_pages_are_bounded_and_names_cannot_inject_markup() {
 }
 
 #[test]
-fn mobile_account_detail_reports_reset_and_observation_time() {
-    insta::assert_snapshot!(detail(&pool(), "Work").unwrap(), @"
-    Work · Current
-    Primary: 37% used
-    Reset: 03-17 17:46 UTC
-    Secondary: unknown used
-    Reset: unknown
-    Checked: unknown
-    Cached values remain if refresh fails.
-    ");
+fn mobile_account_detail_reports_relative_reset_and_observation_time() {
+    let text = detail(&pool(), "Work").unwrap();
+    assert!(text.contains("Work · Current"));
+    assert!(text.contains("Primary: 37% used"));
+    assert!(text.contains("Reset: in "));
+    assert!(text.contains("Secondary: unknown used"));
+    assert!(text.contains("Reset: unknown"));
+    assert!(text.contains("Checked: unknown"));
+    assert!(text.contains("Cached values remain if refresh fails."));
+}
+
+#[test]
+fn mobile_account_detail_marks_idle_primary_window_not_started() {
+    let mut pool = pool();
+    pool.accounts[0].rate_limits.primary = Some(AccountPoolRateLimitWindow {
+        used_percent: 0.0,
+        resets_at: Some(1_900_000_000),
+    });
+    let text = detail(&pool, "Work").unwrap();
+    assert!(text.contains("Primary: 0% used"));
+    assert!(text.contains("Reset: not started"));
+}
+
+#[test]
+fn mobile_account_detail_includes_warmup_status() {
+    let mut pool = pool();
+    pool.accounts[0].window_warmup = Some(codex_app_server_protocol::AccountPoolWindowWarmup {
+        outcome: codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Succeeded,
+        attempted_at: 1_900_000_000,
+        retry_after: None,
+    });
+    let text = detail(&pool, "Work").unwrap();
+    assert!(text.contains("Warmup: 5h warmed"));
 }
 
 #[test]

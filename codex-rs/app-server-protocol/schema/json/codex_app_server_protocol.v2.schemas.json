@@ -147,6 +147,18 @@
         },
         "rateLimits": {
           "$ref": "#/definitions/AccountPoolRateLimits"
+        },
+        "windowWarmup": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountPoolWindowWarmup"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Latest identity-preserving 5h-window warmup observation for standby accounts."
         }
       },
       "required": [
@@ -352,6 +364,37 @@
       ],
       "title": "AccountPoolUpdatedNotification",
       "type": "object"
+    },
+    "AccountPoolWindowWarmup": {
+      "properties": {
+        "attemptedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/definitions/AccountPoolWindowWarmupOutcome"
+        },
+        "retryAfter": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attemptedAt",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "AccountPoolWindowWarmupOutcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "skippedNoAuth"
+      ],
+      "type": "string"
     },
     "AccountRateLimitsUpdatedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
