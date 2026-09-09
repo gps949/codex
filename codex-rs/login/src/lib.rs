@@ -21,6 +21,10 @@ mod success_page;
 
 pub use account_display::format_exhausted_reset;
 pub use account_display::format_exhausted_reset_unix;
+pub use account_display::format_plan_type_label;
+pub use account_display::format_primary_window_reset;
+pub use account_display::format_relative_reset;
+pub use account_display::format_reset_countdown;
 pub use account_external_auth::AccountPoolExternalAuth;
 pub use account_identity::AccountLoginIdentity;
 pub use account_login::AccountLoginFlowError;

@@ -583,33 +583,73 @@ impl AccountPool {
             .collect()
     }
 
-    /// Standby profiles whose primary (5h) window has not started (`used_percent == 0`).
+    /// Standby profiles whose primary (5h) window has not started, or whose primary quota is still
+    /// unknown.
     ///
     /// These are eligible for an identity-preserving warmup request so `fill_first` backups can
-    /// begin ticking without switching the active execution account.
+    /// begin ticking without switching the active execution account. Unknown primary windows are
+    /// included so a GET/warmup pass can discover whether they still need a kick.
     pub fn window_warmup_candidates(&self) -> Vec<AccountProfileId> {
         let state = self.lock_state();
         let now = Utc::now();
-        let mut candidates: Vec<(u32, AccountProfileId)> = state
+        let mut candidates: Vec<(u8, u32, AccountProfileId)> = state
             .accounts
             .values()
             .filter(|account| {
                 account.availability.is_eligible(&now)
                     && state.active_profile.as_ref() != Some(&account.profile.id)
-                    && account
-                        .rate_limits
-                        .primary
-                        .as_ref()
-                        .is_some_and(|window| window.used_percent <= 0.0)
+                    && match account.rate_limits.primary.as_ref() {
+                        None => true,
+                        Some(window) => window.used_percent <= 0.0,
+                    }
             })
-            .map(|account| (account.profile.priority, account.profile.id.clone()))
+            .map(|account| {
+                // Probe unknown quota before known-idle so we learn state sooner.
+                let unknown_first = u8::from(account.rate_limits.primary.is_some());
+                (
+                    unknown_first,
+                    account.profile.priority,
+                    account.profile.id.clone(),
+                )
+            })
             .collect();
         candidates.sort_by(|left, right| {
             left.0
                 .cmp(&right.0)
-                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.as_str().cmp(right.2.as_str()))
         });
-        candidates.into_iter().map(|(_, id)| id).collect()
+        candidates.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    /// True when the active account is near the preemptive switch threshold and at least one
+    /// standby still needs its 5h window started — warmup should run more aggressively.
+    pub fn needs_urgent_window_warmup(&self, preemptive_switch_percent: Option<f64>) -> bool {
+        let Some(threshold) = preemptive_switch_percent.filter(|percent| percent.is_finite()) else {
+            return false;
+        };
+        let state = self.lock_state();
+        let now = Utc::now();
+        let Some(active_id) = state.active_profile.as_ref() else {
+            return false;
+        };
+        let Some(active) = state.accounts.get(active_id) else {
+            return false;
+        };
+        let Some(primary) = active.rate_limits.primary.as_ref() else {
+            return false;
+        };
+        if primary.used_percent + f64::EPSILON < threshold {
+            return false;
+        }
+        state.accounts.values().any(|account| {
+            account.availability.is_eligible(&now)
+                && Some(&account.profile.id) != state.active_profile.as_ref()
+                && match account.rate_limits.primary.as_ref() {
+                    None => true,
+                    Some(window) => window.used_percent <= 0.0,
+                }
+        })
     }
 
     /// Marks a lease exhausted and rotates only when that exact lease is still the active
@@ -932,6 +972,8 @@ fn select_fill_first(
             left.profile
                 .priority
                 .cmp(&right.profile.priority)
+                // Equal-priority: prefer unstarted 5h windows so the first lease starts the clock.
+                .then_with(|| earliest_reset_key(left, now).cmp(&earliest_reset_key(right, now)))
                 .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
         })
         .map(|account| account.profile.id.clone())
@@ -1283,6 +1325,92 @@ mod tests {
         .expect("started limits");
 
         assert_eq!(pool.window_warmup_candidates(), vec![idle.id]);
+    }
+
+    #[tokio::test]
+    async fn window_warmup_candidates_include_unknown_primary_before_idle() {
+        let pool = AccountPool::new();
+        let active = profile("active", 0);
+        let idle = profile("idle", 10);
+        let unknown = profile("unknown", 20);
+        for account in [&active, &idle, &unknown] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let lease = pool.lease().expect("activate preferred");
+        assert_eq!(lease.profile().id, active.id);
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &idle.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    resets_at: Some(now + chrono::Duration::hours(5)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("idle limits");
+
+        assert_eq!(pool.window_warmup_candidates(), vec![unknown.id, idle.id]);
+        assert!(!pool.needs_urgent_window_warmup(Some(80.0)));
+        pool.update_rate_limits(
+            &active.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 85.0,
+                    resets_at: Some(now + chrono::Duration::hours(1)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("active near threshold");
+        assert!(pool.needs_urgent_window_warmup(Some(80.0)));
+        assert!(!pool.needs_urgent_window_warmup(None));
+    }
+
+    #[tokio::test]
+    async fn fill_first_equal_priority_prefers_unstarted_five_hour_window() {
+        let pool = AccountPool::new();
+        pool.set_rotation_strategy(AccountPoolRotationStrategy::FillFirst);
+        let started = profile("started", 10);
+        let idle = profile("idle", 10);
+        for account in [&started, &idle] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &started.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 20.0,
+                    resets_at: Some(now + chrono::Duration::hours(2)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("started rate limits");
+        pool.update_rate_limits(
+            &idle.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    resets_at: Some(now + chrono::Duration::hours(5)),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("idle rate limits");
+
+        let lease = pool.lease().expect("select unstarted among equal priority");
+        assert_eq!(lease.profile().id, idle.id);
     }
 
     #[tokio::test]

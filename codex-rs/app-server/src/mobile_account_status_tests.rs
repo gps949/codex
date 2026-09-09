@@ -60,6 +60,18 @@ fn mobile_account_detail_reports_reset_and_observation_time() {
 }
 
 #[test]
+fn mobile_account_detail_marks_idle_primary_window_not_started() {
+    let mut pool = pool();
+    pool.accounts[0].rate_limits.primary = Some(AccountPoolRateLimitWindow {
+        used_percent: 0.0,
+        resets_at: Some(1_900_000_000),
+    });
+    let text = detail(&pool, "Work").unwrap();
+    assert!(text.contains("Primary: 0% used"));
+    assert!(text.contains("Reset: not started"));
+}
+
+#[test]
 fn mobile_account_displayed_names_are_valid_selectors() {
     let mut pool = pool();
     pool.accounts[0].label = Some("Work_Pro [personal]".repeat(10));

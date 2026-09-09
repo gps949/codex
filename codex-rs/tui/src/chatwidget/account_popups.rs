@@ -13,6 +13,7 @@ use codex_app_server_protocol::AccountPoolRateLimitWindow;
 use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::AccountPoolUseResponse;
 use codex_config::AccountPoolRotationStrategy;
+use codex_login::format_reset_countdown;
 use ratatui::text::Span;
 
 use super::*;
@@ -246,18 +247,6 @@ fn account_rate_limit_description(
         spans.push(colorize(countdown));
     }
     spans
-}
-
-fn format_reset_countdown(remaining_seconds: u64) -> String {
-    let total_minutes = remaining_seconds.saturating_add(59) / 60;
-    let days = total_minutes / (24 * 60);
-    let hours = total_minutes / 60 % 24;
-    let minutes = total_minutes % 60;
-    if days > 0 {
-        format!("{days}:{hours:02}:{minutes:02}")
-    } else {
-        format!("{hours}:{minutes:02}")
-    }
 }
 
 fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 2] {

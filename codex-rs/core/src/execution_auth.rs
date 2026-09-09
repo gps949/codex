@@ -252,6 +252,7 @@ impl ExecutionAuth {
             let pool = runtime.pool();
             pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
             pool.set_rotation_strategy(config.account_pool.effective_rotation_strategy());
+            self.sync_window_warmup_task(Arc::clone(&pool), config);
             return Ok(());
         }
 
@@ -285,20 +286,31 @@ impl ExecutionAuth {
                 if newly_installed.load(Ordering::Acquire) {
                     self.notify_change();
                     self.spawn_pool_change_bridge(Arc::clone(&pool));
-                    if config.account_pool.effective_window_warmup() {
-                        let handle = spawn_window_warmup_task(pool, config.clone());
-                        if let Ok(mut slot) = self.window_warmup_task.lock() {
-                            if let Some(previous) = slot.take() {
-                                previous.abort();
-                            }
-                            *slot = Some(handle);
-                        }
-                    }
                 }
+                self.sync_window_warmup_task(Arc::clone(&pool), config);
                 Ok(())
             }
             Err(RuntimeInitError::NotConfigured) => Ok(()),
             Err(RuntimeInitError::Failed(error)) => Err(error),
+        }
+    }
+
+    fn sync_window_warmup_task(&self, pool: Arc<AccountPool>, config: &Config) {
+        let enabled = config.account_pool.effective_window_warmup();
+        let Ok(mut slot) = self.window_warmup_task.lock() else {
+            return;
+        };
+        let running = slot.as_ref().is_some_and(|handle| !handle.is_finished());
+        match (enabled, running) {
+            (true, false) => {
+                *slot = Some(spawn_window_warmup_task(pool, config.clone()));
+            }
+            (false, true) => {
+                if let Some(previous) = slot.take() {
+                    previous.abort();
+                }
+            }
+            (true, true) | (false, false) => {}
         }
     }
 

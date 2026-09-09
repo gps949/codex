@@ -15,6 +15,7 @@ use codex_login::ServerOptions;
 use codex_login::begin_account_browser_login;
 use codex_login::begin_account_device_login;
 use codex_login::format_exhausted_reset;
+use codex_login::format_relative_reset;
 use codex_login::logout_with_revoke;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_utils_cli::CliConfigOverrides;
@@ -470,7 +471,10 @@ pub(crate) async fn run_account_pool(cli_config_overrides: CliConfigOverrides) -
             codex_login::AccountAvailability::Available => "available".to_string(),
             codex_login::AccountAvailability::Exhausted { resets_at } => match resets_at {
                 Some(until) if *until > Utc::now() => {
-                    format!("cooldown until {}", format_exhausted_reset(*until))
+                    format!(
+                        "cooling down {}",
+                        format_relative_reset(*until, Utc::now())
+                    )
                 }
                 _ => "available".to_string(),
             },
