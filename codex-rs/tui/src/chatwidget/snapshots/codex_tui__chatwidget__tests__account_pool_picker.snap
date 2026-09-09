@@ -7,9 +7,9 @@ expression: popup
 
 › 1. Rotation: fill-first (current)      Prefer the lowest priority among
                                          eligible profiles.
-  2. Rotation: earliest-reset            Prefer due cooldowns, idle
-                                         (not-yet-started) 5h windows, then
-                                         the soonest reset.
+  2. Rotation: earliest-reset            Prefer due cooldowns, idle (not-yet-
+                                         started) 5h windows, then the soonest
+                                         reset.
   3. Automatic                           Let the scheduler pick the next
                                          eligible profile using the rotation
                                          strategy above.
