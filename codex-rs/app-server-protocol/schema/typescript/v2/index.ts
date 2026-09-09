@@ -8,6 +8,8 @@ export type { AccountPoolRateLimitWindow } from "./AccountPoolRateLimitWindow";
 export type { AccountPoolRateLimits } from "./AccountPoolRateLimits";
 export type { AccountPoolReadResponse } from "./AccountPoolReadResponse";
 export type { AccountPoolUpdatedNotification } from "./AccountPoolUpdatedNotification";
+export type { AccountPoolWindowWarmup } from "./AccountPoolWindowWarmup";
+export type { AccountPoolWindowWarmupOutcome } from "./AccountPoolWindowWarmupOutcome";
 export type { AccountRateLimitsUpdatedNotification } from "./AccountRateLimitsUpdatedNotification";
 export type { AccountTokenUsageDailyBucket } from "./AccountTokenUsageDailyBucket";
 export type { AccountTokenUsageSummary } from "./AccountTokenUsageSummary";
