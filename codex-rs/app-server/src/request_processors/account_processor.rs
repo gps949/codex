@@ -1852,21 +1852,23 @@ fn account_pool_rate_limit_window(
 fn account_pool_window_warmup(
     observation: Option<codex_login::WindowWarmupObservation>,
 ) -> Option<codex_app_server_protocol::AccountPoolWindowWarmup> {
-    observation.map(|observation| codex_app_server_protocol::AccountPoolWindowWarmup {
-        outcome: match observation.outcome {
-            codex_login::WindowWarmupOutcome::Succeeded => {
-                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Succeeded
-            }
-            codex_login::WindowWarmupOutcome::Failed => {
-                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Failed
-            }
-            codex_login::WindowWarmupOutcome::SkippedNoAuth => {
-                codex_app_server_protocol::AccountPoolWindowWarmupOutcome::SkippedNoAuth
-            }
+    observation.map(
+        |observation| codex_app_server_protocol::AccountPoolWindowWarmup {
+            outcome: match observation.outcome {
+                codex_login::WindowWarmupOutcome::Succeeded => {
+                    codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Succeeded
+                }
+                codex_login::WindowWarmupOutcome::Failed => {
+                    codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Failed
+                }
+                codex_login::WindowWarmupOutcome::SkippedNoAuth => {
+                    codex_app_server_protocol::AccountPoolWindowWarmupOutcome::SkippedNoAuth
+                }
+            },
+            attempted_at: observation.attempted_at.timestamp(),
+            retry_after: observation.retry_after.map(|value| value.timestamp()),
         },
-        attempted_at: observation.attempted_at.timestamp(),
-        retry_after: observation.retry_after.map(|value| value.timestamp()),
-    })
+    )
 }
 
 fn workspace_message_from_backend(

@@ -178,8 +178,7 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
                     codex_login::WindowWarmupOutcome::SkippedNoAuth
                 }
             },
-            attempted_at: DateTime::<Utc>::from_timestamp(warmup.attempted_at, 0)
-                .unwrap_or(now),
+            attempted_at: DateTime::<Utc>::from_timestamp(warmup.attempted_at, 0).unwrap_or(now),
             retry_after: warmup
                 .retry_after
                 .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),

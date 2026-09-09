@@ -1457,7 +1457,7 @@ mod tests {
             },
         )
         .expect("idle limits");
-        assert_eq!(pool.window_warmup_candidates(), vec![idle.id]);
+        assert_eq!(pool.window_warmup_candidates(), vec![idle.id.clone()]);
 
         pool.record_window_warmup(
             &idle.id,

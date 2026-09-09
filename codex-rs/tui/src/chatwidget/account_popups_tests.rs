@@ -1,4 +1,5 @@
 use super::*;
+use codex_app_server_protocol::AccountPoolRateLimits;
 use codex_login::format_reset_countdown;
 use pretty_assertions::assert_eq;
 

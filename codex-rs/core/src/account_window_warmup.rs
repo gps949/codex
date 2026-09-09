@@ -106,11 +106,7 @@ async fn warm_profile(
     auth_manager: Arc<AuthManager>,
 ) -> anyhow::Result<()> {
     let attempted_at = Utc::now();
-    let Some(auth) = auth_manager
-        .auth()
-        .await
-        .filter(CodexAuth::is_chatgpt_auth)
-    else {
+    let Some(auth) = auth_manager.auth().await.filter(CodexAuth::is_chatgpt_auth) else {
         debug!(%profile_id, "skipping window warmup without ChatGPT auth");
         let _ = pool.record_window_warmup(
             profile_id,

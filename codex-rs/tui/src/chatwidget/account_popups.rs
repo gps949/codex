@@ -10,16 +10,15 @@ use chrono::Utc;
 use codex_app_server_protocol::AccountPoolAccount;
 use codex_app_server_protocol::AccountPoolAvailability;
 use codex_app_server_protocol::AccountPoolRateLimitWindow;
-use codex_app_server_protocol::AccountPoolRateLimits;
 use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::AccountPoolUseResponse;
 use codex_app_server_protocol::AccountPoolWindowWarmup;
 use codex_app_server_protocol::AccountPoolWindowWarmupOutcome;
 use codex_config::AccountPoolRotationStrategy;
-use codex_login::format_reset_countdown;
-use codex_login::format_window_warmup_status;
 use codex_login::WindowWarmupObservation;
 use codex_login::WindowWarmupOutcome;
+use codex_login::format_reset_countdown;
+use codex_login::format_window_warmup_status;
 use ratatui::text::Span;
 
 use super::*;

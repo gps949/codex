@@ -74,12 +74,11 @@ fn mobile_account_detail_marks_idle_primary_window_not_started() {
 #[test]
 fn mobile_account_detail_includes_warmup_status() {
     let mut pool = pool();
-    pool.accounts[0].window_warmup =
-        Some(codex_app_server_protocol::AccountPoolWindowWarmup {
-            outcome: codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Succeeded,
-            attempted_at: 1_900_000_000,
-            retry_after: None,
-        });
+    pool.accounts[0].window_warmup = Some(codex_app_server_protocol::AccountPoolWindowWarmup {
+        outcome: codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Succeeded,
+        attempted_at: 1_900_000_000,
+        retry_after: None,
+    });
     let text = detail(&pool, "Work").unwrap();
     assert!(text.contains("Warmup: 5h warmed"));
 }
