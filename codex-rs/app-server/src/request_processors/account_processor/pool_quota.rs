@@ -85,6 +85,7 @@ pub(super) async fn refresh(config: &Config, response: &mut AccountPoolReadRespo
                             resets_at: window
                                 .resets_at
                                 .and_then(|time| DateTime::from_timestamp(time, 0)),
+                            window_minutes: window.window_minutes,
                         }
                     };
                     Some(AccountRateLimits {

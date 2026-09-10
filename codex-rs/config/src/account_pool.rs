@@ -39,7 +39,7 @@ pub enum AccountPoolRotationStrategy {
 }
 
 /// Default cadence for identity-preserving 5h-window warmup of standby accounts.
-const DEFAULT_WINDOW_WARMUP_INTERVAL_MINUTES: u64 = 30;
+const DEFAULT_WINDOW_WARMUP_INTERVAL_MINUTES: u64 = 5;
 
 /// Scheduling knobs for the native multi-account execution pool.
 ///
@@ -71,7 +71,7 @@ pub struct AccountPoolConfigToml {
     /// keep backup clocks ticking so a later failover waits less than a full 5h. Defaults to
     /// true when a multi-account pool is installed.
     pub window_warmup: Option<bool>,
-    /// Minutes between identity-preserving window-warmup passes. Defaults to 30. Values below 5
+    /// Minutes between identity-preserving window-warmup passes. Defaults to 5. Values below 5
     /// are clamped to 5.
     pub window_warmup_interval_minutes: Option<u64>,
 }
@@ -149,12 +149,12 @@ mod tests {
     }
 
     #[test]
-    fn window_warmup_defaults_on_with_30_minute_interval() {
+    fn window_warmup_defaults_on_with_5_minute_interval() {
         let config = AccountPoolConfigToml::default();
         assert!(config.effective_window_warmup());
         assert_eq!(
             config.effective_window_warmup_interval(),
-            std::time::Duration::from_secs(30 * 60)
+            std::time::Duration::from_secs(5 * 60)
         );
     }
 
