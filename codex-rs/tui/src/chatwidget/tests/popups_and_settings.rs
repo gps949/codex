@@ -3538,7 +3538,7 @@ async fn account_pool_picker_snapshot() {
                 is_active: true,
                 availability: AccountPoolAvailability::Available,
                 plan_type: None,
-                email: None,
+                email: Some("primary@example.com".to_string()),
                 rate_limits: AccountPoolRateLimits {
                     primary: Some(AccountPoolRateLimitWindow {
                         used_percent: 38.0,
@@ -3554,7 +3554,7 @@ async fn account_pool_picker_snapshot() {
             },
             AccountPoolAccount {
                 profile_id: "backup-acct".to_string(),
-                label: None,
+                label: Some("Backup label".to_string()),
                 priority: 10,
                 is_active: false,
                 availability: AccountPoolAvailability::Exhausted { resets_at: None },

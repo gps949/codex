@@ -145,11 +145,12 @@ impl ChatWidget {
 }
 
 fn account_display_name(account: &AccountPoolAccount) -> String {
-    match (&account.label, &account.email) {
-        (Some(label), _) => format!("{} ({label})", account.profile_id),
-        (None, Some(email)) => format!("{} ({email})", account.profile_id),
-        (None, None) => account.profile_id.clone(),
-    }
+    // Email is the most recognizable, usually unique identity for ChatGPT accounts.
+    account
+        .email
+        .clone()
+        .or_else(|| account.label.clone())
+        .unwrap_or_else(|| account.profile_id.clone())
 }
 
 fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<Span<'static>> {
@@ -300,12 +301,7 @@ pub(crate) fn active_pool_profile_label(pool: &AccountPoolReadResponse) -> Optio
     pool.accounts
         .iter()
         .find(|account| account.is_active)
-        .map(|account| {
-            account
-                .label
-                .clone()
-                .unwrap_or_else(|| account.profile_id.clone())
-        })
+        .map(account_display_name)
 }
 
 #[cfg(test)]

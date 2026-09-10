@@ -34,10 +34,13 @@ pub(crate) fn account_caption(pool: &AccountPoolReadResponse) -> String {
 pub(crate) fn label(account: &AccountPoolAccount) -> String {
     compact_label(
         account
-            .label
+            .email
             .as_deref()
             .filter(|name| !name.trim().is_empty())
-            .or(account.email.as_deref())
+            .or(account
+                .label
+                .as_deref()
+                .filter(|name| !name.trim().is_empty()))
             .unwrap_or("Account"),
         32,
     )
