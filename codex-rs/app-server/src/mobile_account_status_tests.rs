@@ -29,6 +29,22 @@ fn mobile_account_compact_views_hide_ids_and_show_unknown_quota() {
 }
 
 #[test]
+fn mobile_account_label_prefers_email_over_custom_label() {
+    let mut pool = pool();
+    pool.accounts[0].email = Some("work@example.com".into());
+    pool.accounts[0].label = Some("Work".into());
+    assert_eq!(label(&pool.accounts[0]), "work@example.com");
+    assert_eq!(
+        pool_caption(&pool).as_deref(),
+        Some("work@example.com · 1/1 ready")
+    );
+    assert_eq!(
+        resolve(&pool, "work@example.com").unwrap(),
+        &pool.accounts[0]
+    );
+}
+
+#[test]
 fn mobile_account_pages_are_bounded_and_names_cannot_inject_markup() {
     let mut pool = pool();
     let mut other = pool.accounts[0].clone();

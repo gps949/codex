@@ -104,6 +104,38 @@ fn elapsed_and_unknown_resets_have_compact_output() {
 }
 
 #[test]
+fn account_display_name_prefers_email_over_label_and_profile_id() {
+    let with_email = AccountPoolAccount {
+        profile_id: "primary-acct".to_string(),
+        label: Some("Team plan".to_string()),
+        priority: 0,
+        is_active: true,
+        availability: AccountPoolAvailability::Available,
+        plan_type: None,
+        email: Some("primary@example.com".to_string()),
+        rate_limits: AccountPoolRateLimits::default(),
+        window_warmup: None,
+    };
+    assert_eq!(
+        account_display_name(&with_email),
+        "primary@example.com".to_string()
+    );
+
+    let label_only = AccountPoolAccount {
+        email: None,
+        ..with_email.clone()
+    };
+    assert_eq!(account_display_name(&label_only), "Team plan".to_string());
+
+    let id_only = AccountPoolAccount {
+        label: None,
+        email: None,
+        ..with_email
+    };
+    assert_eq!(account_display_name(&id_only), "primary-acct".to_string());
+}
+
+#[test]
 fn standby_warmup_status_appears_in_account_description() {
     let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
     let account = AccountPoolAccount {

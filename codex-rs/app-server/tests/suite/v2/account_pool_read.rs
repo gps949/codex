@@ -426,7 +426,7 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
     let thread: ThreadStartResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
     for (command, expected) in [
-        ("/account use \"Work Pro\"", "Selected: Work Pro"),
+        ("/account use \"Work Pro\"", "Selected: work@example.com"),
         (
             "/account strategy earliest-reset",
             if overridden {
@@ -443,7 +443,7 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
                 "Strategy: earliest-reset"
             },
         ),
-        ("/account show \"Work Pro\"", "Work Pro"),
+        ("/account show \"Work Pro\"", "work@example.com"),
         ("/account nonsense", "Unknown /account command"),
         ("/account list 0", "Usage: /account list"),
         ("/account list 999", "Page out of range"),
@@ -476,7 +476,7 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
         messages
             .messages
             .iter()
-            .any(|message| message.message_body.contains("Work Pro"))
+            .any(|message| message.message_body.contains("work@example.com"))
     );
     let runtime: serde_json::Value = serde_json::from_slice(&std::fs::read(
         home.path().join("account-runtime-state.json"),

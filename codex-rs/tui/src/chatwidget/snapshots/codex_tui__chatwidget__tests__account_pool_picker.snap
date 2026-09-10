@@ -1,22 +1,22 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
-assertion_line: 3568
+assertion_line: 3570
 expression: popup
 ---
   Select Codex account
 
-› 1. Rotation: fill-first (current)      Prefer the lowest priority among
-                                         eligible profiles.
-  2. Rotation: earliest-reset            Prefer due cooldowns, idle (not-yet-
-                                         started) 5h windows, then the soonest
-                                         reset.
-  3. Automatic                           Let the scheduler pick the next
-                                         eligible profile using the rotation
-                                         strategy above.
-  4. primary-acct (Team plan) (current)  priority 0 · available · 38% 5h used,
-                                         reset in 3:46 · 40% weekly used,
-                                         reset in 3:21:02
-  5. backup-acct (backup@example.com)    priority 10 · cooling down · quota
-                                         unknown
+› 1. Rotation: fill-first (current)  Prefer the lowest priority among eligible
+                                     profiles.
+  2. Rotation: earliest-reset        Prefer due cooldowns, idle (not-yet-
+                                     started) 5h windows, then the soonest
+                                     reset.
+  3. Automatic                       Let the scheduler pick the next eligible
+                                     profile using the rotation strategy
+                                     above.
+  4. primary@example.com (current)   priority 0 · available · 38% 5h used,
+                                     reset in 3:46 · 40% weekly used, reset in
+                                     3:21:02
+  5. backup@example.com              priority 10 · cooling down · quota
+                                     unknown
 
   Press enter to confirm or esc to go back

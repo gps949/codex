@@ -53,18 +53,14 @@ const SUCCESS_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
 const SKIPPED_AUTH_BACKOFF: Duration = Duration::from_secs(30 * 60);
 const GET_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 const URGENT_WARMUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Give quota probes a moment to land, then start warming — do not wait a full interval.
+const INITIAL_WARMUP_SETTLE: Duration = Duration::from_secs(30);
 
 /// Spawns the periodic standby-window warmup loop. The caller owns the handle and may abort it.
 pub(crate) fn spawn_window_warmup_task(pool: Arc<AccountPool>, config: Config) -> JoinHandle<()> {
     tokio::spawn(async move {
         // Settle install/quota probes before the first pass.
-        tokio::time::sleep(
-            config
-                .account_pool
-                .effective_window_warmup_interval()
-                .min(URGENT_WARMUP_INTERVAL),
-        )
-        .await;
+        tokio::time::sleep(INITIAL_WARMUP_SETTLE).await;
         loop {
             if !config.account_pool.effective_window_warmup() {
                 tokio::time::sleep(config.account_pool.effective_window_warmup_interval()).await;

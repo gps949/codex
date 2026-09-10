@@ -209,16 +209,13 @@ impl App {
             ServerNotification::AccountPoolUpdated(notification) => {
                 // Overlay the active pool profile onto the /status account line and refresh
                 // rate limits so automatic failover updates the visible account state too.
+                // Prefer email (same as the /account picker) — notifications include identity
+                // fields via build_account_pool_read_response.
                 let active_profile = notification
                     .accounts
                     .iter()
                     .find(|account| account.is_active)
-                    .map(|account| {
-                        account
-                            .label
-                            .clone()
-                            .unwrap_or_else(|| account.profile_id.clone())
-                    });
+                    .map(crate::chatwidget::account_popups::account_display_name);
                 self.chat_widget
                     .update_account_pool_identity(active_profile);
                 let reset_hint_request_id = self.chat_widget.start_rate_limit_reset_startup_check();

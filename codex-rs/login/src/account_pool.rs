@@ -8,7 +8,6 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use chrono::DateTime;
-use chrono::TimeDelta;
 use chrono::Utc;
 use codex_config::AccountPoolRotationStrategy;
 use serde::Deserialize;
@@ -609,39 +608,51 @@ impl AccountPool {
             .collect()
     }
 
-    /// Standby profiles whose primary 5h window is freshly idle (`0%` / `300` minutes / reset ≈ now+5h).
+    /// Standby profiles whose primary (5h) window has not started, or whose primary quota is still
+    /// unknown.
     ///
     /// These are eligible for an identity-preserving warmup request so `fill_first` backups can
-    /// begin ticking without switching the active execution account. Profiles with unknown or
-    /// non-5h primary windows are skipped until a quota refresh reports a matching idle 5h window.
+    /// begin ticking without switching the active execution account. Unknown primary windows are
+    /// included so a GET/warmup pass can discover whether they still need a kick. Known idle
+    /// primaries only need `used_percent <= 0` (and a 5h/`None` window length when present); do
+    /// not require `resets_at ≈ now+5h`, because that check drifts as time passes after the
+    /// quota observation and would skip still-idle standbys.
     pub fn window_warmup_candidates(&self) -> Vec<AccountProfileId> {
         let state = self.lock_state();
         let now = Utc::now();
-        let mut candidates: Vec<(u32, AccountProfileId)> = state
+        let mut candidates: Vec<(u8, u32, AccountProfileId)> = state
             .accounts
             .values()
             .filter(|account| {
                 account.availability.is_eligible(&now)
                     && state.active_profile.as_ref() != Some(&account.profile.id)
-                    && account
-                        .rate_limits
-                        .primary
-                        .as_ref()
-                        .is_some_and(|window| is_fresh_idle_five_hour_window(window, now))
+                    && match account.rate_limits.primary.as_ref() {
+                        None => true,
+                        Some(window) => is_idle_primary_five_hour_window(window),
+                    }
                     && account
                         .window_warmup
                         .as_ref()
                         .and_then(|observation| observation.retry_after)
                         .is_none_or(|retry_after| retry_after <= now)
             })
-            .map(|account| (account.profile.priority, account.profile.id.clone()))
+            .map(|account| {
+                // Probe unknown quota before known-idle so we learn state sooner.
+                let unknown_first = u8::from(account.rate_limits.primary.is_some());
+                (
+                    unknown_first,
+                    account.profile.priority,
+                    account.profile.id.clone(),
+                )
+            })
             .collect();
         candidates.sort_by(|left, right| {
             left.0
                 .cmp(&right.0)
-                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.as_str().cmp(right.2.as_str()))
         });
-        candidates.into_iter().map(|(_, id)| id).collect()
+        candidates.into_iter().map(|(_, _, id)| id).collect()
     }
 
     /// Records a warmup attempt so UIs can show status and subsequent passes honor backoff.
@@ -686,11 +697,10 @@ impl AccountPool {
         state.accounts.values().any(|account| {
             account.availability.is_eligible(&now)
                 && Some(&account.profile.id) != state.active_profile.as_ref()
-                && account
-                    .rate_limits
-                    .primary
-                    .as_ref()
-                    .is_some_and(|window| is_fresh_idle_five_hour_window(window, now))
+                && match account.rate_limits.primary.as_ref() {
+                    None => true,
+                    Some(window) => is_idle_primary_five_hour_window(window),
+                }
         })
     }
 
@@ -1109,18 +1119,16 @@ fn clear_started_window_warmup(account: &mut ManagedAccount) {
 }
 
 const FIVE_HOUR_WINDOW_MINUTES: i64 = 300;
-const FRESH_RESET_TOLERANCE: TimeDelta = TimeDelta::minutes(2);
 
-/// True when a quota snapshot looks like a brand-new, still-idle primary 5h window.
-fn is_fresh_idle_five_hour_window(window: &AccountRateLimitWindow, now: DateTime<Utc>) -> bool {
-    if window.used_percent > 0.0 || window.window_minutes != Some(FIVE_HOUR_WINDOW_MINUTES) {
-        return false;
-    }
-    let Some(resets_at) = window.resets_at else {
-        return false;
-    };
-    let expected_reset = now + TimeDelta::minutes(FIVE_HOUR_WINDOW_MINUTES);
-    (resets_at - expected_reset).abs() <= FRESH_RESET_TOLERANCE
+/// True when a primary quota snapshot is still idle and looks like the 5h window.
+///
+/// `window_minutes` may be missing on older cached observations; those still count when usage is
+/// `0%` because the pool treats primary as the 5h window. Explicit non-5h lengths are skipped.
+fn is_idle_primary_five_hour_window(window: &AccountRateLimitWindow) -> bool {
+    window.used_percent <= 0.0
+        && window
+            .window_minutes
+            .is_none_or(|minutes| minutes == FIVE_HOUR_WINDOW_MINUTES)
 }
 
 fn set_active_profile(state: &mut AccountPoolState, profile_id: &AccountProfileId) -> bool {
@@ -1402,13 +1410,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_warmup_candidates_skip_unknown_and_non_fresh_windows() {
+    async fn window_warmup_candidates_include_unknown_and_still_idle_windows() {
         let pool = AccountPool::new();
         let active = profile("active", 0);
         let idle = profile("idle", 10);
         let unknown = profile("unknown", 20);
-        let stale = profile("stale", 30);
-        for account in [&active, &idle, &unknown, &stale] {
+        let elapsed_idle = profile("elapsed-idle", 30);
+        let weekly = profile("weekly", 40);
+        for account in [&active, &idle, &unknown, &elapsed_idle, &weekly] {
             pool.register(
                 account.clone(),
                 test_auth_manager(&account.credential_home).await,
@@ -1431,20 +1440,35 @@ mod tests {
         )
         .expect("idle limits");
         pool.update_rate_limits(
-            &stale.id,
+            &elapsed_idle.id,
             AccountRateLimits {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 0.0,
-                    // Already partially elapsed — not a freshly opened 5h window.
+                    // Still unused even if the reported reset has drifted since observation.
                     resets_at: Some(now + chrono::Duration::hours(3)),
-                    window_minutes: Some(300),
+                    window_minutes: None,
                 }),
                 ..AccountRateLimits::default()
             },
         )
-        .expect("stale limits");
+        .expect("elapsed idle limits");
+        pool.update_rate_limits(
+            &weekly.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    resets_at: Some(now + chrono::Duration::days(4)),
+                    window_minutes: Some(10_080),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("weekly primary is not a 5h warmup target");
 
-        assert_eq!(pool.window_warmup_candidates(), vec![idle.id.clone()]);
+        assert_eq!(
+            pool.window_warmup_candidates(),
+            vec![unknown.id, idle.id, elapsed_idle.id]
+        );
         assert!(!pool.needs_urgent_window_warmup(Some(80.0)));
         pool.update_rate_limits(
             &active.id,
