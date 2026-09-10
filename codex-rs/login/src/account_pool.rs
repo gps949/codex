@@ -1112,10 +1112,7 @@ const FIVE_HOUR_WINDOW_MINUTES: i64 = 300;
 const FRESH_RESET_TOLERANCE: TimeDelta = TimeDelta::minutes(2);
 
 /// True when a quota snapshot looks like a brand-new, still-idle primary 5h window.
-fn is_fresh_idle_five_hour_window(
-    window: &AccountRateLimitWindow,
-    now: DateTime<Utc>,
-) -> bool {
+fn is_fresh_idle_five_hour_window(window: &AccountRateLimitWindow, now: DateTime<Utc>) -> bool {
     if window.used_percent > 0.0 || window.window_minutes != Some(FIVE_HOUR_WINDOW_MINUTES) {
         return false;
     }
