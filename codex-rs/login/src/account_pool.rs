@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use chrono::DateTime;
+use chrono::TimeDelta;
 use chrono::Utc;
 use codex_config::AccountPoolRotationStrategy;
 use serde::Deserialize;
@@ -98,6 +99,9 @@ impl AccountProfile {
 pub struct AccountRateLimitWindow {
     pub used_percent: f64,
     pub resets_at: Option<DateTime<Utc>>,
+    /// Rolling window length in minutes when the backend reports it (5h primary is `300`).
+    #[serde(default)]
+    pub window_minutes: Option<i64>,
 }
 
 /// Cached rate-limit information used for scheduling and UI. Real request failures remain
@@ -605,48 +609,39 @@ impl AccountPool {
             .collect()
     }
 
-    /// Standby profiles whose primary (5h) window has not started, or whose primary quota is still
-    /// unknown.
+    /// Standby profiles whose primary 5h window is freshly idle (`0%` / `300` minutes / reset ≈ now+5h).
     ///
     /// These are eligible for an identity-preserving warmup request so `fill_first` backups can
-    /// begin ticking without switching the active execution account. Unknown primary windows are
-    /// included so a GET/warmup pass can discover whether they still need a kick.
+    /// begin ticking without switching the active execution account. Profiles with unknown or
+    /// non-5h primary windows are skipped until a quota refresh reports a matching idle 5h window.
     pub fn window_warmup_candidates(&self) -> Vec<AccountProfileId> {
         let state = self.lock_state();
         let now = Utc::now();
-        let mut candidates: Vec<(u8, u32, AccountProfileId)> = state
+        let mut candidates: Vec<(u32, AccountProfileId)> = state
             .accounts
             .values()
             .filter(|account| {
                 account.availability.is_eligible(&now)
                     && state.active_profile.as_ref() != Some(&account.profile.id)
-                    && match account.rate_limits.primary.as_ref() {
-                        None => true,
-                        Some(window) => window.used_percent <= 0.0,
-                    }
+                    && account
+                        .rate_limits
+                        .primary
+                        .as_ref()
+                        .is_some_and(|window| is_fresh_idle_five_hour_window(window, now))
                     && account
                         .window_warmup
                         .as_ref()
                         .and_then(|observation| observation.retry_after)
                         .is_none_or(|retry_after| retry_after <= now)
             })
-            .map(|account| {
-                // Probe unknown quota before known-idle so we learn state sooner.
-                let unknown_first = u8::from(account.rate_limits.primary.is_some());
-                (
-                    unknown_first,
-                    account.profile.priority,
-                    account.profile.id.clone(),
-                )
-            })
+            .map(|account| (account.profile.priority, account.profile.id.clone()))
             .collect();
         candidates.sort_by(|left, right| {
             left.0
                 .cmp(&right.0)
-                .then_with(|| left.1.cmp(&right.1))
-                .then_with(|| left.2.as_str().cmp(right.2.as_str()))
+                .then_with(|| left.1.as_str().cmp(right.1.as_str()))
         });
-        candidates.into_iter().map(|(_, _, id)| id).collect()
+        candidates.into_iter().map(|(_, id)| id).collect()
     }
 
     /// Records a warmup attempt so UIs can show status and subsequent passes honor backoff.
@@ -691,10 +686,11 @@ impl AccountPool {
         state.accounts.values().any(|account| {
             account.availability.is_eligible(&now)
                 && Some(&account.profile.id) != state.active_profile.as_ref()
-                && match account.rate_limits.primary.as_ref() {
-                    None => true,
-                    Some(window) => window.used_percent <= 0.0,
-                }
+                && account
+                    .rate_limits
+                    .primary
+                    .as_ref()
+                    .is_some_and(|window| is_fresh_idle_five_hour_window(window, now))
         })
     }
 
@@ -1112,6 +1108,24 @@ fn clear_started_window_warmup(account: &mut ManagedAccount) {
     }
 }
 
+const FIVE_HOUR_WINDOW_MINUTES: i64 = 300;
+const FRESH_RESET_TOLERANCE: TimeDelta = TimeDelta::minutes(2);
+
+/// True when a quota snapshot looks like a brand-new, still-idle primary 5h window.
+fn is_fresh_idle_five_hour_window(
+    window: &AccountRateLimitWindow,
+    now: DateTime<Utc>,
+) -> bool {
+    if window.used_percent > 0.0 || window.window_minutes != Some(FIVE_HOUR_WINDOW_MINUTES) {
+        return false;
+    }
+    let Some(resets_at) = window.resets_at else {
+        return false;
+    };
+    let expected_reset = now + TimeDelta::minutes(FIVE_HOUR_WINDOW_MINUTES);
+    (resets_at - expected_reset).abs() <= FRESH_RESET_TOLERANCE
+}
+
 fn set_active_profile(state: &mut AccountPoolState, profile_id: &AccountProfileId) -> bool {
     if state.active_profile.as_ref() == Some(profile_id) {
         return false;
@@ -1356,6 +1370,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 0.0,
                     resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1367,6 +1382,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 0.0,
                     resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1378,6 +1394,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 12.0,
                     resets_at: Some(now + chrono::Duration::hours(2)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1388,12 +1405,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_warmup_candidates_include_unknown_primary_before_idle() {
+    async fn window_warmup_candidates_skip_unknown_and_non_fresh_windows() {
         let pool = AccountPool::new();
         let active = profile("active", 0);
         let idle = profile("idle", 10);
         let unknown = profile("unknown", 20);
-        for account in [&active, &idle, &unknown] {
+        let stale = profile("stale", 30);
+        for account in [&active, &idle, &unknown, &stale] {
             pool.register(
                 account.clone(),
                 test_auth_manager(&account.credential_home).await,
@@ -1409,13 +1427,27 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 0.0,
                     resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
         )
         .expect("idle limits");
+        pool.update_rate_limits(
+            &stale.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    // Already partially elapsed — not a freshly opened 5h window.
+                    resets_at: Some(now + chrono::Duration::hours(3)),
+                    window_minutes: Some(300),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("stale limits");
 
-        assert_eq!(pool.window_warmup_candidates(), vec![unknown.id, idle.id]);
+        assert_eq!(pool.window_warmup_candidates(), vec![idle.id.clone()]);
         assert!(!pool.needs_urgent_window_warmup(Some(80.0)));
         pool.update_rate_limits(
             &active.id,
@@ -1423,6 +1455,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 85.0,
                     resets_at: Some(now + chrono::Duration::hours(1)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1452,6 +1485,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 0.0,
                     resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1510,6 +1544,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 20.0,
                     resets_at: Some(now + chrono::Duration::hours(2)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1521,6 +1556,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 0.0,
                     resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1551,6 +1587,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 20.0,
                     resets_at: Some(now + chrono::Duration::hours(2)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1563,6 +1600,7 @@ mod tests {
                     used_percent: 0.0,
                     // Backend reports a full-window reset while usage is still 0%.
                     resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1593,6 +1631,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 0.0,
                     resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1604,6 +1643,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 90.0,
                     resets_at: Some(now - chrono::Duration::minutes(1)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1635,6 +1675,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 10.0,
                     resets_at: Some(later),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1646,6 +1687,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 10.0,
                     resets_at: Some(sooner),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1677,6 +1719,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 10.0,
                     resets_at: Some(now + chrono::Duration::minutes(30)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1689,6 +1732,7 @@ mod tests {
                     primary: Some(AccountRateLimitWindow {
                         used_percent: 10.0,
                         resets_at: Some(now - chrono::Duration::minutes(1)),
+                        window_minutes: Some(300),
                     }),
                     ..AccountRateLimits::default()
                 },
@@ -1719,6 +1763,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 10.0,
                     resets_at: Some(Utc::now() + chrono::Duration::minutes(30)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1747,6 +1792,7 @@ mod tests {
                 primary: Some(AccountRateLimitWindow {
                     used_percent: 90.0,
                     resets_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+                    window_minutes: Some(300),
                 }),
                 ..AccountRateLimits::default()
             },
@@ -1787,6 +1833,7 @@ mod tests {
                     primary: Some(AccountRateLimitWindow {
                         used_percent: 90.0,
                         resets_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+                        window_minutes: Some(300),
                     }),
                     ..AccountRateLimits::default()
                 },
@@ -1812,6 +1859,7 @@ mod tests {
                     primary: Some(AccountRateLimitWindow {
                         used_percent: 90.0,
                         resets_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+                        window_minutes: Some(300),
                     }),
                     ..AccountRateLimits::default()
                 },

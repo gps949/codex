@@ -571,6 +571,7 @@ fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow
         resets_at: window
             .resets_at
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+        window_minutes: window.window_minutes,
     }
 }
 

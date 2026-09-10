@@ -43,10 +43,10 @@ use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use codex_rollout_trace::InferenceTraceContext;
 
-const WARMUP_PROMPT: &str = "ok";
-const WARMUP_INSTRUCTIONS: &str = "Reply with ok.";
+const WARMUP_PROMPT: &str = "1+1?";
+const WARMUP_INSTRUCTIONS: &str = "Reply with one short token.";
 const WARMUP_ORIGINATOR: &str = "codex_account_window_warmup";
-const DEFAULT_WARMUP_MODEL: &str = "gpt-5.2";
+const DEFAULT_WARMUP_MODEL: &str = "gpt-5.6-luna";
 const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(45);
 const FAILURE_BACKOFF: Duration = Duration::from_secs(15 * 60);
 const SUCCESS_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
@@ -305,6 +305,7 @@ fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow
         resets_at: window
             .resets_at
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+        window_minutes: window.window_minutes,
     }
 }
 
