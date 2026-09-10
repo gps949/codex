@@ -144,12 +144,22 @@ impl ChatWidget {
     }
 }
 
-fn account_display_name(account: &AccountPoolAccount) -> String {
+pub(crate) fn account_display_name(account: &AccountPoolAccount) -> String {
     // Email is the most recognizable, usually unique identity for ChatGPT accounts.
     account
         .email
-        .clone()
-        .or_else(|| account.label.clone())
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            account
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| account.profile_id.clone())
 }
 
