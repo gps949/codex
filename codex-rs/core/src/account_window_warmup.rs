@@ -28,6 +28,7 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::SessionSource;
@@ -48,7 +49,10 @@ const WARMUP_INSTRUCTIONS: &str = "Reply with one short token.";
 const WARMUP_ORIGINATOR: &str = "codex_account_window_warmup";
 const DEFAULT_WARMUP_MODEL: &str = "gpt-5.6-luna";
 const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(45);
-const FAILURE_BACKOFF: Duration = Duration::from_secs(15 * 60);
+/// Real transport/API failures. Keep short so standbys recover after a bad request shape.
+const FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
+/// HTTP OK but primary usage still 0% — retry sooner than a hard failure.
+const NOOP_BACKOFF: Duration = Duration::from_secs(2 * 60);
 const SUCCESS_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
 const SKIPPED_AUTH_BACKOFF: Duration = Duration::from_secs(30 * 60);
 const GET_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
@@ -121,11 +125,19 @@ async fn warm_profile(
     // Force HTTP so warmup never shares or perturbs the active session's websocket.
     provider.supports_websockets = false;
 
-    let model = config
-        .model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_WARMUP_MODEL.to_string());
-    let model_info = warmup_model_info(&model);
+    // Always use the cheap catalog-backed warmup model with real metadata.
+    // The previous synthetic ModelInfo forced `minimal` effort, which current models
+    // (including gpt-5.6-luna) reject — that produced endless "warmup retry" loops.
+    let model = DEFAULT_WARMUP_MODEL.to_string();
+    let model_info = resolve_warmup_model_info(config, &model);
+    let effort = cheapest_warmup_effort(&model_info);
+    debug!(
+        %profile_id,
+        model = %model_info.slug,
+        ?effort,
+        use_responses_lite = model_info.use_responses_lite,
+        "starting standby window warmup"
+    );
     let thread_id = ThreadId::new();
     let client = ModelClient::new(
         Some(Arc::clone(&auth_manager)),
@@ -188,7 +200,7 @@ async fn warm_profile(
                 &prompt,
                 &model_info,
                 &session_telemetry,
-                /*effort*/ None,
+                effort.clone(),
                 ReasoningSummary::None,
                 /*service_tier*/ None,
                 &responses_metadata,
@@ -212,12 +224,12 @@ async fn warm_profile(
     let stream_limits = match stream_result {
         Ok(Ok(observed)) => observed,
         Ok(Err(error)) => {
-            record_failure(pool, profile_id, attempted_at);
+            record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
             warn!(%profile_id, error = %error, "standby window warmup request failed");
             return Ok(());
         }
         Err(_elapsed) => {
-            record_failure(pool, profile_id, attempted_at);
+            record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
             warn!(%profile_id, "standby window warmup timed out");
             return Ok(());
         }
@@ -237,6 +249,15 @@ async fn warm_profile(
         debug!(%profile_id, "refreshed standby rate limits after window warmup");
     }
 
+    if !primary_window_started(pool, profile_id) {
+        record_failure(pool, profile_id, attempted_at, NOOP_BACKOFF);
+        warn!(
+            %profile_id,
+            "standby window warmup completed without starting the 5h window"
+        );
+        return Ok(());
+    }
+
     let _ = pool.record_window_warmup(
         profile_id,
         WindowWarmupObservation {
@@ -250,8 +271,13 @@ async fn warm_profile(
     Ok(())
 }
 
-fn record_failure(pool: &AccountPool, profile_id: &AccountProfileId, attempted_at: DateTime<Utc>) {
-    let retry_after = attempted_at + chrono::Duration::seconds(FAILURE_BACKOFF.as_secs() as i64);
+fn record_failure(
+    pool: &AccountPool,
+    profile_id: &AccountProfileId,
+    attempted_at: DateTime<Utc>,
+    backoff: Duration,
+) {
+    let retry_after = attempted_at + chrono::Duration::seconds(backoff.as_secs() as i64);
     let _ = pool.record_window_warmup(
         profile_id,
         WindowWarmupObservation {
@@ -260,6 +286,14 @@ fn record_failure(pool: &AccountPool, profile_id: &AccountProfileId, attempted_a
             retry_after: Some(retry_after),
         },
     );
+}
+
+fn primary_window_started(pool: &AccountPool, profile_id: &AccountProfileId) -> bool {
+    pool.snapshots()
+        .into_iter()
+        .find(|snapshot| &snapshot.profile.id == profile_id)
+        .and_then(|snapshot| snapshot.rate_limits.primary)
+        .is_some_and(|window| window.used_percent > 0.0)
 }
 
 async fn refresh_rate_limits_via_get(
@@ -305,33 +339,56 @@ fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow
     }
 }
 
-fn warmup_model_info(model: &str) -> ModelInfo {
-    serde_json::from_value(serde_json::json!({
-        "slug": model,
-        "display_name": model,
-        "description": "account pool window warmup",
-        "default_reasoning_level": "minimal",
-        "supported_reasoning_levels": [
-            {"effort": "minimal", "description": "minimal"}
-        ],
-        "shell_type": "shell_command",
-        "visibility": "list",
-        "supported_in_api": true,
-        "priority": 1,
-        "upgrade": null,
-        "model_messages": null,
-        "support_verbosity": false,
-        "default_verbosity": null,
-        "apply_patch_tool_type": null,
-        "truncation_policy": {"mode": "bytes", "limit": 10000},
-        "supports_image_detail_original": false,
-        "context_window": 32000,
-        "auto_compact_token_limit": null,
-        "experimental_supported_tools": []
-    }))
-    .unwrap_or_else(|error| {
-        panic!("warmup model info for {model} must deserialize: {error}");
-    })
+fn resolve_warmup_model_info(config: &Config, slug: &str) -> ModelInfo {
+    resolve_warmup_model_info_from_catalog(config.model_catalog.as_ref(), slug)
+}
+
+fn resolve_warmup_model_info_from_catalog(
+    catalog: Option<&codex_protocol::openai_models::ModelsResponse>,
+    slug: &str,
+) -> ModelInfo {
+    if let Some(info) = catalog
+        .and_then(|catalog| catalog.models.iter().find(|model| model.slug == slug))
+        .cloned()
+    {
+        return info;
+    }
+    if let Ok(bundled) = codex_models_manager::bundled_models_response()
+        && let Some(info) = bundled.models.into_iter().find(|model| model.slug == slug)
+    {
+        return info;
+    }
+    // Last resort: unknown slug metadata with no invented unsupported effort.
+    let mut info = codex_models_manager::model_info::model_info_from_slug(slug);
+    info.default_reasoning_level = Some(ReasoningEffort::Low);
+    info.supported_reasoning_levels = vec![codex_protocol::openai_models::ReasoningEffortPreset {
+        effort: ReasoningEffort::Low,
+        description: "low".to_string(),
+    }];
+    info
+}
+
+fn cheapest_warmup_effort(model_info: &ModelInfo) -> Option<ReasoningEffort> {
+    const PREFERRED: [ReasoningEffort; 4] = [
+        ReasoningEffort::Low,
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+    ];
+    for preferred in PREFERRED {
+        if model_info
+            .supported_reasoning_levels
+            .iter()
+            .any(|preset| preset.effort == preferred)
+        {
+            return Some(preferred);
+        }
+    }
+    model_info
+        .supported_reasoning_levels
+        .first()
+        .map(|preset| preset.effort.clone())
+        .or_else(|| model_info.default_reasoning_level.clone())
 }
 
 #[cfg(test)]
