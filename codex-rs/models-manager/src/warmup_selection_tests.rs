@@ -120,21 +120,25 @@ fn select_cheapest_falls_back_to_highest_priority_list_model() {
 }
 
 #[test]
-fn cheapest_supported_effort_prefers_none_then_minimal_then_low() {
-    let with_none = model(
+fn cheapest_supported_effort_prefers_low_over_minimal_and_medium() {
+    let with_low = model(
         "m",
         /*priority*/ 1,
         ModelVisibility::List,
         None,
-        &[ReasoningEffort::Medium, ReasoningEffort::None],
+        &[
+            ReasoningEffort::Medium,
+            ReasoningEffort::Minimal,
+            ReasoningEffort::Low,
+        ],
         None,
     );
     assert_eq!(
-        cheapest_supported_effort(&with_none),
-        Some(ReasoningEffort::None)
+        cheapest_supported_effort(&with_low),
+        Some(ReasoningEffort::Low)
     );
 
-    let with_minimal = model(
+    let without_low = model(
         "m",
         /*priority*/ 1,
         ModelVisibility::List,
@@ -143,9 +147,24 @@ fn cheapest_supported_effort_prefers_none_then_minimal_then_low() {
         None,
     );
     assert_eq!(
-        cheapest_supported_effort(&with_minimal),
+        cheapest_supported_effort(&without_low),
         Some(ReasoningEffort::Minimal)
     );
+}
+
+#[test]
+fn select_cheapest_returns_none_when_only_ineligible_models_exist() {
+    let catalog = ModelsResponse {
+        models: vec![model(
+            "frontier-hidden",
+            /*priority*/ 1,
+            ModelVisibility::Hide,
+            None,
+            &[ReasoningEffort::Low],
+            None,
+        )],
+    };
+    assert_eq!(select_cheapest_warmup_model(&catalog), None);
 }
 
 #[test]

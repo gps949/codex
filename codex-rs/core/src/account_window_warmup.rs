@@ -235,16 +235,36 @@ async fn warm_profile(
         }
     };
 
-    if let Some(snapshot) = stream_limits {
-        pool.update_rate_limits(profile_id, convert_rate_limits(&snapshot))?;
+    let stream_started = stream_limits
+        .as_ref()
+        .and_then(|snapshot| snapshot.primary.as_ref())
+        .is_some_and(|window| window.used_percent > 0.0);
+    let stream_account_limits = stream_limits.as_ref().map(convert_rate_limits);
+
+    if let Some(limits) = stream_account_limits.as_ref() {
+        pool.update_rate_limits(profile_id, limits.clone())?;
         debug!(%profile_id, "warmed standby 5h rate-limit window");
     } else {
         debug!(%profile_id, "warmup completed without rate-limit headers");
     }
 
-    // Prefer the accounts usage GET as the durable observation when stream headers are missing,
-    // and always refresh after a successful kick so standby quota stays current for scheduling.
-    if let Some(limits) = refresh_rate_limits_via_get(config, &auth).await {
+    // Refresh via accounts usage GET for durable scheduling data. A lagging GET must not erase
+    // stream evidence that the primary window already started — that previously produced false
+    // "warmup retry" loops after a successful Responses call.
+    if let Some(mut limits) = refresh_rate_limits_via_get(config, &auth).await {
+        if stream_started
+            && limits
+                .primary
+                .as_ref()
+                .is_none_or(|window| window.used_percent <= 0.0)
+        {
+            if let Some(primary) = stream_account_limits
+                .as_ref()
+                .and_then(|limits| limits.primary.clone())
+            {
+                limits.primary = Some(primary);
+            }
+        }
         pool.update_rate_limits(profile_id, limits)?;
         debug!(%profile_id, "refreshed standby rate limits after window warmup");
     }

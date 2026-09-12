@@ -7,10 +7,9 @@
 //!    declares an upgrade. Today that is the cost-efficient mini tier succeeding into the current
 //!    affordable list model — without hardcoding either slug.
 //! 2. Else the highest-`priority` list-visible unspecialized model (least featured remaining).
-//! 3. Else the first catalog model.
 //!
 //! Effort is always chosen from the selected model's advertised `supported_reasoning_levels`,
-//! preferring the cheapest known wire values that the model actually supports.
+//! preferring Low (then Minimal, Medium, …) for warmup reliability.
 
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelVisibility;
@@ -34,26 +33,24 @@ pub fn select_cheapest_warmup_model(catalog: &ModelsResponse) -> Option<ModelInf
     if let Some(model) = upgrade_target_of_least_featured_non_list(catalog) {
         return Some(model);
     }
-    if let Some(model) = highest_priority_list_visible(catalog) {
-        return Some(model);
-    }
-    catalog.models.first().cloned()
+    // Never fall back to an ineligible/first catalog entry (that can be a frontier slug).
+    highest_priority_list_visible(catalog)
 }
 
 /// Cheapest advertised reasoning effort for `model`, if any.
 pub fn cheapest_supported_effort(model: &ModelInfo) -> Option<ReasoningEffort> {
-    // Ordered cheapest → expensive. Skip Persistent/Custom: they are not cheap warmup targets.
-    const CHEAPEST_FIRST: [ReasoningEffort; 8] = [
-        ReasoningEffort::None,
-        ReasoningEffort::Minimal,
+    // Prefer Low for warmup reliability: None/Minimal are sometimes advertised but still
+    // rejected (or may not burn enough quota to start the 5h window). Skip Persistent/Custom.
+    const WARMUP_EFFORT_PREFERENCE: [ReasoningEffort; 7] = [
         ReasoningEffort::Low,
+        ReasoningEffort::Minimal,
         ReasoningEffort::Medium,
         ReasoningEffort::High,
         ReasoningEffort::XHigh,
         ReasoningEffort::Max,
         ReasoningEffort::Ultra,
     ];
-    for effort in CHEAPEST_FIRST {
+    for effort in WARMUP_EFFORT_PREFERENCE {
         if model
             .supported_reasoning_levels
             .iter()
