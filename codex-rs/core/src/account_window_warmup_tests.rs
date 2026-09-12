@@ -1,44 +1,21 @@
-use super::cheapest_warmup_effort;
-use super::resolve_warmup_model_info_from_catalog;
-use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::openai_models::ReasoningEffortPreset;
-use pretty_assertions::assert_eq;
+//! Warmup model/effort selection lives in `codex-models-manager::warmup_selection`.
+//! Keep a thin smoke test here so core still exercises the catalog-driven path.
 
 #[test]
-fn resolve_warmup_model_info_uses_bundled_luna_metadata() {
-    let info = resolve_warmup_model_info_from_catalog(/*catalog*/ None, "gpt-5.6-luna");
-    assert_eq!(info.slug, "gpt-5.6-luna");
-    assert!(info.use_responses_lite);
-    assert_ne!(info.default_reasoning_level, Some(ReasoningEffort::Minimal));
+fn catalog_driven_warmup_selection_is_available_to_core() {
+    let catalog = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
+    let model = codex_models_manager::select_cheapest_warmup_model(&catalog)
+        .expect("bundled catalog should expose a cheapest warmup model");
+    let effort = codex_models_manager::cheapest_supported_effort(&model)
+        .expect("selected warmup model should advertise at least one effort");
+
     assert!(
-        !info
-            .supported_reasoning_levels
-            .iter()
-            .any(|preset| preset.effort == ReasoningEffort::Minimal),
-        "luna must not advertise unsupported minimal effort: {:?}",
-        info.supported_reasoning_levels
+        !model.slug.is_empty(),
+        "warmup model slug must come from the official catalog"
     );
-    assert!(
-        info.supported_reasoning_levels
-            .iter()
-            .any(|preset| preset.effort == ReasoningEffort::Low),
-        "luna must advertise low effort: {:?}",
-        info.supported_reasoning_levels
+    assert_ne!(
+        effort,
+        codex_protocol::openai_models::ReasoningEffort::Minimal,
+        "bundled cheapest model currently rejects unsupported minimal effort"
     );
-}
-
-#[test]
-fn cheapest_warmup_effort_prefers_low_over_medium() {
-    let info = resolve_warmup_model_info_from_catalog(/*catalog*/ None, "gpt-5.6-luna");
-    assert_eq!(cheapest_warmup_effort(&info), Some(ReasoningEffort::Low));
-}
-
-#[test]
-fn cheapest_warmup_effort_falls_back_to_first_supported() {
-    let mut info = resolve_warmup_model_info_from_catalog(/*catalog*/ None, "gpt-5.6-luna");
-    info.supported_reasoning_levels = vec![ReasoningEffortPreset {
-        effort: ReasoningEffort::High,
-        description: "high".to_string(),
-    }];
-    assert_eq!(cheapest_warmup_effort(&info), Some(ReasoningEffort::High));
 }

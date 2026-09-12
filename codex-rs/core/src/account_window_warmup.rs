@@ -27,8 +27,6 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::SessionSource;
@@ -47,7 +45,6 @@ use codex_rollout_trace::InferenceTraceContext;
 const WARMUP_PROMPT: &str = "1+1?";
 const WARMUP_INSTRUCTIONS: &str = "Reply with one short token.";
 const WARMUP_ORIGINATOR: &str = "codex_account_window_warmup";
-const DEFAULT_WARMUP_MODEL: &str = "gpt-5.6-luna";
 const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Real transport/API failures. Keep short so standbys recover after a bad request shape.
 const FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -125,12 +122,15 @@ async fn warm_profile(
     // Force HTTP so warmup never shares or perturbs the active session's websocket.
     provider.supports_websockets = false;
 
-    // Always use the cheap catalog-backed warmup model with real metadata.
-    // The previous synthetic ModelInfo forced `minimal` effort, which current models
-    // (including gpt-5.6-luna) reject — that produced endless "warmup retry" loops.
-    let model = DEFAULT_WARMUP_MODEL.to_string();
-    let model_info = resolve_warmup_model_info(config, &model);
-    let effort = cheapest_warmup_effort(&model_info);
+    // Pick the cheapest model/effort from the official catalog (live config catalog when
+    // present, else bundled). Never invent effort levels the model does not advertise —
+    // that previously forced `minimal` and caused endless warmup retries.
+    let catalog = codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
+    let Some(model_info) = codex_models_manager::select_cheapest_warmup_model(&catalog) else {
+        warn!(%profile_id, "standby window warmup skipped: empty model catalog");
+        return Ok(());
+    };
+    let effort = codex_models_manager::cheapest_supported_effort(&model_info);
     debug!(
         %profile_id,
         model = %model_info.slug,
@@ -337,58 +337,6 @@ fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
         window_minutes: window.window_minutes,
     }
-}
-
-fn resolve_warmup_model_info(config: &Config, slug: &str) -> ModelInfo {
-    resolve_warmup_model_info_from_catalog(config.model_catalog.as_ref(), slug)
-}
-
-fn resolve_warmup_model_info_from_catalog(
-    catalog: Option<&codex_protocol::openai_models::ModelsResponse>,
-    slug: &str,
-) -> ModelInfo {
-    if let Some(info) = catalog
-        .and_then(|catalog| catalog.models.iter().find(|model| model.slug == slug))
-        .cloned()
-    {
-        return info;
-    }
-    if let Ok(bundled) = codex_models_manager::bundled_models_response()
-        && let Some(info) = bundled.models.into_iter().find(|model| model.slug == slug)
-    {
-        return info;
-    }
-    // Last resort: unknown slug metadata with no invented unsupported effort.
-    let mut info = codex_models_manager::model_info::model_info_from_slug(slug);
-    info.default_reasoning_level = Some(ReasoningEffort::Low);
-    info.supported_reasoning_levels = vec![codex_protocol::openai_models::ReasoningEffortPreset {
-        effort: ReasoningEffort::Low,
-        description: "low".to_string(),
-    }];
-    info
-}
-
-fn cheapest_warmup_effort(model_info: &ModelInfo) -> Option<ReasoningEffort> {
-    const PREFERRED: [ReasoningEffort; 4] = [
-        ReasoningEffort::Low,
-        ReasoningEffort::Minimal,
-        ReasoningEffort::Medium,
-        ReasoningEffort::High,
-    ];
-    for preferred in PREFERRED {
-        if model_info
-            .supported_reasoning_levels
-            .iter()
-            .any(|preset| preset.effort == preferred)
-        {
-            return Some(preferred);
-        }
-    }
-    model_info
-        .supported_reasoning_levels
-        .first()
-        .map(|preset| preset.effort.clone())
-        .or_else(|| model_info.default_reasoning_level.clone())
 }
 
 #[cfg(test)]
