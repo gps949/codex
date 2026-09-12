@@ -257,13 +257,11 @@ async fn warm_profile(
                 .primary
                 .as_ref()
                 .is_none_or(|window| window.used_percent <= 0.0)
-        {
-            if let Some(primary) = stream_account_limits
+            && let Some(primary) = stream_account_limits
                 .as_ref()
                 .and_then(|limits| limits.primary.clone())
-            {
-                limits.primary = Some(primary);
-            }
+        {
+            limits.primary = Some(primary);
         }
         pool.update_rate_limits(profile_id, limits)?;
         debug!(%profile_id, "refreshed standby rate limits after window warmup");
