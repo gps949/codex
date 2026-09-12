@@ -1,9 +1,21 @@
-use super::warmup_model_info;
-use pretty_assertions::assert_eq;
+//! Warmup model/effort selection lives in `codex-models-manager::warmup_selection`.
+//! Keep a thin smoke test here so core still exercises the catalog-driven path.
 
 #[test]
-fn warmup_model_info_uses_requested_slug() {
-    let info = warmup_model_info("gpt-5.2-codex");
-    assert_eq!(info.slug, "gpt-5.2-codex");
-    assert_eq!(info.display_name, "gpt-5.2-codex");
+fn catalog_driven_warmup_selection_is_available_to_core() {
+    let catalog = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
+    let model = codex_models_manager::select_cheapest_warmup_model(&catalog)
+        .expect("bundled catalog should expose a cheapest warmup model");
+    let effort = codex_models_manager::cheapest_supported_effort(&model)
+        .expect("selected warmup model should advertise at least one effort");
+
+    assert!(
+        !model.slug.is_empty(),
+        "warmup model slug must come from the official catalog"
+    );
+    assert_ne!(
+        effort,
+        codex_protocol::openai_models::ReasoningEffort::Minimal,
+        "bundled cheapest model currently rejects unsupported minimal effort"
+    );
 }

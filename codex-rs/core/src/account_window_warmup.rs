@@ -27,7 +27,6 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::SessionSource;
@@ -46,9 +45,11 @@ use codex_rollout_trace::InferenceTraceContext;
 const WARMUP_PROMPT: &str = "1+1?";
 const WARMUP_INSTRUCTIONS: &str = "Reply with one short token.";
 const WARMUP_ORIGINATOR: &str = "codex_account_window_warmup";
-const DEFAULT_WARMUP_MODEL: &str = "gpt-5.6-luna";
 const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(45);
-const FAILURE_BACKOFF: Duration = Duration::from_secs(15 * 60);
+/// Real transport/API failures. Keep short so standbys recover after a bad request shape.
+const FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
+/// HTTP OK but primary usage still 0% — retry sooner than a hard failure.
+const NOOP_BACKOFF: Duration = Duration::from_secs(2 * 60);
 const SUCCESS_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
 const SKIPPED_AUTH_BACKOFF: Duration = Duration::from_secs(30 * 60);
 const GET_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
@@ -121,11 +122,22 @@ async fn warm_profile(
     // Force HTTP so warmup never shares or perturbs the active session's websocket.
     provider.supports_websockets = false;
 
-    let model = config
-        .model
-        .clone()
-        .unwrap_or_else(|| DEFAULT_WARMUP_MODEL.to_string());
-    let model_info = warmup_model_info(&model);
+    // Pick the cheapest model/effort from the official catalog (live config catalog when
+    // present, else bundled). Never invent effort levels the model does not advertise —
+    // that previously forced `minimal` and caused endless warmup retries.
+    let catalog = codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
+    let Some(model_info) = codex_models_manager::select_cheapest_warmup_model(&catalog) else {
+        warn!(%profile_id, "standby window warmup skipped: empty model catalog");
+        return Ok(());
+    };
+    let effort = codex_models_manager::cheapest_supported_effort(&model_info);
+    debug!(
+        %profile_id,
+        model = %model_info.slug,
+        ?effort,
+        use_responses_lite = model_info.use_responses_lite,
+        "starting standby window warmup"
+    );
     let thread_id = ThreadId::new();
     let client = ModelClient::new(
         Some(Arc::clone(&auth_manager)),
@@ -188,7 +200,7 @@ async fn warm_profile(
                 &prompt,
                 &model_info,
                 &session_telemetry,
-                /*effort*/ None,
+                effort.clone(),
                 ReasoningSummary::None,
                 /*service_tier*/ None,
                 &responses_metadata,
@@ -212,29 +224,56 @@ async fn warm_profile(
     let stream_limits = match stream_result {
         Ok(Ok(observed)) => observed,
         Ok(Err(error)) => {
-            record_failure(pool, profile_id, attempted_at);
+            record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
             warn!(%profile_id, error = %error, "standby window warmup request failed");
             return Ok(());
         }
         Err(_elapsed) => {
-            record_failure(pool, profile_id, attempted_at);
+            record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
             warn!(%profile_id, "standby window warmup timed out");
             return Ok(());
         }
     };
 
-    if let Some(snapshot) = stream_limits {
-        pool.update_rate_limits(profile_id, convert_rate_limits(&snapshot))?;
+    let stream_started = stream_limits
+        .as_ref()
+        .and_then(|snapshot| snapshot.primary.as_ref())
+        .is_some_and(|window| window.used_percent > 0.0);
+    let stream_account_limits = stream_limits.as_ref().map(convert_rate_limits);
+
+    if let Some(limits) = stream_account_limits.as_ref() {
+        pool.update_rate_limits(profile_id, limits.clone())?;
         debug!(%profile_id, "warmed standby 5h rate-limit window");
     } else {
         debug!(%profile_id, "warmup completed without rate-limit headers");
     }
 
-    // Prefer the accounts usage GET as the durable observation when stream headers are missing,
-    // and always refresh after a successful kick so standby quota stays current for scheduling.
-    if let Some(limits) = refresh_rate_limits_via_get(config, &auth).await {
+    // Refresh via accounts usage GET for durable scheduling data. A lagging GET must not erase
+    // stream evidence that the primary window already started — that previously produced false
+    // "warmup retry" loops after a successful Responses call.
+    if let Some(mut limits) = refresh_rate_limits_via_get(config, &auth).await {
+        if stream_started
+            && limits
+                .primary
+                .as_ref()
+                .is_none_or(|window| window.used_percent <= 0.0)
+            && let Some(primary) = stream_account_limits
+                .as_ref()
+                .and_then(|limits| limits.primary.clone())
+        {
+            limits.primary = Some(primary);
+        }
         pool.update_rate_limits(profile_id, limits)?;
         debug!(%profile_id, "refreshed standby rate limits after window warmup");
+    }
+
+    if !primary_window_started(pool, profile_id) {
+        record_failure(pool, profile_id, attempted_at, NOOP_BACKOFF);
+        warn!(
+            %profile_id,
+            "standby window warmup completed without starting the 5h window"
+        );
+        return Ok(());
     }
 
     let _ = pool.record_window_warmup(
@@ -250,8 +289,13 @@ async fn warm_profile(
     Ok(())
 }
 
-fn record_failure(pool: &AccountPool, profile_id: &AccountProfileId, attempted_at: DateTime<Utc>) {
-    let retry_after = attempted_at + chrono::Duration::seconds(FAILURE_BACKOFF.as_secs() as i64);
+fn record_failure(
+    pool: &AccountPool,
+    profile_id: &AccountProfileId,
+    attempted_at: DateTime<Utc>,
+    backoff: Duration,
+) {
+    let retry_after = attempted_at + chrono::Duration::seconds(backoff.as_secs() as i64);
     let _ = pool.record_window_warmup(
         profile_id,
         WindowWarmupObservation {
@@ -260,6 +304,14 @@ fn record_failure(pool: &AccountPool, profile_id: &AccountProfileId, attempted_a
             retry_after: Some(retry_after),
         },
     );
+}
+
+fn primary_window_started(pool: &AccountPool, profile_id: &AccountProfileId) -> bool {
+    pool.snapshots()
+        .into_iter()
+        .find(|snapshot| &snapshot.profile.id == profile_id)
+        .and_then(|snapshot| snapshot.rate_limits.primary)
+        .is_some_and(|window| window.used_percent > 0.0)
 }
 
 async fn refresh_rate_limits_via_get(
@@ -303,35 +355,6 @@ fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
         window_minutes: window.window_minutes,
     }
-}
-
-fn warmup_model_info(model: &str) -> ModelInfo {
-    serde_json::from_value(serde_json::json!({
-        "slug": model,
-        "display_name": model,
-        "description": "account pool window warmup",
-        "default_reasoning_level": "minimal",
-        "supported_reasoning_levels": [
-            {"effort": "minimal", "description": "minimal"}
-        ],
-        "shell_type": "shell_command",
-        "visibility": "list",
-        "supported_in_api": true,
-        "priority": 1,
-        "upgrade": null,
-        "model_messages": null,
-        "support_verbosity": false,
-        "default_verbosity": null,
-        "apply_patch_tool_type": null,
-        "truncation_policy": {"mode": "bytes", "limit": 10000},
-        "supports_image_detail_original": false,
-        "context_window": 32000,
-        "auto_compact_token_limit": null,
-        "experimental_supported_tools": []
-    }))
-    .unwrap_or_else(|error| {
-        panic!("warmup model info for {model} must deserialize: {error}");
-    })
 }
 
 #[cfg(test)]

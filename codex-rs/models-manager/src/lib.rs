@@ -5,9 +5,13 @@ pub mod manager;
 pub mod model_info;
 pub mod model_presets;
 pub mod test_support;
+pub mod warmup_selection;
 
 pub use codex_protocol::auth::AuthMode;
 pub use config::ModelsManagerConfig;
+pub use warmup_selection::cheapest_supported_effort;
+pub use warmup_selection::select_cheapest_warmup_model;
+pub use warmup_selection::warmup_models_catalog;
 
 /// Load the bundled model catalog shipped with `codex-models-manager`.
 pub fn bundled_models_response()
