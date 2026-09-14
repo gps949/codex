@@ -63,6 +63,10 @@ impl ExecutionAccountPoolHandle {
             .unwrap_or_default()
     }
 
+    pub fn account_pool(&self) -> Option<Arc<codex_login::AccountPool>> {
+        self.inner.account_pool()
+    }
+
     pub async fn activate(
         &self,
         profile_id: &AccountProfileId,
@@ -72,14 +76,22 @@ impl ExecutionAccountPoolHandle {
             .inner
             .account_pool()
             .ok_or(AccountPoolError::NoEligibleAccount)?;
+        // Reload this profile's credentials from disk before scheduling so CLI re-login is picked
+        // up without requiring a process restart.
+        codex_login::prepare_profile_auth_for_activation(pool.as_ref(), profile_id).await?;
         let lease = if force {
             pool.force_activate(profile_id)?
         } else {
             pool.activate(profile_id)?
         };
-        let identity = identity_from_lease(&lease);
+        let expected = identity_from_lease(&lease);
         self.inner.compatibility_auth_manager().reload().await;
-        Ok(identity)
+        // Outer auth resolve may mark the profile unavailable and rebound. Never report success
+        // for a profile that is no longer active after that reload.
+        match self.active_identity() {
+            Some(actual) if actual.profile_id == expected.profile_id => Ok(actual),
+            _ => Err(AccountPoolError::ProfileUnavailable(profile_id.clone())),
+        }
     }
 
     pub async fn activate_fill_first(&self) -> Result<ExecutionAccountIdentity, AccountPoolError> {
@@ -87,10 +99,14 @@ impl ExecutionAccountPoolHandle {
             .inner
             .account_pool()
             .ok_or(AccountPoolError::NoEligibleAccount)?;
+        let _ = codex_login::recover_pool_auth_from_disk(pool.as_ref()).await;
         let lease = pool.activate_fill_first()?;
-        let identity = identity_from_lease(&lease);
+        let expected = identity_from_lease(&lease);
         self.inner.compatibility_auth_manager().reload().await;
-        Ok(identity)
+        match self.active_identity() {
+            Some(actual) if actual.profile_id == expected.profile_id => Ok(actual),
+            _ => Err(AccountPoolError::NoEligibleAccount),
+        }
     }
 
     pub async fn force_activate_automatic(
@@ -100,10 +116,14 @@ impl ExecutionAccountPoolHandle {
             .inner
             .account_pool()
             .ok_or(AccountPoolError::NoEligibleAccount)?;
+        let _ = codex_login::recover_pool_auth_from_disk(pool.as_ref()).await;
         let lease = pool.force_activate_automatic()?;
-        let identity = identity_from_lease(&lease);
+        let expected = identity_from_lease(&lease);
         self.inner.compatibility_auth_manager().reload().await;
-        Ok(identity)
+        match self.active_identity() {
+            Some(actual) if actual.profile_id == expected.profile_id => Ok(actual),
+            _ => Err(AccountPoolError::NoEligibleAccount),
+        }
     }
 }
 

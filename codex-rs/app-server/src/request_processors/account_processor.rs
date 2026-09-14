@@ -1257,6 +1257,12 @@ impl AccountRequestProcessor {
             });
         }
 
+        // Re-login via CLI writes tokens out-of-process; resync before building the picker so
+        // sticky AuthenticationUnavailable / stale caches do not hide freshly repaired profiles.
+        if let Some(pool) = self.execution_account_pool.account_pool() {
+            let _ = codex_login::recover_pool_auth_from_disk(pool.as_ref()).await;
+        }
+
         let active = self.execution_account_pool.active_identity();
         let mut accounts = Vec::new();
         for snapshot in self.execution_account_pool.snapshots() {

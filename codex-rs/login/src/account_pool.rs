@@ -748,6 +748,32 @@ impl AccountPool {
         )
     }
 
+    /// Clears sticky [`AccountAvailability::AuthenticationUnavailable`] after out-of-process
+    /// re-login refreshed on-disk credentials and the profile AuthManager was reloaded.
+    ///
+    /// Returns `true` when availability changed to [`AccountAvailability::Available`]. Exhausted /
+    /// disabled profiles are left unchanged so quota and operator intent stay authoritative.
+    pub fn clear_authentication_unavailable(
+        &self,
+        profile_id: &AccountProfileId,
+    ) -> Result<bool, AccountPoolError> {
+        let mut state = self.lock_state();
+        let account = state
+            .accounts
+            .get_mut(profile_id)
+            .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+        if !matches!(
+            account.availability,
+            AccountAvailability::AuthenticationUnavailable { .. }
+        ) {
+            return Ok(false);
+        }
+        account.availability = AccountAvailability::Available;
+        drop(state);
+        self.notify_change();
+        Ok(true)
+    }
+
     pub fn set_disabled(
         &self,
         profile_id: &AccountProfileId,
