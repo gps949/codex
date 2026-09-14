@@ -32,10 +32,6 @@ impl AccountPoolExternalAuth {
     }
 
     async fn resolve_usable_auth(&self) -> io::Result<(AccountLease, CodexAuth)> {
-        // Pick up CLI re-login tokens and clear sticky AuthenticationUnavailable before leasing.
-        // Otherwise a profile that was repaired on disk stays ineligible forever in this process.
-        let _ = crate::recover_pool_auth_from_disk(&self.pool).await;
-
         // Every rejection below makes the current lease ineligible, so the number of registered
         // profiles is a hard upper bound on attempts and prevents malformed state from looping.
         let attempts = self.pool.snapshots().len().max(1);
@@ -63,10 +59,7 @@ impl AccountPoolExternalAuth {
                 Err(error) => return Err(pool_error(error)),
             };
             let manager = lease.auth_manager();
-            // Always reload the candidate from disk before judging usability so an out-of-process
-            // re-login cannot be overwritten or rejected based on a stale in-memory cache.
-            manager.reload().await;
-            let Some(auth) = manager.auth_cached() else {
+            let Some(auth) = manager.auth().await else {
                 last_reason = format!("account profile {} has no usable auth", lease.profile().id);
                 let _ = self
                     .pool

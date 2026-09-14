@@ -135,3 +135,42 @@ async fn disk_relogin_recovers_authentication_unavailable_without_restart() {
     let activated = pool.activate(&account.id).expect("activate after recover");
     assert_eq!(activated.profile().id, account.id);
 }
+
+#[tokio::test]
+async fn mismatched_account_id_rewrite_does_not_clear_authentication_unavailable() {
+    let home = TempDir::new().expect("tempdir");
+    let creds = home.path().join("profile-a");
+    std::fs::create_dir_all(&creds).expect("creds dir");
+    save_auth(
+        &creds,
+        &chatgpt_auth("acct-a", "same-refresh"),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("seed auth");
+
+    let pool = AccountPool::new();
+    let account = profile("profile-a", creds.clone(), 10);
+    let manager = test_auth_manager(&creds).await;
+    pool.register(account.clone(), Arc::clone(&manager))
+        .expect("register");
+    let lease = pool.lease().expect("lease");
+    pool.mark_authentication_unavailable(&lease, "permanent refresh failure")
+        .expect("mark unavailable");
+
+    // Simulate the 401 permanent-failure path rewriting account_id without rotating refresh.
+    save_auth(
+        &creds,
+        &chatgpt_auth("mismatched-acct", "same-refresh"),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("rewrite auth");
+
+    let recovered = recover_pool_auth_from_disk(&pool).await;
+    assert!(recovered.is_empty());
+    assert!(matches!(
+        pool.snapshots()[0].availability,
+        AccountAvailability::AuthenticationUnavailable { .. }
+    ));
+}

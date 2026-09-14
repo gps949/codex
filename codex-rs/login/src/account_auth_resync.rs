@@ -14,9 +14,13 @@ use crate::AuthManager;
 use crate::CodexAuth;
 
 /// Reloads every registered profile's AuthManager from disk and clears
-/// `AuthenticationUnavailable` when the on-disk ChatGPT credentials look usable again.
+/// `AuthenticationUnavailable` when on-disk credentials look like a successful CLI re-login.
 ///
 /// Returns the profile ids that transitioned back to [`AccountAvailability::Available`].
+///
+/// Do **not** call this from the outer `ExternalAuth::resolve` hot path: disk may change as part of
+/// a permanent auth failure (tests rewrite `auth.json` on 401), and re-entering resolve through the
+/// shared AuthManager's external-auth bridge can recurse until the stack overflows.
 pub async fn recover_pool_auth_from_disk(pool: &AccountPool) -> Vec<AccountProfileId> {
     let mut recovered = Vec::new();
     for (profile_id, manager) in pool.auth_managers() {
@@ -30,8 +34,9 @@ pub async fn recover_pool_auth_from_disk(pool: &AccountPool) -> Vec<AccountProfi
     recovered
 }
 
-/// Reloads one profile's AuthManager from disk and clears sticky auth-unavailable state when the
-/// reloaded credentials are usable ChatGPT auth.
+/// Reloads one profile's AuthManager from disk and clears sticky auth-unavailable state only when
+/// the reload looks like an out-of-process re-login (refresh token changed) and the reloaded
+/// credentials are still ChatGPT auth without a sticky refresh failure.
 ///
 /// Returns `true` when availability was restored to [`AccountAvailability::Available`].
 pub async fn refresh_profile_auth_from_disk(
@@ -39,11 +44,24 @@ pub async fn refresh_profile_auth_from_disk(
     profile_id: &AccountProfileId,
     manager: &AuthManager,
 ) -> Result<bool, AccountPoolError> {
-    manager.reload().await;
-    if profile_has_usable_chatgpt_auth(manager) {
-        return pool.clear_authentication_unavailable(profile_id);
+    let previous_refresh_token = refresh_token_fingerprint(manager);
+    let _ = manager.reload().await;
+    let current_refresh_token = refresh_token_fingerprint(manager);
+
+    // Permanent 401 handlers (and similar) may rewrite `auth.json` without rotating the refresh
+    // token. Treat only a refresh-token change as evidence of CLI re-login / credential repair.
+    let looks_like_relogin = match (
+        previous_refresh_token.as_deref(),
+        current_refresh_token.as_deref(),
+    ) {
+        (None, Some(_)) => true,
+        (Some(previous), Some(current)) => previous != current,
+        _ => false,
+    };
+    if !looks_like_relogin || !profile_has_usable_chatgpt_auth(manager) {
+        return Ok(false);
     }
-    Ok(false)
+    pool.clear_authentication_unavailable(profile_id)
 }
 
 /// Reloads the target profile (when registered) before an explicit activate/use so CLI re-login is
@@ -61,6 +79,14 @@ pub async fn prepare_profile_auth_for_activation(
     };
     let _ = refresh_profile_auth_from_disk(pool, profile_id, manager.as_ref()).await?;
     Ok(())
+}
+
+fn refresh_token_fingerprint(manager: &AuthManager) -> Option<String> {
+    manager
+        .auth_cached()?
+        .get_token_data()
+        .ok()
+        .map(|token_data| token_data.refresh_token)
 }
 
 fn profile_has_usable_chatgpt_auth(manager: &AuthManager) -> bool {
