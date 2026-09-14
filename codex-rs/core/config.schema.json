@@ -45,7 +45,7 @@
           "type": "boolean"
         },
         "window_warmup_interval_minutes": {
-          "description": "Minutes between identity-preserving window-warmup passes. Defaults to 30. Values below 5 are clamped to 5.",
+          "description": "Minutes between identity-preserving window-warmup passes. Defaults to 5. Values below 5 are clamped to 5.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
