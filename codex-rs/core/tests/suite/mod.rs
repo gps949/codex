@@ -78,6 +78,7 @@ mod git_enrichment;
 mod guardian_authorization;
 mod guardian_history;
 mod guardian_mcp_elicitation;
+mod guardian_retained_context;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
 #[cfg(not(target_os = "windows"))]
@@ -106,6 +107,7 @@ mod mcp_startup_refresh_http_proxy;
 mod mcp_tool_cache;
 mod mcp_tool_exposure;
 mod mcp_turn_metadata;
+mod mcp_user_verification;
 mod model_overrides;
 mod model_runtime_selectors;
 mod model_switching;
@@ -132,6 +134,7 @@ mod quota_exceeded;
 mod realtime_conversation;
 mod realtime_initial_items;
 mod realtime_sideband_endpoint;
+mod reasoning_effort_override;
 mod remote_env;
 mod remote_models;
 mod request_compression;

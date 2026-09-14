@@ -1,9 +1,15 @@
+<<<<<<< HEAD
 mod account_pool;
+=======
+mod application_requirements;
+>>>>>>> rust-v0.154.0
 mod auth_policy;
 mod browser_computer_use_requirements;
 mod browser_use;
 mod cloud_config_bundle;
 mod cloud_config_layers;
+#[cfg(target_os = "macos")]
+mod codex_home_symlink;
 mod computer_use;
 mod config_layer_source;
 mod config_requirements;
@@ -40,9 +46,14 @@ pub mod types;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
+<<<<<<< HEAD
 pub use account_pool::AccountPoolConfigToml;
 pub use account_pool::AccountPoolRotationStrategy;
 pub use account_pool::AutoResetCredits;
+=======
+pub use application_requirements::ApplicationNetworkRequirementsToml;
+pub use application_requirements::ApplicationRequirementsToml;
+>>>>>>> rust-v0.154.0
 pub use auth_policy::ManagedAuthPolicy;
 pub use browser_computer_use_requirements::AllowDenyRequirementToml;
 pub use browser_computer_use_requirements::BrowserUseAccessApprovalLifetimeToml;
@@ -67,6 +78,8 @@ pub use cloud_config_layers::CloudConfigFragmentSource;
 pub use cloud_config_layers::CloudConfigLayerError;
 pub use cloud_config_layers::cloud_config_layers_from_fragments;
 pub use codex_execpolicy::RequirementsExecPolicy;
+#[cfg(target_os = "macos")]
+pub use codex_home_symlink::allowed_symlinked_codex_home;
 pub use codex_protocol::config_types::ProfileV2Name;
 pub use codex_protocol::config_types::ProfileV2NameParseError;
 pub use codex_protocol::config_types::ToolExposureSurface;
