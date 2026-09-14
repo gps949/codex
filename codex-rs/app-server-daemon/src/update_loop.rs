@@ -25,10 +25,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 #[cfg(unix)]
 use tokio::signal::unix::Signal;
-#[cfg(unix)]
-use tokio::signal::unix::SignalKind;
-#[cfg(unix)]
-use tokio::signal::unix::signal;
 use tokio::time::sleep;
 
 use crate::Daemon;
