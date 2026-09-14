@@ -507,7 +507,6 @@ async fn start_app_server(
     state_db: &mut Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppServerClient> {
-<<<<<<< HEAD
     match target {
         AppServerTarget::Remote { endpoint } => {
             return connect_remote_app_server(endpoint.clone()).await;
@@ -560,24 +559,6 @@ async fn start_app_server(
         }
     }
 
-=======
-    let connection = if matches!(target, AppServerTarget::Embedded) {
-        None
-    } else {
-        Some(app_server_connection::connect(target).await)
-    };
-    if let Some(connection) = connection {
-        match connection {
-            Ok(app_server) => return Ok(app_server),
-            Err(err) if matches!(target, AppServerTarget::LocalDaemon { .. }) => {
-                tracing::debug!(%err, "local daemon connection failed; starting embedded app server");
-                *target = AppServerTarget::Embedded;
-                *state_db = init_state_db_for_app_server_target(&config, target).await?;
-            }
-            Err(err) => return Err(err),
-        }
-    }
->>>>>>> rust-v0.154.0
     start_embedded_app_server(
         arg0_paths,
         config,
@@ -587,11 +568,7 @@ async fn start_app_server(
         cloud_config_bundle,
         feedback,
         log_db,
-<<<<<<< HEAD
-        state_db,
-=======
         state_db.clone(),
->>>>>>> rust-v0.154.0
         environment_manager,
     )
     .await
@@ -986,7 +963,7 @@ fn latest_session_cwd_filter<'a>(
 fn app_server_target_for_launch(
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
     default_daemon_socket: Option<AbsolutePathBuf>,
-    _can_reuse_implicit_local_daemon: bool,
+    can_reuse_implicit_local_daemon: bool,
     workload_identity_selected: bool,
     exec_server_url: Option<&std::ffi::OsStr>,
 ) -> std::io::Result<AppServerTarget> {
@@ -1001,14 +978,6 @@ fn app_server_target_for_launch(
     }
     Ok(match explicit_remote_endpoint {
         Some(endpoint) => AppServerTarget::Remote { endpoint },
-<<<<<<< HEAD
-        None => match default_daemon_socket {
-            Some(socket_path) => AppServerTarget::LocalDaemon {
-                endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
-            },
-            None => AppServerTarget::Embedded,
-        },
-=======
         // A shared daemon cannot adopt this invocation's executor selection.
         None if can_reuse_implicit_local_daemon && exec_server_url.is_none() => {
             default_daemon_socket.map_or(AppServerTarget::Embedded, |socket_path| {
@@ -1018,7 +987,6 @@ fn app_server_target_for_launch(
             })
         }
         None => AppServerTarget::Embedded,
->>>>>>> rust-v0.154.0
     })
 }
 

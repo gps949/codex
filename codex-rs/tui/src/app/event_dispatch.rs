@@ -1292,7 +1292,6 @@ impl App {
             AppEvent::RefreshRateLimits { origin } => {
                 self.refresh_rate_limits(app_server, origin);
             }
-<<<<<<< HEAD
             AppEvent::RefreshAccountPool => {
                 self.refresh_account_pool(app_server);
             }
@@ -1346,7 +1345,8 @@ impl App {
                             "Failed to save account rotation strategy: {error}"
                         ));
                     }
-=======
+                }
+            }
             AppEvent::ApplyBackendBannerFallback { thread_id } => {
                 if self.active_thread_id == Some(thread_id)
                     && self.chat_widget.thread_id() == Some(thread_id)
@@ -1356,7 +1356,6 @@ impl App {
                         self.chat_widget.finish_rate_limit_recovery();
                     }
                     self.refresh_rate_limits(app_server, RateLimitRefreshOrigin::Periodic);
->>>>>>> rust-v0.154.0
                 }
             }
             AppEvent::RefreshTokenActivity { request_id } => {

@@ -736,10 +736,7 @@ async fn status_uses_server_provider_id_and_auth_requirement() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.6-sol".to_string());
-<<<<<<< HEAD
-=======
     set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
->>>>>>> rust-v0.154.0
     config.model_provider_id = "amazon-bedrock".to_string();
     config.model_provider =
         ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {

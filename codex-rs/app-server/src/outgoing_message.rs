@@ -107,12 +107,9 @@ pub(crate) enum OutgoingEnvelope {
 
 /// Sends messages to the client and manages request callbacks.
 pub(crate) struct OutgoingMessageSender {
-<<<<<<< HEAD
     pub(crate) remote_clients: Arc<crate::mobile_account_bridge::RemoteClientRegistry>,
-=======
     verification_auth: OnceLock<Arc<codex_login::AuthManager>>,
     verification_connections: Mutex<HashSet<ConnectionId>>,
->>>>>>> rust-v0.154.0
     next_server_request_id: AtomicI64,
     sender: mpsc::Sender<OutgoingEnvelope>,
     request_id_to_callback: Mutex<HashMap<RequestId, PendingCallbackEntry>>,
@@ -235,12 +232,9 @@ impl OutgoingMessageSender {
         analytics_events_client: AnalyticsEventsClient,
     ) -> Self {
         Self {
-<<<<<<< HEAD
             remote_clients: Arc::default(),
-=======
             verification_auth: OnceLock::new(),
             verification_connections: Mutex::new(HashSet::new()),
->>>>>>> rust-v0.154.0
             next_server_request_id: AtomicI64::new(0),
             sender,
             request_id_to_callback: Mutex::new(HashMap::new()),

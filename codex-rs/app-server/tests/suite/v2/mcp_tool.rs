@@ -1397,8 +1397,6 @@ impl ServerHandler for ToolAppsMcpServer {
                 )])
                 .into());
             }
-<<<<<<< HEAD
-=======
             if matches!(result.action, ElicitationAction::Cancel) {
                 assert_eq!(
                     serde_json::to_value(result).expect("cancelled elicitation response"),
@@ -1409,7 +1407,6 @@ impl ServerHandler for ToolAppsMcpServer {
                 )])
                 .into());
             }
->>>>>>> rust-v0.154.0
             assert_eq!(
                 serde_json::to_value(result).expect("elicitation response"),
                 json!({

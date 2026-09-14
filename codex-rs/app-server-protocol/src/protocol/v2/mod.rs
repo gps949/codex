@@ -1,11 +1,8 @@
 mod shared;
 
 mod account;
-<<<<<<< HEAD
 mod account_pool;
-=======
 mod application;
->>>>>>> rust-v0.154.0
 mod apps;
 mod attestation;
 mod bedrock;
@@ -41,11 +38,8 @@ mod user_verification;
 mod windows_sandbox;
 
 pub use account::*;
-<<<<<<< HEAD
 pub use account_pool::*;
-=======
 pub use application::*;
->>>>>>> rust-v0.154.0
 pub use apps::*;
 pub use attestation::*;
 pub use bedrock::*;

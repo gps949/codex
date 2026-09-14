@@ -184,12 +184,8 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
 
             // Keep the sampler available for later automatic review, but do not
             // prewarm while User approval mode or Full Access is selected.
-<<<<<<< HEAD
-            if input.config.approvals_reviewer == ApprovalsReviewer::AutoReview
-=======
             if scoring_enabled
                 && input.config.approvals_reviewer == ApprovalsReviewer::AutoReview
->>>>>>> rust-v0.154.0
                 && !has_full_access(
                     input.config.permissions.approval_policy.value(),
                     &input.config.permissions.effective_permission_profile(),
@@ -231,158 +227,6 @@ impl SkillInvocationContributor for GuardianV2Extension {
     }
 }
 
-<<<<<<< HEAD
-impl ApprovalReviewContributor for GuardianV2Extension {
-    fn fast_decision<'a>(
-        &'a self,
-        _session_store: &'a ExtensionData,
-        thread_store: &'a ExtensionData,
-        prompt: &'a str,
-        extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
-    ) -> ExtensionFuture<'a, Option<ReviewDecision>> {
-        Box::pin(async move {
-            thread_store.get::<GuardianV2Enabled>()?;
-            let guardian_config = thread_store.get::<GuardianV2Config>()?;
-            if guardian_config.review_scope == GuardianV2ReviewScope::ComputerUseOnly {
-                let Ok(action) = serde_json::from_str::<serde_json::Value>(prompt) else {
-                    record_fast_decision(extension_metrics.as_deref(), "deferred", "out_of_scope");
-                    return None;
-                };
-                if action.get("tool").and_then(serde_json::Value::as_str) != Some("mcp_tool_call")
-                    || !action
-                        .get("server")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(is_node_repl_backed_server)
-                    || !thread_store
-                        .get::<ModelInfo>()
-                        .is_some_and(|model| model.node_repl_auto_review_required)
-                {
-                    record_fast_decision(extension_metrics.as_deref(), "deferred", "out_of_scope");
-                    return None;
-                }
-                // The first REPL execution never waits for synchronous Guardian review.
-                // The async classifier still runs, and later calls use the normal policy.
-                if action.get("tool_name").and_then(serde_json::Value::as_str) == Some("js")
-                    && action
-                        .get("connector_id")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("node_repl")
-                    && thread_store
-                        .get::<GuardianV2ScoreProgress>()?
-                        .js_executions
-                        .load(Ordering::Acquire)
-                        == 1
-                {
-                    record_fast_decision(
-                        extension_metrics.as_deref(),
-                        "approved",
-                        "initial_cua_call",
-                    );
-                    return Some(ReviewDecision::Approved);
-                }
-            } else if thread_store.get::<ModelInfo>().is_some() {
-                let manager = self.thread_manager.upgrade()?;
-                let thread_id = ThreadId::from_string(thread_store.level_id()).ok()?;
-                let thread = manager.get_thread(thread_id).await.ok()?;
-                let config = thread.config().await;
-                let model = thread_store.get::<ModelInfo>()?;
-                if config
-                    .config_layer_stack
-                    .requirements()
-                    .auto_review_required_for_model(&model.slug)
-                {
-                    record_fast_decision(
-                        extension_metrics.as_deref(),
-                        "deferred",
-                        "required_model",
-                    );
-                    return None;
-                }
-            }
-            let Some(score_progress) = thread_store.get::<GuardianV2ScoreProgress>() else {
-                record_fast_decision(extension_metrics.as_deref(), "deferred", "missing_score");
-                return None;
-            };
-            let manager = self.thread_manager.upgrade()?;
-            let thread_id = ThreadId::from_string(thread_store.level_id()).ok()?;
-            let Ok(thread) = manager.get_thread(thread_id).await else {
-                record_fast_decision(extension_metrics.as_deref(), "deferred", "scoring_failure");
-                return None;
-            };
-            let current_authorization = ScoreAuthorization::current(&thread).await;
-            let scored_authorization = score_progress
-                .authorization
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let latest_scored_tool_call = score_progress
-                .latest_scored_tool_call
-                .load(Ordering::Acquire);
-            let tool_call_lag = score_progress
-                .latest_tool_call
-                .load(Ordering::Acquire)
-                .saturating_sub(latest_scored_tool_call);
-            if let Some(metrics) = &extension_metrics {
-                metrics.histogram(
-                    TOOL_CALL_LAG_METRIC,
-                    i64::try_from(tool_call_lag).unwrap_or(i64::MAX),
-                    &[],
-                );
-            }
-            if tool_call_lag > guardian_config.max_tool_call_lag {
-                thread_store.insert(StrictReviewReason::StaleScore);
-                if let Some(metrics) = &extension_metrics {
-                    metrics.counter(
-                        REVIEW_FALLBACK_METRIC,
-                        /*inc*/ 1,
-                        &[("fallback_reason", "score_lag")],
-                    );
-                }
-                record_fast_decision(extension_metrics.as_deref(), "deferred", "stale_score");
-                return None;
-            }
-            if score_progress
-                .latest_failed_tool_call
-                .load(Ordering::Acquire)
-                > latest_scored_tool_call
-            {
-                thread_store.insert(StrictReviewReason::ElevatedRisk);
-                record_fast_decision(extension_metrics.as_deref(), "deferred", "scoring_failure");
-                return None;
-            }
-
-            let Some(score) = thread_store
-                .get::<SecurityRiskScore>()
-                .and_then(|score| score.scores.get("action_risk").copied())
-            else {
-                record_fast_decision(extension_metrics.as_deref(), "deferred", "missing_score");
-                return None;
-            };
-            if score < guardian_config.review_threshold {
-                if scored_authorization.as_ref() != Some(&current_authorization) {
-                    thread_store.insert(StrictReviewReason::StaleScore);
-                    record_fast_decision(
-                        extension_metrics.as_deref(),
-                        "deferred",
-                        "authorization_changed",
-                    );
-                    return None;
-                }
-                record_fast_decision(extension_metrics.as_deref(), "approved", "low_risk");
-                return Some(ReviewDecision::Approved);
-            }
-            if score >= guardian_config.review_threshold {
-                thread_store.insert(StrictReviewReason::ElevatedRisk);
-                record_fast_decision(extension_metrics.as_deref(), "deferred", "elevated_risk");
-            } else {
-                record_fast_decision(extension_metrics.as_deref(), "deferred", "invalid_score");
-            }
-            None
-        })
-    }
-}
-
-=======
->>>>>>> rust-v0.154.0
 impl ToolLifecycleContributor for GuardianV2Extension {
     fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(self.score_tool(input))
@@ -508,35 +352,17 @@ impl GuardianV2Extension {
         };
         // Use the live reviewer, not the startup config or per-app reviewer overrides.
         let snapshot = thread.config_snapshot().await;
-<<<<<<< HEAD
-        let parent_model = input.thread_store.get::<ModelInfo>();
-        if snapshot.full_access
-            || thread.approvals_reviewer_for_turn(input.turn_id).await == ApprovalsReviewer::User
-            || (guardian_config.review_scope == GuardianV2ReviewScope::ComputerUseOnly
-                && !parent_model
-                    .as_ref()
-                    .is_some_and(|model| model.node_repl_auto_review_required))
-        {
-            // A skipped call invalidates older scores, including ones still in flight
-            // when switching to a model that does not require REPL review.
-=======
         if snapshot.full_access
             || thread.approvals_reviewer_for_turn(input.turn_id).await == ApprovalsReviewer::User
         {
             // A skipped call invalidates older scores, including ones still in flight.
->>>>>>> rust-v0.154.0
             score_progress
                 .latest_failed_tool_call
                 .fetch_max(tool_call_index, Ordering::Release);
             return;
         }
-<<<<<<< HEAD
-        // Computer-use-only scores cannot approve other tools for required models.
-        if guardian_config.review_scope != GuardianV2ReviewScope::ComputerUseOnly
-=======
         // A required model keeps synchronous review outside its CUA allowance.
         if !(scope == Some(GuardianScope::ComputerUse) && policy.initial_cua_call)
->>>>>>> rust-v0.154.0
             && parent_model.as_ref().is_some_and(|model| {
                 config
                     .config_layer_stack

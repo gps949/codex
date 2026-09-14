@@ -768,59 +768,13 @@ fn build_compacted_history_with_limit(
     summary_text: &str,
     max_tokens: usize,
 ) -> Vec<ResponseItemEnvelope> {
-    let mut selected_messages = Vec::new();
+    let mut selected_messages: Vec<CompactedUserMessage> = Vec::new();
     if max_tokens > 0 {
         let mut remaining = max_tokens;
         for message in user_messages.iter().rev() {
             if remaining == 0 {
                 break;
             }
-<<<<<<< HEAD
-            let Some(message_text) =
-                truncate_text_to_estimated_token_limit(&message.message, remaining, |text| {
-                    i64::try_from(approx_token_count(text)).unwrap_or(i64::MAX)
-                })
-            else {
-                break;
-            };
-            let mut item = ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: message_text.clone(),
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: message
-                    .internal_chat_message_metadata_passthrough
-                    .clone(),
-            };
-            if message
-                .internal_chat_message_metadata_passthrough
-                .as_ref()
-                .and_then(|metadata| metadata.content_item_kinds.as_ref())
-                .is_some()
-            {
-                let _ = set_annotated_content(
-                    &mut item,
-                    vec![AnnotatedContent::input_text(
-                        &message_text,
-                        ContentItemKind("user.text".to_string()),
-                    )],
-                );
-            }
-            bound_portable_context_item(&mut item, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
-            let retained_tokens = match &item {
-                ResponseItem::Message { content, .. } => content_items_to_text(content)
-                    .as_deref()
-                    .map(approx_token_count)
-                    .unwrap_or_default(),
-                _ => 0,
-            };
-            if retained_tokens == 0 {
-                if message.message.is_empty() {
-                    continue;
-                }
-=======
             let tokens = approx_token_count(&message.message);
             if tokens <= remaining {
                 selected_messages.push(message.clone());
@@ -836,17 +790,9 @@ fn build_compacted_history_with_limit(
                         .clone(),
                     harness_metadata: message.harness_metadata.clone(),
                 });
->>>>>>> rust-v0.154.0
                 break;
             }
-            remaining = remaining.saturating_sub(retained_tokens);
-            selected_messages.push(ResponseItemEnvelope {
-                item,
-                metadata: message.harness_metadata.clone(),
-            });
         }
-<<<<<<< HEAD
-=======
         selected_messages.reverse();
     }
 
@@ -876,14 +822,12 @@ fn build_compacted_history_with_limit(
                 )],
             );
         }
+        bound_portable_context_item(&mut item, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
         history.push(ResponseItemEnvelope {
             item,
             metadata: message.harness_metadata.clone(),
         });
->>>>>>> rust-v0.154.0
     }
-    selected_messages.reverse();
-    history.extend(selected_messages);
 
     let summary_text = if summary_text.is_empty() {
         "(no summary available)".to_string()

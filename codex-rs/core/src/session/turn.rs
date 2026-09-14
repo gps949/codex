@@ -492,8 +492,6 @@ pub(crate) async fn run_turn(
                 .record_step_world_state_if_changed(&world_state, step_context.as_ref())
                 .await?;
 
-<<<<<<< HEAD
-=======
             // Keep the override after accepted input so ordinary turn rollback removes it too.
             sess.record_reasoning_effort_override(step_context.as_ref())
                 .await;
@@ -507,7 +505,6 @@ pub(crate) async fn run_turn(
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
 
->>>>>>> rust-v0.154.0
             let responses_metadata = sess
                 .responses_metadata(turn_context.as_ref(), CodexResponsesRequestKind::Turn)
                 .await;
@@ -520,6 +517,7 @@ pub(crate) async fn run_turn(
                 &execution_auth_mode,
                 &mut client_session,
                 &responses_metadata,
+                sampling_request_input,
                 cancellation_token.child_token(),
             )
             .await
@@ -1542,6 +1540,7 @@ async fn run_sampling_request(
     execution_auth_mode: &ExecutionAuthMode,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
+    input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let mut step_context = step_context;
@@ -1555,10 +1554,14 @@ async fn run_sampling_request(
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
+    let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
-<<<<<<< HEAD
+        // A retry must not attribute the next tool call to the previous response.
+        turn_context
+            .extension_data
+            .remove::<codex_api::ResponseId>();
         // After every pool account is cooling down, the next turn still reaches sampling.
         // Surface UsageLimitExceeded (not UnsupportedOperation/BadRequest) so remote clients
         // keep the normal cooldown UX instead of a hard "unsupported operation" failure.
@@ -1574,18 +1577,6 @@ async fn run_sampling_request(
                 .await;
                 return Err(pool_unavailable_error(execution_auth.as_ref()));
             }
-=======
-        // A retry must not attribute the next tool call to the previous response.
-        turn_context
-            .extension_data
-            .remove::<codex_api::ResponseId>();
-        let prompt_input = if let Some(input) = initial_input.take() {
-            input
-        } else {
-            sess.clone_history()
-                .await
-                .for_prompt(&step_context.settings.model_info.input_modalities)
->>>>>>> rust-v0.154.0
         };
         let history_before = sess.clone_history().await;
         let annotated = history_before
@@ -1615,9 +1606,19 @@ async fn run_sampling_request(
         });
         let attempt_state = pooled_execution.then(|| install_sampling_attempt(&turn_context));
 
-        let prompt_input =
+        // Prefer account-projected history. Consume prepared input on the first attempt so
+        // retries always rebuild from the latest history (upstream retry semantic).
+        let prompt_input = if initial_input.take().is_some() {
             project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
-                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
+                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
+        } else {
+            let annotated = sess
+                .clone_history()
+                .await
+                .for_prompt_annotated(&step_context.settings.model_info.input_modalities);
+            project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
+                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
+        };
         let mut prompt_input = prompt_input;
         if let Some(executed_tool_calls) = sess.services.executed_tool_calls.as_ref()
             && executed_tool_calls
@@ -2701,17 +2702,14 @@ async fn try_run_sampling_request(
         record_turn_ttft_metric(&turn_context, &event).await;
 
         match event {
-<<<<<<< HEAD
-            ResponseEvent::Created => mark_sampling_response_started(&turn_context),
-=======
             ResponseEvent::Created { response_id } => {
+                mark_sampling_response_started(&turn_context);
                 if let Some(response_id) = response_id {
                     turn_context
                         .extension_data
                         .insert(codex_api::ResponseId(response_id));
                 }
             }
->>>>>>> rust-v0.154.0
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {

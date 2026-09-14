@@ -1,4 +1,12 @@
 //! Installs updates, validates the server restart, then transfers updater ownership.
+//!
+//! This multi-account fork intentionally does not run the official
+//! chatgpt.com/codex/install.{sh,ps1} updater. That loop would overwrite
+//! `packages/standalone` with the upstream binary and steal the shared
+//! app-server daemon. Update via the fork installer instead.
+//!
+//! Windows Signal / path scaffolding below is retained so the daemon crate still
+//! builds with upstream's updater layout; the entrypoint is a no-op.
 
 #[cfg(unix)]
 use std::process::Command as StdCommand;
@@ -31,95 +39,30 @@ use crate::managed_install::ExecutableIdentity;
 use crate::managed_install::executable_identity;
 use crate::managed_install::resolved_managed_codex_bin;
 
-<<<<<<< HEAD
-#[cfg(unix)]
 #[allow(dead_code)]
 const INITIAL_UPDATE_DELAY: Duration = Duration::from_secs(5 * 60);
-#[cfg(unix)]
 #[allow(dead_code)]
 const RESTART_RETRY_INTERVAL: Duration = Duration::from_millis(50);
-#[cfg(unix)]
 #[allow(dead_code)]
-=======
-const INITIAL_UPDATE_DELAY: Duration = Duration::from_secs(5 * 60);
-const RESTART_RETRY_INTERVAL: Duration = Duration::from_millis(50);
->>>>>>> rust-v0.154.0
 const UPDATE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 #[cfg(unix)]
+#[allow(dead_code)]
 const INSTALL_URL: &str = "https://chatgpt.com/codex/install.sh";
 #[cfg(windows)]
+#[allow(dead_code)]
 const INSTALL_URL: &str = "https://chatgpt.com/codex/install.ps1";
 
-<<<<<<< HEAD
-#[cfg(unix)]
 pub(crate) async fn run(_http_client_factory: HttpClientFactory) -> Result<()> {
-    // This multi-account fork intentionally does not run the official
-    // chatgpt.com/codex/install.sh updater. That loop would overwrite
-    // packages/standalone with the upstream binary and steal the shared
-    // app-server daemon. Update via the fork installer instead.
+    // Refuse the official standalone updater on every platform.
     let _ = (
         INITIAL_UPDATE_DELAY,
         UPDATE_INTERVAL,
-        INSTALL_URL,
-=======
-pub(crate) async fn run(http_client_factory: HttpClientFactory) -> Result<()> {
-    #[cfg(unix)]
-    let mut terminate =
-        signal(SignalKind::terminate()).context("failed to install updater shutdown handler")?;
-    #[cfg(windows)]
-    let updater = {
-        let daemon = Daemon::from_environment()?;
-        crate::backend::pid_update_loop_backend(
-            daemon.backend_paths(&daemon.load_settings().await?),
-        )
-    };
-    #[cfg(windows)]
-    updater.wait_for_ownership().await?;
-    #[cfg(windows)]
-    let mut terminate = Signal;
-    #[cfg(windows)]
-    let _installer_job = crate::backend::windows::updater_job()?;
-    let running_updater_identity = current_updater_identity().await?;
-    #[cfg(windows)]
-    updater.mark_ready().await?;
-    let http = RouteAwareClientPool::new_without_request_logging(
-        http_client_factory,
->>>>>>> rust-v0.154.0
         ClientRouteClass::Other,
-        signal,
-        SignalKind::terminate(),
     );
-<<<<<<< HEAD
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub(crate) async fn run(_http_client_factory: HttpClientFactory) -> Result<()> {
-    bail!("pid-managed updater loop is unsupported on this platform")
-}
-
-#[cfg(unix)]
 #[allow(dead_code)]
-=======
-    if sleep_or_terminate(INITIAL_UPDATE_DELAY, &mut terminate).await {
-        return Ok(());
-    }
-    loop {
-        // Failed successor cleanup leaves its PID published. The predecessor
-        // must stop instead of installing again without ownership.
-        #[cfg(windows)]
-        updater.wait_for_ownership().await?;
-        match update_once(&http, &running_updater_identity, &mut terminate).await {
-            Ok(UpdateLoopControl::Continue) | Err(_) => {}
-            Ok(UpdateLoopControl::Stop) => return Ok(()),
-        }
-        if sleep_or_terminate(UPDATE_INTERVAL, &mut terminate).await {
-            return Ok(());
-        }
-    }
-}
-
->>>>>>> rust-v0.154.0
 async fn sleep_or_terminate(duration: Duration, terminate: &mut Signal) -> bool {
     tokio::select! {
         _ = sleep(duration) => false,
@@ -127,21 +70,13 @@ async fn sleep_or_terminate(duration: Duration, terminate: &mut Signal) -> bool 
     }
 }
 
-<<<<<<< HEAD
-#[cfg(unix)]
 #[allow(dead_code)]
-=======
->>>>>>> rust-v0.154.0
 enum UpdateLoopControl {
     Continue,
     Stop,
 }
 
-<<<<<<< HEAD
-#[cfg(unix)]
 #[allow(dead_code)]
-=======
->>>>>>> rust-v0.154.0
 async fn update_once(
     http: &RouteAwareClientPool,
     running_updater_identity: &ExecutableIdentity,
@@ -188,11 +123,7 @@ async fn update_once(
     }
 }
 
-<<<<<<< HEAD
-#[cfg(unix)]
 #[allow(dead_code)]
-=======
->>>>>>> rust-v0.154.0
 async fn current_updater_identity() -> Result<ExecutableIdentity> {
     let current_exe =
         std::env::current_exe().context("failed to resolve current updater executable")?;
@@ -227,13 +158,8 @@ pub(crate) fn reexec_managed_updater(managed_codex_bin: &std::path::Path) -> Res
     })
 }
 
-<<<<<<< HEAD
-#[cfg(unix)]
 #[allow(dead_code)]
-async fn install_latest_standalone(http: &RouteAwareClientPool) -> Result<()> {
-=======
 async fn install_latest_standalone(http: &impl InstallerHttp) -> Result<()> {
->>>>>>> rust-v0.154.0
     let script = fetch_installer_script(http).await?;
 
     #[cfg(unix)]
@@ -278,6 +204,7 @@ async fn install_latest_standalone(http: &impl InstallerHttp) -> Result<()> {
     }
 }
 
+#[allow(dead_code)]
 async fn fetch_installer_script(http: &impl InstallerHttp) -> Result<Vec<u8>> {
     match http.get(INSTALL_URL).await? {
         InstallerResponse::Success(body) => Ok(body),
@@ -288,6 +215,7 @@ async fn fetch_installer_script(http: &impl InstallerHttp) -> Result<Vec<u8>> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum InstallerResponse {
     Success(Vec<u8>),
     Unsuccessful { status: u16 },
@@ -297,6 +225,7 @@ enum InstallerResponse {
 ///
 /// Implementations must issue a GET for the supplied URL, return exact response bytes for a
 /// successful status, and report a non-success status without buffering its response body.
+#[allow(dead_code)]
 trait InstallerHttp: Send + Sync {
     fn get<'a>(
         &'a self,

@@ -1639,21 +1639,16 @@ impl MessageProcessor {
             ClientRequest::GetAuthStatus { params, .. } => {
                 self.account_processor.get_auth_status(params).await
             }
-<<<<<<< HEAD
             ClientRequest::AccountPoolRead { .. } => {
                 self.account_processor.get_account_pool().await
             }
             ClientRequest::AccountPoolUse { params, .. } => {
                 self.account_processor.use_account_pool(params).await
             }
-            ClientRequest::GetAccountRateLimits { .. } => {
-                self.account_processor
-                    .get_account_rate_limits(app_server_client_name.as_deref())
-                    .await
-=======
             ClientRequest::GetAccountRateLimits { params, .. } => {
-                self.account_processor.get_account_rate_limits(params).await
->>>>>>> rust-v0.154.0
+                self.account_processor
+                    .get_account_rate_limits(params, session.app_server_client_name())
+                    .await
             }
             ClientRequest::ConsumeAccountRateLimitResetCredit { params, .. } => {
                 self.account_processor

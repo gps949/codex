@@ -30,7 +30,6 @@ pub(crate) fn managed_codex_bin(codex_home: &Path) -> PathBuf {
     }
 }
 
-<<<<<<< HEAD
 /// Binary the app-server daemon should spawn for lifecycle / remote-control.
 ///
 /// Prefer the invoking CLI (`current_exe`) so a multi-account fork never silently
@@ -49,9 +48,6 @@ pub(crate) fn app_server_version_matches_cli(app_server_version: &str) -> bool {
     app_server_version == env!("CARGO_PKG_VERSION")
 }
 
-#[cfg(unix)]
-=======
->>>>>>> rust-v0.154.0
 pub(crate) async fn resolved_managed_codex_bin(codex_bin: &Path) -> Result<PathBuf> {
     fs::canonicalize(codex_bin).await.with_context(|| {
         format!(

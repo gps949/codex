@@ -46,11 +46,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use supports_color::Stream;
 
-<<<<<<< HEAD
-mod account_cmd;
-mod account_config;
-mod account_selector;
-=======
 #[cfg(all(
     target_os = "linux",
     target_env = "musl",
@@ -59,7 +54,9 @@ mod account_selector;
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
->>>>>>> rust-v0.154.0
+mod account_cmd;
+mod account_config;
+mod account_selector;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
 mod cloud_config;

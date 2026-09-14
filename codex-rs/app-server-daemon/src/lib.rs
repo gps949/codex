@@ -22,14 +22,9 @@ use codex_app_server_protocol::RemoteControlConnectionStatus;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_transport::app_server_control_socket_path;
 use codex_utils_home_dir::find_codex_home;
-<<<<<<< HEAD
 use managed_install::app_server_version_matches_cli;
 use managed_install::daemon_codex_bin;
-#[cfg(unix)]
-=======
-use managed_install::managed_codex_bin;
 #[cfg(any(unix, windows))]
->>>>>>> rust-v0.154.0
 use managed_install::managed_codex_version;
 use serde::Serialize;
 use settings::DaemonSettings;
@@ -615,16 +610,12 @@ impl Daemon {
         }
 
         if backend.is_some() {
-            self.ensure_managed_codex_bin()?;
+            self.ensure_daemon_codex_bin()?;
         }
         settings.remote_control_enabled = remote_control_enabled;
         settings.save(&self.settings_file).await?;
 
         let app_server_version = if let Some(backend) = backend {
-<<<<<<< HEAD
-            self.ensure_daemon_codex_bin()?;
-=======
->>>>>>> rust-v0.154.0
             backend.stop().await?;
             let _ = self.start_managed_backend(&settings).await?;
             Some(self.wait_until_ready().await?.app_server_version)
@@ -765,18 +756,11 @@ impl Daemon {
         } else {
             "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
         };
+        let _ = install_command;
         Err(anyhow!(
-<<<<<<< HEAD
             "Codex binary for the app-server daemon was not found at {managed_codex_path}\n\n\
              This fork starts app-server from the invoking CLI binary. Reinstall the fork:\n  \
              curl -fsSL https://raw.githubusercontent.com/gps949/codex/feature/native-multi-account/install.sh | bash"
-=======
-            "managed standalone Codex install not found at {managed_codex_path}\n\n\
-             This command requires the standalone install managed by the Codex installer, because \
-             the daemon starts and updates app-server from that fixed path.\n\n\
-             Install it with:\n  {install_command}\n\n\
-             Then rerun the command you just tried."
->>>>>>> rust-v0.154.0
         ))
     }
 

@@ -249,6 +249,7 @@ pub(crate) fn history_item_ownership(envelope: &ResponseItemEnvelope) -> History
         | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::ConfigurationUpdate { .. }
         | ResponseItem::Other => HistoryItemOwnership::LegacyRootScoped,
     }
 }
@@ -333,6 +334,7 @@ fn sanitize_foreign_item(
         | ResponseItem::WebSearchCall { .. }
         | ResponseItem::ImageGenerationCall { .. }
         | ResponseItem::Other
+        | ResponseItem::ConfigurationUpdate { .. }
         | ResponseItem::Compaction { .. } => {}
     }
 

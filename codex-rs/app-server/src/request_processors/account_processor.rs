@@ -15,13 +15,10 @@ use crate::mobile_account_bridge::overlay_get_account_rate_limits_for_remote_cli
 use crate::mobile_account_bridge::push_account_pool_warning;
 use chrono::DateTime;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
-<<<<<<< HEAD
+use codex_app_server_protocol::GetAccountRateLimitsParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_core::ExecutionAccountPoolHandle;
-=======
-use codex_app_server_protocol::GetAccountRateLimitsParams;
->>>>>>> rust-v0.154.0
 use codex_login::LoginOnboardingEntrypoint;
 use codex_login::login_with_bedrock_access_keys;
 use codex_model_provider::is_supported_amazon_bedrock_region;
@@ -225,9 +222,7 @@ impl AccountRequestProcessor {
 
     pub(crate) async fn get_account_pool(
         &self,
-        params: Option<GetAccountRateLimitsParams>,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-<<<<<<< HEAD
         let mut response = self.get_account_pool_response().await?;
         pool_quota::refresh(&self.load_latest_config().await, &mut response).await;
         Ok(Some(response.into()))
@@ -244,12 +239,10 @@ impl AccountRequestProcessor {
 
     pub(crate) async fn get_account_rate_limits(
         &self,
+        params: Option<GetAccountRateLimitsParams>,
         client_name: Option<&str>,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.get_account_rate_limits_response(client_name)
-=======
-        self.get_account_rate_limits_response(params.unwrap_or_default())
->>>>>>> rust-v0.154.0
+        self.get_account_rate_limits_response(params.unwrap_or_default(), client_name)
             .await
             .map(|response| Some(response.into()))
     }
@@ -1339,11 +1332,8 @@ impl AccountRequestProcessor {
 
     async fn get_account_rate_limits_response(
         &self,
-<<<<<<< HEAD
-        client_name: Option<&str>,
-=======
         params: GetAccountRateLimitsParams,
->>>>>>> rust-v0.154.0
+        client_name: Option<&str>,
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
         // Same ordering requirement as account/read: pool ExternalAuth must be installed before
         // resolving ChatGPT credentials from per-profile credential homes.
@@ -1446,14 +1436,10 @@ impl AccountRequestProcessor {
             .rate_limit_upsell
             .filter(|_| matches_active_account);
 
-<<<<<<< HEAD
         let mut response = GetAccountRateLimitsResponse {
-=======
-        Ok(GetAccountRateLimitsResponse {
             ordinary_usage_allowed: response
                 .ordinary_usage_allowed
                 .filter(|_| matches_active_account),
->>>>>>> rust-v0.154.0
             rate_limits: rate_limits.into(),
             rate_limits_by_limit_id: Some(
                 rate_limits_by_limit_id

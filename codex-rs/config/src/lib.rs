@@ -1,8 +1,5 @@
-<<<<<<< HEAD
 mod account_pool;
-=======
 mod application_requirements;
->>>>>>> rust-v0.154.0
 mod auth_policy;
 mod browser_computer_use_requirements;
 mod browser_use;
@@ -46,14 +43,11 @@ pub mod types;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
-<<<<<<< HEAD
 pub use account_pool::AccountPoolConfigToml;
 pub use account_pool::AccountPoolRotationStrategy;
 pub use account_pool::AutoResetCredits;
-=======
 pub use application_requirements::ApplicationNetworkRequirementsToml;
 pub use application_requirements::ApplicationRequirementsToml;
->>>>>>> rust-v0.154.0
 pub use auth_policy::ManagedAuthPolicy;
 pub use browser_computer_use_requirements::AllowDenyRequirementToml;
 pub use browser_computer_use_requirements::BrowserUseAccessApprovalLifetimeToml;

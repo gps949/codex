@@ -236,13 +236,10 @@ mod approval_requests;
 mod backend_banners_tests;
 #[path = "tests/bedrock_catalog_tests.rs"]
 mod bedrock_catalog_tests;
-<<<<<<< HEAD
-=======
 #[path = "tests/collaboration_catalog_tests.rs"]
 mod collaboration_catalog_tests;
 #[path = "tests/compaction_tests.rs"]
 mod compaction_tests;
->>>>>>> rust-v0.154.0
 mod composer_submission;
 #[path = "tests/config_errors_tests.rs"]
 mod config_errors;

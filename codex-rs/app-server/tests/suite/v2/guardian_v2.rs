@@ -82,15 +82,12 @@ mod history;
 #[path = "guardian_v2_model_tests.rs"]
 mod model_tests;
 
-<<<<<<< HEAD
-=======
 #[path = "guardian_policy_tests.rs"]
 mod policy;
 
 #[path = "guardian_code_mode_tests.rs"]
 mod code_mode;
 
->>>>>>> rust-v0.154.0
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL: &str = "mock-model";
 const REQUIRED_MODEL: &str = "protected-model";

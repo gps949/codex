@@ -256,12 +256,9 @@ async fn token_budget_guidance_precedes_standalone_context_window(
     let guidance_message = "Preserve important state before compaction.";
     let backend_url = format!("{}/backend-api/codex", server.uri());
     let test = test_codex()
-<<<<<<< HEAD
-=======
         .with_model_info_override("gpt-5.2", |model| {
             model.supports_experimental_context = true;
         })
->>>>>>> rust-v0.154.0
         .with_auth(CodexAuth::from_external_chatgpt_tokens(
             "header.e30.signature",
             "account-123",
@@ -310,17 +307,6 @@ async fn token_budget_guidance_precedes_standalone_context_window(
     Ok(())
 }
 
-<<<<<<< HEAD
-#[test_case("OpenAI", "/backend-api/codex", None, true; "codex_backend")]
-#[test_case("Custom", "/backend-api/codex", None, false; "custom_provider")]
-#[test_case("OpenAI", "/v1", None, false; "non_codex_endpoint")]
-#[test_case("OpenAI", "/backend-api/codex", Some("test-provider-token"), false; "provider_credentials")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn experimental_context_requires_codex_backend(
-    provider_name: &'static str,
-    base_path: &'static str,
-    bearer_token: Option<&'static str>,
-=======
 #[test_case("OpenAI", "/backend-api/codex", None, true, true; "codex_backend")]
 #[test_case("OpenAI", "/backend-api/codex", None, false, false; "unsupported_model")]
 #[test_case("Custom", "/backend-api/codex", None, true, false; "custom_provider")]
@@ -332,7 +318,6 @@ async fn experimental_context_requires_capable_model_and_codex_backend(
     base_path: &'static str,
     bearer_token: Option<&'static str>,
     supports_context: bool,
->>>>>>> rust-v0.154.0
     expected_enabled: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -341,12 +326,9 @@ async fn experimental_context_requires_capable_model_and_codex_backend(
     let response = mount_sse_once(&server, sse_completed("resp-1")).await;
     let base_url = format!("{}{base_path}", server.uri());
     let test = test_codex()
-<<<<<<< HEAD
-=======
         .with_model_info_override("gpt-5.2", move |model| {
             model.supports_experimental_context = supports_context;
         })
->>>>>>> rust-v0.154.0
         .with_auth(CodexAuth::from_external_chatgpt_tokens(
             "header.e30.signature",
             "account-123",

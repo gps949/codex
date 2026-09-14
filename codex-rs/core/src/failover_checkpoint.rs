@@ -119,6 +119,7 @@ impl SamplingHistoryCursor {
                 | ResponseItem::Compaction { .. }
                 | ResponseItem::ContextCompaction { .. }
                 | ResponseItem::CompactionTrigger { .. }
+                | ResponseItem::ConfigurationUpdate { .. }
                 | ResponseItem::Other => checkpoint.mark_completed_output_persisted(),
             }
         }

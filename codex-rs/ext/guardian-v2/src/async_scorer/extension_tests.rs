@@ -603,16 +603,7 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
 
     let fixture = GuardianFailureFixture::new().await?;
     let thread_store = fixture.test.codex.thread_extension_data();
-<<<<<<< HEAD
-    let mut model = fixture
-        .test
-        .thread_manager
-        .get_models_manager()
-        .get_model_info("gpt-5.5", &fixture.test.config.to_models_manager_config())
-        .await;
-=======
     let mut model = thread_store.get::<ModelInfo>().unwrap().as_ref().clone();
->>>>>>> rust-v0.154.0
     model.node_repl_auto_review_required = true;
     thread_store.insert(model);
     let mut config = thread_store
@@ -758,10 +749,7 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
     );
 
     let mut model = thread_store.get::<ModelInfo>().unwrap().as_ref().clone();
-<<<<<<< HEAD
-=======
     model.guardian = None; // Exercise the legacy fallback after the catalog case above.
->>>>>>> rust-v0.154.0
     model.node_repl_auto_review_required = false;
     thread_store.insert(model.clone());
     fixture
@@ -770,57 +758,6 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
     assert!(
         progress.latest_failed_tool_call.load(Ordering::Acquire)
             > progress.latest_scored_tool_call.load(Ordering::Acquire)
-<<<<<<< HEAD
-    );
-    for required in [false, true] {
-        model.node_repl_auto_review_required = required;
-        thread_store.insert(model.clone());
-        // Also reject a low score published by an older, in-flight classifier.
-        thread_store.insert(SecurityRiskScore {
-            scores: BTreeMap::from([("action_risk".to_owned(), 0.0)]),
-            call_id: None,
-            action: None,
-            sampled_at: None,
-        });
-        assert_eq!(
-            fixture
-                .registry
-                .fast_approval_decision(
-                    &fixture.session_store,
-                    thread_store,
-                    r#"{"tool":"mcp_tool_call","server":"node_repl","tool_name":"js"}"#,
-                    /*extension_metrics*/ None,
-                )
-                .await,
-            None,
-            "switching back to a reviewed model must not revive a skipped score"
-        );
-    }
-
-    Ok(())
-}
-
-#[test]
-fn encrypted_parent_compaction_preserves_the_latest_valid_item() {
-    let older = ResponseItem::Compaction {
-        id: Some(ResponseItemId::from_server("cmp_older".to_owned())),
-        encrypted_content: "older encrypted summary".to_owned(),
-        internal_chat_message_metadata_passthrough: None,
-    };
-    let latest = ResponseItem::ContextCompaction {
-        id: Some(ResponseItemId::from_server("cmp_latest".to_owned())),
-        encrypted_content: Some("latest encrypted summary".to_owned()),
-        internal_chat_message_metadata_passthrough: None,
-    };
-
-    assert_eq!(
-        encrypted_parent_compaction(
-            [&older, &latest].into_iter(),
-            DEFAULT_PARENT_COMPACTION_TOKENS,
-        ),
-        Ok(Some(latest.clone()))
-=======
->>>>>>> rust-v0.154.0
     );
     for required in [false, true] {
         model.node_repl_auto_review_required = required;
@@ -2959,9 +2896,6 @@ async fn assert_parent_compaction_reuse(thread_context_enabled: bool) -> Result<
 
     let thread_server = responses::start_mock_server().await;
     let test = test_codex()
-<<<<<<< HEAD
-        .with_config(|config| config.approvals_reviewer = ApprovalsReviewer::AutoReview)
-=======
         .with_config(move |config| {
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
             config
@@ -2969,7 +2903,6 @@ async fn assert_parent_compaction_reuse(thread_context_enabled: bool) -> Result<
                 .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
                 .expect("test context mode");
         })
->>>>>>> rust-v0.154.0
         .with_pre_build_hook(|home| {
             std::fs::write(
                 home.join("config.toml"),
