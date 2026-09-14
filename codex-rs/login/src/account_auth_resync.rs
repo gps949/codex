@@ -76,8 +76,8 @@ fn profile_has_usable_chatgpt_auth(manager: &AuthManager) -> bool {
     manager.refresh_failure_for_auth(&auth).is_none()
 }
 
-/// Shared helper for keep-alive: reload from disk (picking up out-of-process re-login) instead of
-/// only reading the stale cache.
+/// Shared helper for keep-alive: reload from disk first (picking up out-of-process re-login), then
+/// run the normal proactive refresh path so standby tokens do not silently age out.
 pub async fn keepalive_reload_profile_auth(
     pool: &AccountPool,
     profile_id: &AccountProfileId,
@@ -87,7 +87,9 @@ pub async fn keepalive_reload_profile_auth(
         tracing::debug!(%profile_id, %error, "account keep-alive auth resync failed");
         return;
     }
-    if !profile_has_usable_chatgpt_auth(manager.as_ref()) {
+    // `auth()` performs the managed ChatGPT proactive refresh after the cache matches disk.
+    // Reload alone is not enough: standbys would otherwise never refresh while idle.
+    if manager.auth().await.is_none() {
         tracing::debug!(%profile_id, "account keep-alive found no usable auth after disk reload");
     }
 }

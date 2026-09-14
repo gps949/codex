@@ -103,6 +103,8 @@ async fn warm_profile(
     auth_manager: Arc<AuthManager>,
 ) -> anyhow::Result<()> {
     let attempted_at = Utc::now();
+    // CLI re-login may have refreshed tokens on disk while this process still holds a stale cache.
+    let _ = auth_manager.reload().await;
     let Some(auth) = auth_manager.auth().await.filter(CodexAuth::is_chatgpt_auth) else {
         debug!(%profile_id, "skipping window warmup without ChatGPT auth");
         let _ = pool.record_window_warmup(
@@ -193,31 +195,38 @@ async fn warm_profile(
         )
     };
 
-    let warm = async {
-        let mut session = client.new_session();
-        let mut stream = session
-            .stream(
-                &prompt,
-                &model_info,
-                &session_telemetry,
-                effort.clone(),
-                ReasoningSummary::None,
-                /*service_tier*/ None,
-                &responses_metadata,
-                &InferenceTraceContext::disabled(),
-            )
-            .await?;
-        let mut observed = None;
-        while let Some(event) = stream.next().await {
-            match event? {
-                ResponseEvent::RateLimits(snapshot) => {
-                    observed = Some(snapshot);
+    // Share observed rate limits outside the timeout future so a late timeout can still keep
+    // headers that already arrived (timeout otherwise drops them and falsely records failure).
+    let observed_limits = Arc::new(tokio::sync::Mutex::new(None));
+    let warm = {
+        let observed_limits = Arc::clone(&observed_limits);
+        async move {
+            let mut session = client.new_session();
+            let mut stream = session
+                .stream(
+                    &prompt,
+                    &model_info,
+                    &session_telemetry,
+                    effort.clone(),
+                    ReasoningSummary::None,
+                    /*service_tier*/ None,
+                    &responses_metadata,
+                    &InferenceTraceContext::disabled(),
+                )
+                .await?;
+            let mut observed = None;
+            while let Some(event) = stream.next().await {
+                match event? {
+                    ResponseEvent::RateLimits(snapshot) => {
+                        observed = Some(snapshot.clone());
+                        *observed_limits.lock().await = Some(snapshot);
+                    }
+                    ResponseEvent::Completed { .. } => break,
+                    _ => {}
                 }
-                ResponseEvent::Completed { .. } => break,
-                _ => {}
             }
+            anyhow::Ok(observed)
         }
-        anyhow::Ok(observed)
     };
 
     let stream_result = tokio::time::timeout(PER_PROFILE_TIMEOUT, warm).await;
@@ -229,9 +238,22 @@ async fn warm_profile(
             return Ok(());
         }
         Err(_elapsed) => {
-            record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
-            warn!(%profile_id, "standby window warmup timed out");
-            return Ok(());
+            let partial = observed_limits.lock().await.clone();
+            if partial
+                .as_ref()
+                .and_then(|snapshot| snapshot.primary.as_ref())
+                .is_some_and(|window| window.used_percent > 0.0)
+            {
+                warn!(
+                    %profile_id,
+                    "standby window warmup timed out after rate-limit headers; keeping partial success"
+                );
+                partial
+            } else {
+                record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
+                warn!(%profile_id, "standby window warmup timed out");
+                return Ok(());
+            }
         }
     };
 
@@ -241,30 +263,43 @@ async fn warm_profile(
         .is_some_and(|window| window.used_percent > 0.0);
     let stream_account_limits = stream_limits.as_ref().map(convert_rate_limits);
 
-    if let Some(limits) = stream_account_limits.as_ref() {
-        pool.update_rate_limits(profile_id, limits.clone())?;
-        debug!(%profile_id, "warmed standby 5h rate-limit window");
-    } else {
-        debug!(%profile_id, "warmup completed without rate-limit headers");
-    }
+    // If the profile became active while we were warming, do not write standby observations over
+    // fresher active-session rate-limit state.
+    let still_standby = pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| &snapshot.profile.id == profile_id)
+        .is_some_and(|snapshot| !snapshot.is_active);
 
-    // Refresh via accounts usage GET for durable scheduling data. A lagging GET must not erase
-    // stream evidence that the primary window already started — that previously produced false
-    // "warmup retry" loops after a successful Responses call.
-    if let Some(mut limits) = refresh_rate_limits_via_get(config, &auth).await {
-        if stream_started
-            && limits
-                .primary
-                .as_ref()
-                .is_none_or(|window| window.used_percent <= 0.0)
-            && let Some(primary) = stream_account_limits
-                .as_ref()
-                .and_then(|limits| limits.primary.clone())
-        {
-            limits.primary = Some(primary);
+    if still_standby {
+        if let Some(limits) = stream_account_limits.as_ref() {
+            pool.update_rate_limits(profile_id, limits.clone())?;
+            debug!(%profile_id, "warmed standby 5h rate-limit window");
+        } else {
+            debug!(%profile_id, "warmup completed without rate-limit headers");
         }
-        pool.update_rate_limits(profile_id, limits)?;
-        debug!(%profile_id, "refreshed standby rate limits after window warmup");
+
+        // Refresh via accounts usage GET for durable scheduling data. A lagging GET must not erase
+        // stream evidence that the primary window already started — that previously produced false
+        // "warmup retry" loops after a successful Responses call.
+        if let Some(mut limits) = refresh_rate_limits_via_get(config, &auth).await {
+            if stream_started
+                && limits
+                    .primary
+                    .as_ref()
+                    .is_none_or(|window| window.used_percent <= 0.0)
+                && let Some(primary) = stream_account_limits
+                    .as_ref()
+                    .and_then(|limits| limits.primary.clone())
+            {
+                limits.primary = Some(primary);
+            }
+            pool.update_rate_limits(profile_id, limits)?;
+            debug!(%profile_id, "refreshed standby rate limits after window warmup");
+        }
+    } else {
+        debug!(%profile_id, "skipping warmup rate-limit writes; profile became active mid-warmup");
+        return Ok(());
     }
 
     if !primary_window_started(pool, profile_id) {

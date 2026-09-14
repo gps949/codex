@@ -235,6 +235,9 @@ struct AccountPoolState {
     /// When true, the pool returns to the most preferred profile at the moment
     /// a quota cooldown expires instead of staying on the current account.
     return_to_preferred: bool,
+    /// Latched when any cooldown expires (including via `snapshots()`), so a later `lease()` can
+    /// still honor `return_to_preferred` even if this call did not itself flip availability.
+    pending_return_to_preferred: bool,
     rotation_strategy: AccountPoolRotationStrategy,
 }
 
@@ -245,6 +248,7 @@ impl Default for AccountPoolState {
             active_profile: None,
             generation: 1,
             return_to_preferred: true,
+            pending_return_to_preferred: false,
             rotation_strategy: AccountPoolRotationStrategy::FillFirst,
         }
     }
@@ -344,9 +348,12 @@ impl AccountPool {
                 .map(|account| (active_id, account.profile.priority))
         });
         if let Some((active_id, active_priority)) = active {
-            // Return to a more preferred profile only at the exact moment a cooldown expired;
-            // otherwise stay sticky so transport reuse and prompt caching are preserved.
-            let preferred = (refreshed && state.return_to_preferred)
+            // Return to a more preferred profile when a cooldown has expired. The expiry may have
+            // been observed earlier by `snapshots()` / activate, so honor the latched pending bit
+            // as well as a refresh that happened on this call.
+            let consider_preferred =
+                state.return_to_preferred && (refreshed || state.pending_return_to_preferred);
+            let preferred = consider_preferred
                 .then(|| select_eligible_account(&state, &now))
                 .flatten()
                 .filter(|preferred_id| {
@@ -357,6 +364,9 @@ impl AccountPool {
                             .is_some_and(|account| account.profile.priority < active_priority)
                 });
             let selected_id = preferred.unwrap_or(active_id);
+            // Consume the latch once we have evaluated preferred return against the current
+            // eligible set (whether or not we actually switched).
+            state.pending_return_to_preferred = false;
             let switched = set_active_profile(&mut state, &selected_id);
             let account = state
                 .accounts
@@ -370,6 +380,8 @@ impl AccountPool {
             return Ok(lease);
         }
 
+        // Active is ineligible; selecting a replacement also consumes the preferred-return latch.
+        state.pending_return_to_preferred = false;
         let selected_id =
             select_eligible_account(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
         let active_changed = set_active_profile(&mut state, &selected_id);
@@ -666,8 +678,13 @@ impl AccountPool {
             .accounts
             .get_mut(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+        let succeeded = matches!(observation.outcome, WindowWarmupOutcome::Succeeded);
         account.window_warmup = Some(observation);
-        clear_started_window_warmup(account);
+        // A successful warmup necessarily starts the 5h window (`used > 0`). Do not immediately
+        // wipe that success observation or the picker can never show "5h warmed".
+        if !succeeded {
+            clear_started_window_warmup(account);
+        }
         drop(state);
         self.notify_change();
         Ok(())
@@ -1005,9 +1022,17 @@ fn active_lease(state: &AccountPoolState) -> Option<AccountLease> {
 fn refresh_expired_exhaustion(state: &mut AccountPoolState) -> bool {
     let now = Utc::now();
     let mut changed = false;
+    let active_profile = state.active_profile.clone();
     for account in state.accounts.values_mut() {
         if account.availability.refresh_for_time(&now) {
-            account.last_active_generation = None;
+            if active_profile.as_ref() == Some(&account.profile.id) {
+                // The profile is still the sticky active identity. Keep a generation guard so a
+                // later usage-limit / auth failure from its live lease is not treated as stale.
+                account.last_active_generation = Some(state.generation);
+            } else {
+                account.last_active_generation = None;
+            }
+            state.pending_return_to_preferred = true;
             changed = true;
         }
     }
@@ -1134,14 +1159,26 @@ fn has_due_rate_limit_window(account: &ManagedAccount, now: &DateTime<Utc>) -> b
 }
 
 fn clear_started_window_warmup(account: &mut ManagedAccount) {
-    if account
+    let window_started = account
         .rate_limits
         .primary
         .as_ref()
-        .is_some_and(|window| window.used_percent > 0.0)
-    {
-        account.window_warmup = None;
+        .is_some_and(|window| window.used_percent > 0.0);
+    if !window_started {
+        return;
     }
+    // Keep a successful observation so the picker can show "5h warmed". Failure/skip are cleared
+    // once the window is known started so stale backoff text does not linger.
+    if matches!(
+        account
+            .window_warmup
+            .as_ref()
+            .map(|observation| observation.outcome),
+        Some(WindowWarmupOutcome::Succeeded)
+    ) {
+        return;
+    }
+    account.window_warmup = None;
 }
 
 const FIVE_HOUR_WINDOW_MINUTES: i64 = 300;
@@ -1361,6 +1398,109 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         assert_eq!(pool.lease().expect("sticky lease").profile().id, second.id);
+    }
+
+    #[tokio::test]
+    async fn preferred_return_survives_intervening_snapshots_after_cooldown() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let lease = pool.lease().expect("initial lease");
+        let resets_at = Utc::now() + chrono::Duration::milliseconds(50);
+        pool.mark_exhausted(&lease, Some(resets_at))
+            .expect("mark exhausted");
+        assert_eq!(pool.lease().expect("backup lease").profile().id, second.id);
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // UI/app-server polls call snapshots() and used to consume the cooldown transition so a
+        // later lease() stayed sticky on the backup forever.
+        let _ = pool.snapshots();
+        assert_eq!(
+            pool.lease()
+                .expect("preferred lease after snapshots")
+                .profile()
+                .id,
+            first.id
+        );
+    }
+
+    #[tokio::test]
+    async fn active_profile_keeps_generation_guard_after_its_own_cooldown_expires() {
+        let pool = AccountPool::new();
+        let only = profile("only", 10);
+        pool.register(only.clone(), test_auth_manager(&only.credential_home).await)
+            .expect("register");
+        let lease = pool.lease().expect("initial lease");
+        let resets_at = Utc::now() + chrono::Duration::milliseconds(50);
+        assert!(matches!(
+            pool.mark_exhausted(&lease, Some(resets_at))
+                .expect("mark exhausted"),
+            AccountAvailabilityMutation::PoolExhausted
+        ));
+        // identity_lease can re-stick the only profile while it is still Exhausted.
+        let stuck = pool.identity_lease().expect("identity while cooling down");
+        assert_eq!(stuck.profile().id, only.id);
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // snapshots()/lease() refresh Exhausted→Available without bumping generation. The live
+        // identity lease must still be able to record a fresh usage-limit failure.
+        let _ = pool.snapshots();
+        assert!(matches!(
+            pool.mark_exhausted(&stuck, None).expect("mark again"),
+            AccountAvailabilityMutation::PoolExhausted
+                | AccountAvailabilityMutation::AlreadyUnavailable { .. }
+        ));
+        let after = pool.snapshots();
+        assert!(matches!(
+            after[0].availability,
+            AccountAvailability::Exhausted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn successful_window_warmup_observation_survives_rate_limit_refresh() {
+        let pool = AccountPool::new();
+        let standby = profile("standby", 10);
+        pool.register(
+            standby.clone(),
+            test_auth_manager(&standby.credential_home).await,
+        )
+        .expect("register");
+        pool.record_window_warmup(
+            &standby.id,
+            WindowWarmupObservation {
+                outcome: WindowWarmupOutcome::Succeeded,
+                attempted_at: Utc::now(),
+                retry_after: Some(Utc::now() + chrono::Duration::minutes(5)),
+            },
+        )
+        .expect("record success");
+        pool.update_rate_limits(
+            &standby.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 1.0,
+                    resets_at: Some(Utc::now() + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("later quota probe after success");
+        assert_eq!(
+            pool.snapshots()[0]
+                .window_warmup
+                .as_ref()
+                .map(|observation| observation.outcome),
+            Some(WindowWarmupOutcome::Succeeded)
+        );
     }
 
     #[tokio::test]
