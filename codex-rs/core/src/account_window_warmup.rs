@@ -46,12 +46,11 @@ const WARMUP_PROMPT: &str = "1+1?";
 const WARMUP_INSTRUCTIONS: &str = "Reply with one short token.";
 const WARMUP_ORIGINATOR: &str = "codex_account_window_warmup";
 const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(45);
-/// Real transport/API failures. Keep short so standbys recover after a bad request shape.
-const FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
-/// HTTP OK but primary usage still 0% — retry sooner than a hard failure.
-const NOOP_BACKOFF: Duration = Duration::from_secs(2 * 60);
+/// Cap for escalated cool-downs after repeated warmup failures.
+const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const SUCCESS_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
 const SKIPPED_AUTH_BACKOFF: Duration = Duration::from_secs(30 * 60);
+const EMPTY_CATALOG_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const GET_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 const URGENT_WARMUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Give quota probes a moment to land, then start warming — do not wait a full interval.
@@ -115,6 +114,7 @@ async fn warm_profile(
                 retry_after: Some(
                     attempted_at + chrono::Duration::seconds(SKIPPED_AUTH_BACKOFF.as_secs() as i64),
                 ),
+                consecutive_failures: 0,
             },
         );
         return Ok(());
@@ -130,6 +130,13 @@ async fn warm_profile(
     let catalog = codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
     let Some(model_info) = codex_models_manager::select_cheapest_warmup_model(&catalog) else {
         warn!(%profile_id, "standby window warmup skipped: empty model catalog");
+        record_failure(
+            pool,
+            profile_id,
+            attempted_at,
+            FailureKind::Hard,
+            Some(EMPTY_CATALOG_BACKOFF),
+        );
         return Ok(());
     };
     let effort = codex_models_manager::cheapest_supported_effort(&model_info);
@@ -233,7 +240,7 @@ async fn warm_profile(
     let stream_limits = match stream_result {
         Ok(Ok(observed)) => observed,
         Ok(Err(error)) => {
-            record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
+            record_failure(pool, profile_id, attempted_at, FailureKind::Hard, None);
             warn!(%profile_id, error = %error, "standby window warmup request failed");
             return Ok(());
         }
@@ -250,7 +257,7 @@ async fn warm_profile(
                 );
                 partial
             } else {
-                record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
+                record_failure(pool, profile_id, attempted_at, FailureKind::Hard, None);
                 warn!(%profile_id, "standby window warmup timed out");
                 return Ok(());
             }
@@ -303,7 +310,7 @@ async fn warm_profile(
     }
 
     if !primary_window_started(pool, profile_id) {
-        record_failure(pool, profile_id, attempted_at, NOOP_BACKOFF);
+        record_failure(pool, profile_id, attempted_at, FailureKind::Noop, None);
         warn!(
             %profile_id,
             "standby window warmup completed without starting the 5h window"
@@ -319,17 +326,38 @@ async fn warm_profile(
             retry_after: Some(
                 attempted_at + chrono::Duration::seconds(SUCCESS_DEBOUNCE.as_secs() as i64),
             ),
+            consecutive_failures: 0,
         },
     );
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailureKind {
+    /// Transport/API error or timeout before the primary window moves.
+    Hard,
+    /// Responses completed but the 5h window stayed at 0%.
+    Noop,
 }
 
 fn record_failure(
     pool: &AccountPool,
     profile_id: &AccountProfileId,
     attempted_at: DateTime<Utc>,
-    backoff: Duration,
+    kind: FailureKind,
+    backoff_override: Option<Duration>,
 ) {
+    let previous_streak = pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| &snapshot.profile.id == profile_id)
+        .and_then(|snapshot| snapshot.window_warmup.clone())
+        .filter(|observation| matches!(observation.outcome, WindowWarmupOutcome::Failed))
+        .map(|observation| observation.consecutive_failures)
+        .unwrap_or(0);
+    let consecutive_failures = previous_streak.saturating_add(1);
+    let backoff =
+        backoff_override.unwrap_or_else(|| backoff_for_streak(kind, consecutive_failures));
     let retry_after = attempted_at + chrono::Duration::seconds(backoff.as_secs() as i64);
     let _ = pool.record_window_warmup(
         profile_id,
@@ -337,8 +365,32 @@ fn record_failure(
             outcome: WindowWarmupOutcome::Failed,
             attempted_at,
             retry_after: Some(retry_after),
+            consecutive_failures,
         },
     );
+}
+
+/// Escalating cool-down so repeated NOOP/API failures stop flashing "warmup retry" every few minutes.
+fn backoff_for_streak(kind: FailureKind, consecutive_failures: u32) -> Duration {
+    let streak = consecutive_failures.max(1);
+    let base = match kind {
+        // Hard failures: 5m → 15m → 45m → 3h → 6h
+        FailureKind::Hard => match streak {
+            1 => Duration::from_secs(5 * 60),
+            2 => Duration::from_secs(15 * 60),
+            3 => Duration::from_secs(45 * 60),
+            4 => Duration::from_secs(3 * 60 * 60),
+            _ => MAX_FAILURE_BACKOFF,
+        },
+        // NOOP (HTTP OK, window still 0%): short retries never help and spam the UI.
+        // 30m → 2h → 6h
+        FailureKind::Noop => match streak {
+            1 => Duration::from_secs(30 * 60),
+            2 => Duration::from_secs(2 * 60 * 60),
+            _ => MAX_FAILURE_BACKOFF,
+        },
+    };
+    base.min(MAX_FAILURE_BACKOFF)
 }
 
 fn primary_window_started(pool: &AccountPool, profile_id: &AccountProfileId) -> bool {

@@ -307,6 +307,8 @@ fn protocol_warmup_to_login(warmup: &AccountPoolWindowWarmup) -> WindowWarmupObs
         retry_after: warmup
             .retry_after
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+        // Wire protocol omits streak; display only needs outcome + retry_after.
+        consecutive_failures: 0,
     }
 }
 

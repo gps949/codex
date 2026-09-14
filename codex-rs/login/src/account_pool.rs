@@ -173,6 +173,10 @@ pub struct WindowWarmupObservation {
     pub attempted_at: DateTime<Utc>,
     /// When set and still in the future, this profile is skipped by warmup candidate selection.
     pub retry_after: Option<DateTime<Utc>>,
+    /// Consecutive Failed outcomes for this profile (resets on success / no-auth skip).
+    /// Used to escalate backoff so NOOP/API failures do not paint "warmup retry" every few minutes.
+    #[serde(default)]
+    pub consecutive_failures: u32,
 }
 
 /// Immutable execution binding handed to account-scoped clients.
@@ -1479,6 +1483,7 @@ mod tests {
                 outcome: WindowWarmupOutcome::Succeeded,
                 attempted_at: Utc::now(),
                 retry_after: Some(Utc::now() + chrono::Duration::minutes(5)),
+                consecutive_failures: 0,
             },
         )
         .expect("record success");
@@ -1686,6 +1691,7 @@ mod tests {
                 outcome: WindowWarmupOutcome::Failed,
                 attempted_at: now,
                 retry_after: Some(now + chrono::Duration::minutes(15)),
+                consecutive_failures: 0,
             },
         )
         .expect("record failure");
@@ -1705,6 +1711,7 @@ mod tests {
                 outcome: WindowWarmupOutcome::Failed,
                 attempted_at: now,
                 retry_after: Some(now - chrono::Duration::seconds(1)),
+                consecutive_failures: 0,
             },
         )
         .expect("record expired backoff");
