@@ -74,6 +74,7 @@ async fn cyber_refusal_reads_eligibility_without_changing_the_model() -> Result<
                 AccountUpdatedNotification {
                     auth_mode: Some(AuthMode::Chatgpt),
                     plan_type: None,
+                    account_pool: None,
                 },
             ))),
         )

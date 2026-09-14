@@ -371,9 +371,11 @@ mod tests {
             accounts: vec![],
         };
         let mut response = GetAccountRateLimitsResponse {
+            ordinary_usage_allowed: None,
             rate_limits: codex_app_server_protocol::RateLimitSnapshot {
                 limit_id: Some("codex".to_string()),
                 limit_name: Some("Codex".to_string()),
+                normal_model_slug: None,
                 primary: None,
                 secondary: None,
                 credits: None,
@@ -424,6 +426,7 @@ mod tests {
         other.limit_id = Some("other".to_string());
         other.limit_name = Some("Other model".to_string());
         let mut response = GetAccountRateLimitsResponse {
+            ordinary_usage_allowed: None,
             rate_limits: snapshot.clone(),
             rate_limits_by_limit_id: Some(HashMap::from([
                 ("codex".to_string(), snapshot.clone()),
