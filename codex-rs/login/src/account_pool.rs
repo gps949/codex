@@ -646,11 +646,16 @@ impl AccountPool {
                         None => true,
                         Some(window) => is_idle_primary_five_hour_window(window),
                     }
-                    && account
-                        .window_warmup
-                        .as_ref()
-                        .and_then(|observation| observation.retry_after)
-                        .is_none_or(|retry_after| retry_after <= now)
+                    && account.window_warmup.as_ref().is_none_or(|observation| {
+                        match observation.outcome {
+                            // Keep successful warmups out of the queue even if a lagging quota
+                            // probe temporarily shows primary back at 0%.
+                            WindowWarmupOutcome::Succeeded => false,
+                            _ => observation
+                                .retry_after
+                                .is_none_or(|retry_after| retry_after <= now),
+                        }
+                    })
             })
             .map(|account| {
                 // Probe unknown quota before known-idle so we learn state sooner.
@@ -840,8 +845,9 @@ impl AccountPool {
             .accounts
             .get_mut(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
-        let changed = account.rate_limits != rate_limits;
-        account.rate_limits = rate_limits;
+        let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
+        let changed = account.rate_limits != merged;
+        account.rate_limits = merged;
         clear_started_window_warmup(account);
         drop(state);
         if changed {
@@ -866,8 +872,9 @@ impl AccountPool {
         if account.last_active_generation != Some(lease.generation) {
             return Ok(());
         }
-        let changed = account.rate_limits != rate_limits;
-        account.rate_limits = rate_limits;
+        let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
+        let changed = account.rate_limits != merged;
+        account.rate_limits = merged;
         clear_started_window_warmup(account);
         drop(state);
         if changed {
@@ -1160,6 +1167,33 @@ fn earliest_reset_key(account: &ManagedAccount, now: &DateTime<Utc>) -> Earliest
 
 fn has_due_rate_limit_window(account: &ManagedAccount, now: &DateTime<Utc>) -> bool {
     earliest_reset_key(account, now) == EarliestResetKey::Due
+}
+
+/// Prefer not to un-start a primary window when a lagging probe reports 0% with a newer
+/// `observed_at`. Once `used_percent > 0` for the current window, keep that evidence until reset.
+fn merge_rate_limits_monotonic(
+    existing: &AccountRateLimits,
+    incoming: AccountRateLimits,
+) -> AccountRateLimits {
+    let mut merged = incoming;
+    if let Some(existing_primary) = existing.primary.as_ref() {
+        if existing_primary.used_percent > 0.0 {
+            let regresses = merged
+                .primary
+                .as_ref()
+                .is_none_or(|window| window.used_percent <= 0.0);
+            let reset_due = existing_primary
+                .resets_at
+                .is_some_and(|resets_at| resets_at <= Utc::now());
+            if regresses && !reset_due {
+                merged.primary = Some(existing_primary.clone());
+            }
+        }
+    }
+    if merged.observed_at.is_none() {
+        merged.observed_at = existing.observed_at;
+    }
+    merged
 }
 
 fn clear_started_window_warmup(account: &mut ManagedAccount) {
@@ -1716,6 +1750,77 @@ mod tests {
         )
         .expect("record expired backoff");
         assert_eq!(pool.window_warmup_candidates(), vec![idle.id]);
+    }
+
+    #[tokio::test]
+    async fn window_warmup_candidates_skip_succeeded_even_when_primary_idle() {
+        let pool = AccountPool::new();
+        let active = profile("active", 0);
+        let idle = profile("idle", 10);
+        for account in [&active, &idle] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let _lease = pool.lease().expect("activate preferred");
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &idle.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("idle limits");
+        assert_eq!(pool.window_warmup_candidates(), vec![idle.id.clone()]);
+
+        pool.record_window_warmup(
+            &idle.id,
+            WindowWarmupObservation {
+                outcome: WindowWarmupOutcome::Succeeded,
+                attempted_at: now,
+                retry_after: Some(now - chrono::Duration::minutes(1)),
+                consecutive_failures: 0,
+            },
+        )
+        .expect("record succeeded");
+        assert!(
+            pool.window_warmup_candidates().is_empty(),
+            "succeeded warmup must not re-queue when primary still looks idle"
+        );
+    }
+
+    #[test]
+    fn merge_rate_limits_monotonic_does_not_unstart_primary() {
+        let existing = AccountRateLimits {
+            primary: Some(AccountRateLimitWindow {
+                used_percent: 4.0,
+                resets_at: Some(Utc::now() + chrono::Duration::hours(3)),
+                window_minutes: Some(300),
+            }),
+            secondary: None,
+            observed_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+        };
+        let incoming = AccountRateLimits {
+            primary: Some(AccountRateLimitWindow {
+                used_percent: 0.0,
+                resets_at: None,
+                window_minutes: Some(300),
+            }),
+            secondary: None,
+            observed_at: Some(Utc::now()),
+        };
+        let merged = merge_rate_limits_monotonic(&existing, incoming);
+        assert_eq!(
+            merged.primary.as_ref().map(|window| window.used_percent),
+            Some(4.0)
+        );
     }
 
     #[tokio::test]

@@ -1,10 +1,33 @@
 //! Warmup model/effort selection lives in `codex-models-manager::warmup_selection`.
 //! Keep a thin smoke test here so core still exercises the catalog-driven path.
-//! Also cover escalating failure backoff so NOOP/API streaks stop short-retry spam.
+//! Also cover escalating failure backoff and success-path helpers that prevent false NOOP retries.
 
 use super::*;
 use pretty_assertions::assert_eq;
 use std::time::Duration;
+
+fn rate_limit_window(used_percent: f64) -> RateLimitWindow {
+    RateLimitWindow {
+        used_percent,
+        window_minutes: Some(300),
+        resets_at: None,
+    }
+}
+
+fn rate_limit_snapshot(limit_id: Option<&str>, used_percent: f64) -> RateLimitSnapshot {
+    RateLimitSnapshot {
+        limit_id: limit_id.map(str::to_string),
+        limit_name: None,
+        normal_model_slug: None,
+        primary: Some(rate_limit_window(used_percent)),
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    }
+}
 
 #[test]
 fn catalog_driven_warmup_selection_is_available_to_core() {
@@ -59,5 +82,47 @@ fn backoff_for_streak_escalates_hard_and_noop() {
     assert_eq!(
         backoff_for_streak(FailureKind::Noop, 3),
         MAX_FAILURE_BACKOFF
+    );
+}
+
+#[test]
+fn prefer_rate_limit_snapshot_prefers_codex_and_higher_usage() {
+    let other = rate_limit_snapshot(Some("codex_other"), 12.0);
+    let codex_idle = rate_limit_snapshot(Some("codex"), 0.0);
+    let preferred = prefer_rate_limit_snapshot(Some(other), codex_idle.clone());
+    assert_eq!(preferred.limit_id.as_deref(), Some("codex"));
+
+    let codex_started = rate_limit_snapshot(Some("codex"), 3.0);
+    let preferred = prefer_rate_limit_snapshot(Some(codex_idle), codex_started);
+    assert_eq!(
+        preferred.primary.as_ref().map(|window| window.used_percent),
+        Some(3.0)
+    );
+}
+
+#[test]
+fn merge_account_rate_limits_monotonic_keeps_started_primary() {
+    let existing = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 2.5,
+            resets_at: Some(Utc::now() + chrono::Duration::hours(4)),
+            window_minutes: Some(300),
+        }),
+        secondary: None,
+        observed_at: Some(Utc::now() - chrono::Duration::seconds(30)),
+    };
+    let incoming = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 0.0,
+            resets_at: None,
+            window_minutes: Some(300),
+        }),
+        secondary: None,
+        observed_at: Some(Utc::now()),
+    };
+    let merged = merge_account_rate_limits_monotonic(Some(&existing), incoming);
+    assert_eq!(
+        merged.primary.as_ref().map(|window| window.used_percent),
+        Some(2.5)
     );
 }

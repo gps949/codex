@@ -82,7 +82,10 @@ impl AccountPool {
                     result = incoming.clone();
                 } else {
                     if incoming.rate_limits.observed_at > local.rate_limits.observed_at {
-                        result.rate_limits = incoming.rate_limits.clone();
+                        result.rate_limits = merge_rate_limits_monotonic(
+                            &local.rate_limits,
+                            incoming.rate_limits.clone(),
+                        );
                     }
                     // Cooldown clears (force / reset-credit) must win over a stale disk exhaustion.
                     // Taking max() previously resurrected exhausted_until after a successful redeem.
