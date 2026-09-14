@@ -351,7 +351,7 @@ fn record_failure(
         .snapshots()
         .into_iter()
         .find(|snapshot| &snapshot.profile.id == profile_id)
-        .and_then(|snapshot| snapshot.window_warmup.clone())
+        .and_then(|snapshot| snapshot.window_warmup)
         .filter(|observation| matches!(observation.outcome, WindowWarmupOutcome::Failed))
         .map(|observation| observation.consecutive_failures)
         .unwrap_or(0);
