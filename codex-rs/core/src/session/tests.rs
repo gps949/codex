@@ -3578,6 +3578,7 @@ async fn portable_compacted_history_bounds_assigned_ids_in_live_and_persisted_hi
                 window_ids,
                 portable_policy: crate::portable_compaction::PortableCompactionPolicy::Portable,
                 compaction_response_id: None,
+                compaction_model_hash: None,
             },
         )
         .await;
@@ -3632,7 +3633,8 @@ async fn portable_compacted_history_bounds_assigned_ids_in_live_and_persisted_hi
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_)
-        | RolloutItem::TokenUsageRecord(_) => None,
+        | RolloutItem::TokenUsageRecord(_)
+        | RolloutItem::RetainedContext(_) => None,
     });
     assert_eq!(persisted_replacement_history, Some(&live_history));
     assert!(persisted_replacement_history.is_some_and(|history| {

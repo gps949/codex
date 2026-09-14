@@ -58,7 +58,7 @@ fn persisted_compactions(rollout_path: &Path) -> anyhow::Result<Vec<CompactedIte
     Ok(std::fs::read_to_string(rollout_path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter_map(|line| match line.item {
@@ -106,6 +106,7 @@ fn append_opaque_compaction(
                 metadata,
             }]),
             guardian_history: None,
+            retained_context: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,

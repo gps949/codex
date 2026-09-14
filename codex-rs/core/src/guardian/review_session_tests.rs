@@ -96,6 +96,7 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
                 message: String::new(),
                 window_number,
                 window_ids,
+                portable_policy: crate::portable_compaction::PortableCompactionPolicy::Stock,
                 compaction_response_id: None,
                 compaction_model_hash: Some("matching".to_owned()),
             },

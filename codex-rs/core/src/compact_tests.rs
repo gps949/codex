@@ -412,6 +412,7 @@ fn portable_compaction_caps_escaped_user_item_with_passthrough_metadata() {
     let history = build_compacted_history(
         Vec::new(),
         &[CompactedUserMessage {
+            id: None,
             message: escaped_text,
             internal_chat_message_metadata_passthrough: Some(
                 InternalChatMessageMetadataPassthrough {
