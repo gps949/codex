@@ -9,7 +9,8 @@
 //! 2. Else the highest-`priority` list-visible unspecialized model (least featured remaining).
 //!
 //! Effort is always chosen from the selected model's advertised `supported_reasoning_levels`,
-//! preferring Low (then Minimal, Medium, …) for warmup reliability.
+//! preferring Low (then Medium, then Minimal, …). Minimal is after Medium because some catalogs
+//! advertise Minimal but still reject it for Responses warmup.
 
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelVisibility;
@@ -39,12 +40,12 @@ pub fn select_cheapest_warmup_model(catalog: &ModelsResponse) -> Option<ModelInf
 
 /// Cheapest advertised reasoning effort for `model`, if any.
 pub fn cheapest_supported_effort(model: &ModelInfo) -> Option<ReasoningEffort> {
-    // Prefer Low for warmup reliability: None/Minimal are sometimes advertised but still
-    // rejected (or may not burn enough quota to start the 5h window). Skip Persistent/Custom.
+    // Prefer Low for warmup reliability. Minimal is sometimes advertised but still rejected, so
+    // keep it behind Medium to avoid reintroducing the endless retry loop that #22 closed.
     const WARMUP_EFFORT_PREFERENCE: [ReasoningEffort; 7] = [
         ReasoningEffort::Low,
-        ReasoningEffort::Minimal,
         ReasoningEffort::Medium,
+        ReasoningEffort::Minimal,
         ReasoningEffort::High,
         ReasoningEffort::XHigh,
         ReasoningEffort::Max,

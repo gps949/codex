@@ -1,3 +1,4 @@
+pub mod account_auth_resync;
 pub mod account_display;
 pub mod account_external_auth;
 pub mod account_identity;
@@ -19,6 +20,10 @@ mod pkce;
 mod server;
 mod success_page;
 
+pub use account_auth_resync::keepalive_reload_profile_auth;
+pub use account_auth_resync::prepare_profile_auth_for_activation;
+pub use account_auth_resync::recover_pool_auth_from_disk;
+pub use account_auth_resync::refresh_profile_auth_from_disk;
 pub use account_display::format_exhausted_reset;
 pub use account_display::format_exhausted_reset_unix;
 pub use account_display::format_plan_type_label;

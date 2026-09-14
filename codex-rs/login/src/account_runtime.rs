@@ -330,9 +330,9 @@ fn spawn_auth_keepalive_task(pool: Arc<AccountPool>) -> JoinHandle<()> {
         loop {
             ticker.tick().await;
             for (profile_id, manager) in pool.auth_managers() {
-                if manager.auth().await.is_none() {
-                    tracing::debug!(%profile_id, "account keep-alive found no usable auth");
-                }
+                // Reload from disk first so CLI re-login is observed and stale cached tokens cannot
+                // overwrite freshly written credentials on a later refresh.
+                crate::keepalive_reload_profile_auth(pool.as_ref(), &profile_id, manager).await;
             }
         }
     })

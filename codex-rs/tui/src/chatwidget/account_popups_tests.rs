@@ -168,3 +168,37 @@ fn standby_warmup_status_appears_in_account_description() {
         "{description:?}"
     );
 }
+
+#[test]
+fn active_account_still_shows_warmup_failure() {
+    let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
+    let account = AccountPoolAccount {
+        profile_id: "backup".to_string(),
+        label: None,
+        priority: 10,
+        is_active: true,
+        availability: AccountPoolAvailability::Available,
+        plan_type: None,
+        email: None,
+        rate_limits: AccountPoolRateLimits {
+            primary: Some(AccountPoolRateLimitWindow {
+                used_percent: 0.0,
+                resets_at: Some(now.timestamp() + 5 * 3600),
+            }),
+            secondary: None,
+            observed_at: None,
+        },
+        window_warmup: Some(AccountPoolWindowWarmup {
+            outcome: AccountPoolWindowWarmupOutcome::Failed,
+            attempted_at: now.timestamp(),
+            retry_after: Some(now.timestamp() + 60),
+        }),
+    };
+    let description = account_description(&account, now);
+    assert!(
+        description
+            .iter()
+            .any(|span| span.content.contains("warmup retry")),
+        "{description:?}"
+    );
+}
