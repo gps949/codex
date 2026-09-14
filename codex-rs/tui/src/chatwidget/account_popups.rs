@@ -209,7 +209,10 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
         ));
     }
     if let Some(warmup) = account.window_warmup.as_ref().and_then(|warmup| {
-        if account.is_active {
+        // Keep failure/skip status visible on the active row so a manual switch does not look
+        // like warmup recovered. Successful warmup on the active account is noise.
+        if account.is_active && matches!(warmup.outcome, AccountPoolWindowWarmupOutcome::Succeeded)
+        {
             return None;
         }
         Some(format_window_warmup_status(

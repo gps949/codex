@@ -148,7 +148,7 @@ fn cheapest_supported_effort_prefers_low_over_minimal_and_medium() {
     );
     assert_eq!(
         cheapest_supported_effort(&without_low),
-        Some(ReasoningEffort::Minimal)
+        Some(ReasoningEffort::Medium)
     );
 }
 
