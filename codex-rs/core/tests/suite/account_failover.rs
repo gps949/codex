@@ -6,7 +6,6 @@ use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_history::CodexHarnessMetadata;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_login::AccountAvailability;
 use codex_login::CodexAuth;
 use codex_login::ExternalAuth;
@@ -158,7 +157,7 @@ fn stamp_resumed_model_items_as_profile_a(rollout_path: &Path) -> anyhow::Result
     let mut lines = std::fs::read_to_string(rollout_path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?;
     for line in &mut lines {
         let RolloutItem::ResponseItem(envelope) = &mut line.item else {
@@ -193,7 +192,7 @@ pub(super) fn assistant_execution_provenance(
     let envelope = std::fs::read_to_string(rollout_path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .find_map(|line| match line.item {
@@ -222,7 +221,7 @@ fn response_item_execution_provenance(
     let envelope = std::fs::read_to_string(rollout_path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .find_map(|line| match line.item {
@@ -242,7 +241,7 @@ pub(super) fn latest_compaction_summary_execution_provenance(
     let envelope = std::fs::read_to_string(rollout_path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .rev()

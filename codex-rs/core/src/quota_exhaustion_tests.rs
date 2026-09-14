@@ -59,6 +59,7 @@ async fn mismatched_plan_type_in_rate_limits_snapshot_is_rejected() {
         rate_limits: Some(Box::new(RateLimitSnapshot {
             limit_id: None,
             limit_name: None,
+            normal_model_slug: None,
             plan_type: Some(PlanType::Business),
             primary: None,
             secondary: None,

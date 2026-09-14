@@ -2,6 +2,7 @@ mod shared;
 
 mod account;
 mod account_pool;
+mod application;
 mod apps;
 mod attestation;
 mod bedrock;
@@ -33,10 +34,12 @@ mod thread;
 mod thread_data;
 mod thread_usage;
 mod turn;
+mod user_verification;
 mod windows_sandbox;
 
 pub use account::*;
 pub use account_pool::*;
+pub use application::*;
 pub use apps::*;
 pub use attestation::*;
 pub use bedrock::*;
@@ -69,6 +72,7 @@ pub use thread::*;
 pub use thread_data::*;
 pub use thread_usage::*;
 pub use turn::*;
+pub use user_verification::*;
 pub use windows_sandbox::*;
 
 #[cfg(test)]
