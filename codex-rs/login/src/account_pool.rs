@@ -1176,18 +1176,18 @@ fn merge_rate_limits_monotonic(
     incoming: AccountRateLimits,
 ) -> AccountRateLimits {
     let mut merged = incoming;
-    if let Some(existing_primary) = existing.primary.as_ref() {
-        if existing_primary.used_percent > 0.0 {
-            let regresses = merged
-                .primary
-                .as_ref()
-                .is_none_or(|window| window.used_percent <= 0.0);
-            let reset_due = existing_primary
-                .resets_at
-                .is_some_and(|resets_at| resets_at <= Utc::now());
-            if regresses && !reset_due {
-                merged.primary = Some(existing_primary.clone());
-            }
+    if let Some(existing_primary) = existing.primary.as_ref()
+        && existing_primary.used_percent > 0.0
+    {
+        let regresses = merged
+            .primary
+            .as_ref()
+            .is_none_or(|window| window.used_percent <= 0.0);
+        let reset_due = existing_primary
+            .resets_at
+            .is_some_and(|resets_at| resets_at <= Utc::now());
+        if regresses && !reset_due {
+            merged.primary = Some(existing_primary.clone());
         }
     }
     if merged.observed_at.is_none() {

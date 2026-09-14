@@ -313,11 +313,9 @@ async fn warm_profile(
             if account_primary_started(&limits) {
                 started = true;
             }
-            best_limits = Some(merge_account_rate_limits_monotonic(
-                best_limits.as_ref(),
-                limits.clone(),
-            ));
-            pool.update_rate_limits(profile_id, best_limits.clone().expect("merged limits"))?;
+            let merged = merge_account_rate_limits_monotonic(best_limits.as_ref(), limits);
+            pool.update_rate_limits(profile_id, merged.clone())?;
+            best_limits = Some(merged);
             debug!(%profile_id, "refreshed standby rate limits after window warmup");
         }
     } else {
@@ -336,10 +334,10 @@ async fn warm_profile(
         return Ok(());
     }
 
-    if let Some(limits) = best_limits.as_ref() {
-        if account_primary_started(limits) {
-            let _ = pool.update_rate_limits(profile_id, limits.clone());
-        }
+    if let Some(limits) = best_limits.as_ref()
+        && account_primary_started(limits)
+    {
+        let _ = pool.update_rate_limits(profile_id, limits.clone());
     }
 
     let _ = pool.record_window_warmup(
@@ -470,18 +468,18 @@ fn merge_account_rate_limits_monotonic(
         return incoming;
     };
     let mut merged = incoming;
-    if let Some(existing_primary) = existing.primary.as_ref() {
-        if existing_primary.used_percent > 0.0 {
-            let regresses = merged
-                .primary
-                .as_ref()
-                .is_none_or(|window| window.used_percent <= 0.0);
-            let reset_due = existing_primary
-                .resets_at
-                .is_some_and(|resets_at| resets_at <= Utc::now());
-            if regresses && !reset_due {
-                merged.primary = Some(existing_primary.clone());
-            }
+    if let Some(existing_primary) = existing.primary.as_ref()
+        && existing_primary.used_percent > 0.0
+    {
+        let regresses = merged
+            .primary
+            .as_ref()
+            .is_none_or(|window| window.used_percent <= 0.0);
+        let reset_due = existing_primary
+            .resets_at
+            .is_some_and(|resets_at| resets_at <= Utc::now());
+        if regresses && !reset_due {
+            merged.primary = Some(existing_primary.clone());
         }
     }
     if merged.observed_at.is_none() {
