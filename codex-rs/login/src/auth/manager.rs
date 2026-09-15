@@ -2782,6 +2782,16 @@ impl AuthManager {
         Ok(auth)
     }
 
+    async fn acquire_home_refresh_lock(&self) -> Result<std::fs::File, RefreshTokenError> {
+        let home = self.codex_home.clone();
+        tokio::task::spawn_blocking(move || crate::account_file::refresh_lock(&home))
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!("auth refresh lock join failed: {error}"))
+            })?
+            .map_err(RefreshTokenError::Transient)
+    }
+
     /// Attempt to refresh the token by first performing a guarded reload from
     /// the active auth source. If the loaded token differs from the cached token,
     /// we can assume that the source already refreshed it. Otherwise, ask the
@@ -2800,6 +2810,7 @@ impl AuthManager {
         {
             return Ok(());
         }
+        let _home_refresh_lock = self.acquire_home_refresh_lock().await?;
         let expected_account_id = auth_before_reload
             .as_ref()
             .and_then(CodexAuth::get_account_id);
@@ -2832,6 +2843,7 @@ impl AuthManager {
                 REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
             ))
         })?;
+        let _home_refresh_lock = self.acquire_home_refresh_lock().await?;
         self.refresh_token_from_authority_impl().await
     }
 

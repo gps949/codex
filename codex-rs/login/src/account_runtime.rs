@@ -246,6 +246,9 @@ fn restore_runtime_state(
             continue;
         }
         pool.update_rate_limits(&profile_state.profile_id, profile_state.rate_limits.clone())?;
+        if let Some(observation) = profile_state.window_warmup.clone() {
+            let _ = pool.record_window_warmup(&profile_state.profile_id, observation);
+        }
     }
 
     // Recreate known future cooldowns before selecting the persisted active account. We use the

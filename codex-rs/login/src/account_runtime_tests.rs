@@ -19,11 +19,14 @@ use crate::AccountProfileId;
 use crate::AccountProfileStore;
 use crate::AccountRuntimeProfileState;
 use crate::AccountRuntimeState;
+use crate::AccountRuntimeStateStore;
 use crate::AuthConfig;
 use crate::AuthDotJson;
 use crate::AuthKeyringBackendKind;
 use crate::AuthManager;
 use crate::TokenData;
+use crate::WindowWarmupObservation;
+use crate::WindowWarmupOutcome;
 use crate::save_auth;
 
 async fn test_auth_manager(home: &Path) -> std::sync::Arc<AuthManager> {
@@ -129,11 +132,13 @@ async fn restoring_a_fully_cooling_down_pool_succeeds() {
                 profile_id: first.id.clone(),
                 exhausted_until: Some(resets_at),
                 rate_limits: Default::default(),
+                window_warmup: None,
             },
             AccountRuntimeProfileState {
                 profile_id: second.id.clone(),
                 exhausted_until: Some(resets_at),
                 rate_limits: Default::default(),
+                window_warmup: None,
             },
         ],
     };
@@ -430,6 +435,117 @@ async fn synchronize_pool_persists_profiles_in_priority_order() {
             .collect::<Vec<_>>(),
         vec!["primary", "backup"]
     );
+}
+
+fn idle_primary_limits() -> crate::AccountRateLimits {
+    crate::AccountRateLimits {
+        primary: Some(crate::AccountRateLimitWindow {
+            used_percent: 0.0,
+            resets_at: Some(Utc::now() + Duration::hours(5)),
+            window_minutes: Some(300),
+        }),
+        ..crate::AccountRateLimits::default()
+    }
+}
+
+fn failed_warmup(retry_after: chrono::DateTime<Utc>) -> WindowWarmupObservation {
+    WindowWarmupObservation {
+        outcome: WindowWarmupOutcome::Failed,
+        attempted_at: Utc::now(),
+        retry_after: Some(retry_after),
+        consecutive_failures: 1,
+    }
+}
+
+#[tokio::test]
+async fn second_pool_honors_persisted_window_warmup_backoff() {
+    let home = TempDir::new().unwrap();
+    let writer = AccountPool::new();
+    let reader = AccountPool::new();
+    let first = AccountProfileId::new("first").unwrap();
+    let second = AccountProfileId::new("second").unwrap();
+    for pool in [&writer, &reader] {
+        let manager = test_auth_manager(home.path()).await;
+        pool.register(profile("first", 0), Arc::clone(&manager))
+            .unwrap();
+        pool.register(profile("second", 10), manager).unwrap();
+        pool.activate(&first).unwrap();
+        pool.update_rate_limits(&second, idle_primary_limits())
+            .unwrap();
+    }
+    assert_eq!(writer.window_warmup_candidates(), vec![second.clone()]);
+    assert_eq!(reader.window_warmup_candidates(), vec![second.clone()]);
+
+    let retry_after = Utc::now() + Duration::minutes(5);
+    writer
+        .record_window_warmup(&second, failed_warmup(retry_after))
+        .unwrap();
+    let store = AccountRuntimeStateStore::new(home.path().to_path_buf());
+    let mut writer_previous = AccountRuntimeState::default();
+    store
+        .synchronize_pool(&writer, &mut writer_previous)
+        .unwrap();
+    let mut reader_previous = AccountRuntimeState::default();
+    store
+        .synchronize_pool(&reader, &mut reader_previous)
+        .unwrap();
+
+    assert_eq!(
+        store
+            .load()
+            .unwrap()
+            .profiles
+            .iter()
+            .find(|profile| profile.profile_id == second)
+            .and_then(|profile| profile.window_warmup.as_ref())
+            .map(|observation| observation.outcome),
+        Some(WindowWarmupOutcome::Failed)
+    );
+    assert!(
+        reader.window_warmup_candidates().is_empty(),
+        "a second Codex process must inherit warmup backoff from disk"
+    );
+}
+
+#[tokio::test]
+async fn restore_runtime_state_reapplies_window_warmup_backoff() {
+    let pool = AccountPool::new();
+    let first = profile("first", 0);
+    let second = profile("second", 10);
+    for account in [&first, &second] {
+        pool.register(
+            account.clone(),
+            test_auth_manager(&account.credential_home).await,
+        )
+        .unwrap();
+    }
+    pool.activate(&first.id).unwrap();
+    pool.update_rate_limits(&second.id, idle_primary_limits())
+        .unwrap();
+    let retry_after = Utc::now() + Duration::minutes(15);
+    restore_runtime_state(
+        &pool,
+        &AccountRuntimeState {
+            selection_revision: 0,
+            active_profile_id: Some(first.id.clone()),
+            profiles: vec![
+                AccountRuntimeProfileState {
+                    profile_id: first.id.clone(),
+                    exhausted_until: None,
+                    rate_limits: Default::default(),
+                    window_warmup: None,
+                },
+                AccountRuntimeProfileState {
+                    profile_id: second.id.clone(),
+                    exhausted_until: None,
+                    rate_limits: idle_primary_limits(),
+                    window_warmup: Some(failed_warmup(retry_after)),
+                },
+            ],
+        },
+    )
+    .unwrap();
+    assert!(pool.window_warmup_candidates().is_empty());
 }
 
 #[tokio::test]

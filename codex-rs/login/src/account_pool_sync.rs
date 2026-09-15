@@ -71,6 +71,7 @@ impl AccountPool {
                     _ => None,
                 },
                 rate_limits: account.rate_limits.clone(),
+                window_warmup: account.window_warmup.clone(),
             };
             let old = previous
                 .profiles
@@ -95,6 +96,11 @@ impl AccountPool {
                     } else if incoming.exhausted_until != old_exhausted {
                         result.exhausted_until = incoming.exhausted_until;
                     }
+                    result.window_warmup = merge_window_warmup(
+                        local.window_warmup.clone(),
+                        incoming.window_warmup.clone(),
+                        old.and_then(|profile| profile.window_warmup.clone()),
+                    );
                 }
                 if external_selection
                     && remote.active_profile_id.as_ref() == Some(&local.profile_id)
@@ -105,6 +111,10 @@ impl AccountPool {
             }
             if account.rate_limits != result.rate_limits {
                 account.rate_limits = result.rate_limits.clone();
+                changed = true;
+            }
+            if account.window_warmup != result.window_warmup {
+                account.window_warmup = result.window_warmup.clone();
                 changed = true;
             }
             if (local.exhausted_until != result.exhausted_until
@@ -198,5 +208,28 @@ impl AccountPool {
             self.notify_change();
         }
         merged
+    }
+}
+
+fn merge_window_warmup(
+    local: Option<crate::WindowWarmupObservation>,
+    incoming: Option<crate::WindowWarmupObservation>,
+    old: Option<crate::WindowWarmupObservation>,
+) -> Option<crate::WindowWarmupObservation> {
+    if local != old && incoming != old {
+        match (&local, &incoming) {
+            (Some(local_observation), Some(incoming_observation))
+                if incoming_observation.attempted_at > local_observation.attempted_at =>
+            {
+                incoming
+            }
+            _ => local,
+        }
+    } else if local != old {
+        local
+    } else if incoming != old {
+        incoming
+    } else {
+        local
     }
 }
