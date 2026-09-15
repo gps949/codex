@@ -2782,14 +2782,20 @@ impl AuthManager {
         Ok(auth)
     }
 
-    async fn acquire_home_refresh_lock(&self) -> Result<std::fs::File, RefreshTokenError> {
+    async fn acquire_home_refresh_lock(&self) -> Result<Option<std::fs::File>, RefreshTokenError> {
+        // The pool's outer AuthManager refreshes through the active profile manager.
+        // `legacy-root` uses the same credential home as CODEX_HOME; taking this lock
+        // here and again on that manager deadlocks on Windows (per-handle LockFileEx).
+        if self.has_external_auth() {
+            return Ok(None);
+        }
         let home = self.codex_home.clone();
-        tokio::task::spawn_blocking(move || crate::account_file::refresh_lock(&home))
+        let file = tokio::task::spawn_blocking(move || crate::account_file::refresh_lock(&home))
             .await
             .map_err(|error| {
                 std::io::Error::other(format!("auth refresh lock join failed: {error}"))
-            })?
-            .map_err(RefreshTokenError::Transient)
+            })??;
+        Ok(Some(file))
     }
 
     /// Attempt to refresh the token by first performing a guarded reload from
