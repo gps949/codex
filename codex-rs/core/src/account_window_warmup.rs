@@ -46,13 +46,15 @@ const WARMUP_PROMPT: &str = "1+1?";
 const WARMUP_INSTRUCTIONS: &str = "Reply with one short token.";
 const WARMUP_ORIGINATOR: &str = "codex_account_window_warmup";
 const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(45);
-/// Real transport/API failures. Keep short so standbys recover after a bad request shape.
-const FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
-/// HTTP OK but primary usage still 0% — retry sooner than a hard failure.
-const NOOP_BACKOFF: Duration = Duration::from_secs(2 * 60);
+/// Cap for escalated cool-downs after repeated warmup failures.
+const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const SUCCESS_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
 const SKIPPED_AUTH_BACKOFF: Duration = Duration::from_secs(30 * 60);
+const EMPTY_CATALOG_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const GET_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
+/// Cold-idle Responses headers usually still show 0%. Poll accounts usage a few times before
+/// declaring NOOP so lagging GETs do not produce false "warmup retry" loops.
+const GET_VERIFY_DELAYS_SECS: &[u64] = &[0, 1, 2, 4];
 const URGENT_WARMUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Give quota probes a moment to land, then start warming — do not wait a full interval.
 const INITIAL_WARMUP_SETTLE: Duration = Duration::from_secs(30);
@@ -115,6 +117,7 @@ async fn warm_profile(
                 retry_after: Some(
                     attempted_at + chrono::Duration::seconds(SKIPPED_AUTH_BACKOFF.as_secs() as i64),
                 ),
+                consecutive_failures: 0,
             },
         );
         return Ok(());
@@ -127,9 +130,23 @@ async fn warm_profile(
     // Pick the cheapest model/effort from the official catalog (live config catalog when
     // present, else bundled). Never invent effort levels the model does not advertise —
     // that previously forced `minimal` and caused endless warmup retries.
-    let catalog = codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
-    let Some(model_info) = codex_models_manager::select_cheapest_warmup_model(&catalog) else {
+    let preferred_catalog =
+        codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
+    let Some(model_info) = codex_models_manager::select_cheapest_warmup_model(&preferred_catalog)
+        .or_else(|| {
+            // Live catalogs can be non-empty yet have no warmup-eligible models; fall back to bundled.
+            let bundled = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
+            codex_models_manager::select_cheapest_warmup_model(&bundled)
+        })
+    else {
         warn!(%profile_id, "standby window warmup skipped: empty model catalog");
+        record_failure(
+            pool,
+            profile_id,
+            attempted_at,
+            FailureKind::Hard,
+            Some(EMPTY_CATALOG_BACKOFF),
+        );
         return Ok(());
     };
     let effort = codex_models_manager::cheapest_supported_effort(&model_info);
@@ -218,8 +235,9 @@ async fn warm_profile(
             while let Some(event) = stream.next().await {
                 match event? {
                     ResponseEvent::RateLimits(snapshot) => {
-                        observed = Some(snapshot.clone());
-                        *observed_limits.lock().await = Some(snapshot);
+                        let preferred = prefer_rate_limit_snapshot(observed.clone(), snapshot);
+                        observed = Some(preferred.clone());
+                        *observed_limits.lock().await = Some(preferred);
                     }
                     ResponseEvent::Completed { .. } => break,
                     _ => {}
@@ -233,7 +251,7 @@ async fn warm_profile(
     let stream_limits = match stream_result {
         Ok(Ok(observed)) => observed,
         Ok(Err(error)) => {
-            record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
+            record_failure(pool, profile_id, attempted_at, FailureKind::Hard, None);
             warn!(%profile_id, error = %error, "standby window warmup request failed");
             return Ok(());
         }
@@ -250,7 +268,7 @@ async fn warm_profile(
                 );
                 partial
             } else {
-                record_failure(pool, profile_id, attempted_at, FAILURE_BACKOFF);
+                record_failure(pool, profile_id, attempted_at, FailureKind::Hard, None);
                 warn!(%profile_id, "standby window warmup timed out");
                 return Ok(());
             }
@@ -263,38 +281,41 @@ async fn warm_profile(
         .is_some_and(|window| window.used_percent > 0.0);
     let stream_account_limits = stream_limits.as_ref().map(convert_rate_limits);
 
-    // If the profile became active while we were warming, do not write standby observations over
-    // fresher active-session rate-limit state.
+    // If the profile became active while we were warming, avoid clobbering fresher active-session
+    // rate-limit state — but still keep stream evidence that the 5h window already started when
+    // the active cache still looks idle (otherwise mid-warmup activate silently drops success).
     let still_standby = pool
         .snapshots()
         .into_iter()
         .find(|snapshot| &snapshot.profile.id == profile_id)
         .is_some_and(|snapshot| !snapshot.is_active);
 
-    if still_standby {
+    let mut started = stream_started;
+    let mut best_limits = stream_account_limits.clone();
+
+    if still_standby || stream_started {
         if let Some(limits) = stream_account_limits.as_ref() {
             pool.update_rate_limits(profile_id, limits.clone())?;
-            debug!(%profile_id, "warmed standby 5h rate-limit window");
-        } else {
+            if still_standby {
+                debug!(%profile_id, "warmed standby 5h rate-limit window");
+            } else {
+                debug!(%profile_id, "kept mid-warmup stream evidence after profile activated");
+            }
+        } else if still_standby {
             debug!(%profile_id, "warmup completed without rate-limit headers");
         }
 
-        // Refresh via accounts usage GET for durable scheduling data. A lagging GET must not erase
-        // stream evidence that the primary window already started — that previously produced false
-        // "warmup retry" loops after a successful Responses call.
-        if let Some(mut limits) = refresh_rate_limits_via_get(config, &auth).await {
-            if stream_started
-                && limits
-                    .primary
-                    .as_ref()
-                    .is_none_or(|window| window.used_percent <= 0.0)
-                && let Some(primary) = stream_account_limits
-                    .as_ref()
-                    .and_then(|limits| limits.primary.clone())
-            {
-                limits.primary = Some(primary);
+        // Cold-idle Responses headers typically still show 0%. Retry accounts usage GET with short
+        // delays before declaring NOOP — lagging GETs were the main false "warmup retry" source.
+        if let Some(limits) =
+            refresh_rate_limits_via_get_with_retries(config, &auth, stream_started).await
+        {
+            if account_primary_started(&limits) {
+                started = true;
             }
-            pool.update_rate_limits(profile_id, limits)?;
+            let merged = merge_account_rate_limits_monotonic(best_limits.as_ref(), limits);
+            pool.update_rate_limits(profile_id, merged.clone())?;
+            best_limits = Some(merged);
             debug!(%profile_id, "refreshed standby rate limits after window warmup");
         }
     } else {
@@ -302,13 +323,21 @@ async fn warm_profile(
         return Ok(());
     }
 
-    if !primary_window_started(pool, profile_id) {
-        record_failure(pool, profile_id, attempted_at, NOOP_BACKOFF);
+    // Prefer local evidence over a racy pool re-read: concurrent quota sync can briefly regress
+    // primary usage back to 0% after we already observed a start.
+    if !started && !primary_window_started(pool, profile_id) {
+        record_failure(pool, profile_id, attempted_at, FailureKind::Noop, None);
         warn!(
             %profile_id,
             "standby window warmup completed without starting the 5h window"
         );
         return Ok(());
+    }
+
+    if let Some(limits) = best_limits.as_ref()
+        && account_primary_started(limits)
+    {
+        let _ = pool.update_rate_limits(profile_id, limits.clone());
     }
 
     let _ = pool.record_window_warmup(
@@ -319,17 +348,38 @@ async fn warm_profile(
             retry_after: Some(
                 attempted_at + chrono::Duration::seconds(SUCCESS_DEBOUNCE.as_secs() as i64),
             ),
+            consecutive_failures: 0,
         },
     );
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailureKind {
+    /// Transport/API error or timeout before the primary window moves.
+    Hard,
+    /// Responses completed but the 5h window stayed at 0%.
+    Noop,
 }
 
 fn record_failure(
     pool: &AccountPool,
     profile_id: &AccountProfileId,
     attempted_at: DateTime<Utc>,
-    backoff: Duration,
+    kind: FailureKind,
+    backoff_override: Option<Duration>,
 ) {
+    let previous_streak = pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| &snapshot.profile.id == profile_id)
+        .and_then(|snapshot| snapshot.window_warmup)
+        .filter(|observation| matches!(observation.outcome, WindowWarmupOutcome::Failed))
+        .map(|observation| observation.consecutive_failures)
+        .unwrap_or(0);
+    let consecutive_failures = previous_streak.saturating_add(1);
+    let backoff =
+        backoff_override.unwrap_or_else(|| backoff_for_streak(kind, consecutive_failures));
     let retry_after = attempted_at + chrono::Duration::seconds(backoff.as_secs() as i64);
     let _ = pool.record_window_warmup(
         profile_id,
@@ -337,8 +387,132 @@ fn record_failure(
             outcome: WindowWarmupOutcome::Failed,
             attempted_at,
             retry_after: Some(retry_after),
+            consecutive_failures,
         },
     );
+}
+
+/// Escalating cool-down so repeated NOOP/API failures stop flashing "warmup retry" every few minutes.
+fn backoff_for_streak(kind: FailureKind, consecutive_failures: u32) -> Duration {
+    let streak = consecutive_failures.max(1);
+    let base = match kind {
+        // Hard failures: 5m → 15m → 45m → 3h → 6h
+        FailureKind::Hard => match streak {
+            1 => Duration::from_secs(5 * 60),
+            2 => Duration::from_secs(15 * 60),
+            3 => Duration::from_secs(45 * 60),
+            4 => Duration::from_secs(3 * 60 * 60),
+            _ => MAX_FAILURE_BACKOFF,
+        },
+        // NOOP (HTTP OK, window still 0%): short retries never help and spam the UI.
+        // 30m → 2h → 6h
+        FailureKind::Noop => match streak {
+            1 => Duration::from_secs(30 * 60),
+            2 => Duration::from_secs(2 * 60 * 60),
+            _ => MAX_FAILURE_BACKOFF,
+        },
+    };
+    base.min(MAX_FAILURE_BACKOFF)
+}
+
+fn prefer_rate_limit_snapshot(
+    current: Option<RateLimitSnapshot>,
+    incoming: RateLimitSnapshot,
+) -> RateLimitSnapshot {
+    let Some(current) = current else {
+        return incoming;
+    };
+    let incoming_is_codex = incoming
+        .limit_id
+        .as_deref()
+        .is_none_or(|limit_id| limit_id == "codex");
+    let current_is_codex = current
+        .limit_id
+        .as_deref()
+        .is_none_or(|limit_id| limit_id == "codex");
+    match (current_is_codex, incoming_is_codex) {
+        (false, true) => incoming,
+        (true, false) => current,
+        _ => {
+            let current_used = current
+                .primary
+                .as_ref()
+                .map(|window| window.used_percent)
+                .unwrap_or(0.0);
+            let incoming_used = incoming
+                .primary
+                .as_ref()
+                .map(|window| window.used_percent)
+                .unwrap_or(0.0);
+            if incoming_used > current_used {
+                incoming
+            } else {
+                current
+            }
+        }
+    }
+}
+
+fn account_primary_started(limits: &AccountRateLimits) -> bool {
+    limits
+        .primary
+        .as_ref()
+        .is_some_and(|window| window.used_percent > 0.0)
+}
+
+fn merge_account_rate_limits_monotonic(
+    existing: Option<&AccountRateLimits>,
+    incoming: AccountRateLimits,
+) -> AccountRateLimits {
+    let Some(existing) = existing else {
+        return incoming;
+    };
+    let mut merged = incoming;
+    if let Some(existing_primary) = existing.primary.as_ref()
+        && existing_primary.used_percent > 0.0
+    {
+        let regresses = merged
+            .primary
+            .as_ref()
+            .is_none_or(|window| window.used_percent <= 0.0);
+        let reset_due = existing_primary
+            .resets_at
+            .is_some_and(|resets_at| resets_at <= Utc::now());
+        if regresses && !reset_due {
+            merged.primary = Some(existing_primary.clone());
+        }
+    }
+    if merged.observed_at.is_none() {
+        merged.observed_at = existing.observed_at;
+    }
+    merged
+}
+
+async fn refresh_rate_limits_via_get_with_retries(
+    config: &Config,
+    auth: &CodexAuth,
+    stream_started: bool,
+) -> Option<AccountRateLimits> {
+    let mut best = None;
+    for (index, delay_secs) in GET_VERIFY_DELAYS_SECS.iter().enumerate() {
+        if *delay_secs > 0 {
+            tokio::time::sleep(Duration::from_secs(*delay_secs)).await;
+        }
+        let Some(limits) = refresh_rate_limits_via_get(config, auth).await else {
+            continue;
+        };
+        if account_primary_started(&limits) {
+            return Some(limits);
+        }
+        // Keep the freshest idle snapshot; if Responses already proved a start, preserve that
+        // below via monotonic merge with stream limits.
+        best = Some(limits);
+        // After a stream-proven start, one confirming GET is enough.
+        if stream_started && index == 0 {
+            break;
+        }
+    }
+    best
 }
 
 fn primary_window_started(pool: &AccountPool, profile_id: &AccountProfileId) -> bool {

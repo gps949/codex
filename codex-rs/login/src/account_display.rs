@@ -71,6 +71,10 @@ pub fn format_relative_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> String
     format!("in {}", format_reset_countdown(remaining_seconds as u64))
 }
 
+/// After this much remaining cool-down, show "paused" instead of "retry" so long NOOP/API
+/// backoffs do not look like an urgent failing loop.
+const WARMUP_PAUSED_THRESHOLD_SECS: i64 = 30 * 60;
+
 /// Compact status line for the latest standby 5h-window warmup observation.
 pub fn format_window_warmup_status(
     observation: &crate::account_pool::WindowWarmupObservation,
@@ -82,7 +86,13 @@ pub fn format_window_warmup_status(
         WindowWarmupOutcome::SkippedNoAuth => "warmup skipped (no auth)".to_string(),
         WindowWarmupOutcome::Failed => match observation.retry_after {
             Some(retry_after) if retry_after > now => {
-                format!("warmup retry {}", format_relative_reset(retry_after, now))
+                let remaining = retry_after.signed_duration_since(now).num_seconds();
+                let label = if remaining >= WARMUP_PAUSED_THRESHOLD_SECS {
+                    "warmup paused"
+                } else {
+                    "warmup retry"
+                };
+                format!("{label} {}", format_relative_reset(retry_after, now))
             }
             _ => "warmup failed".to_string(),
         },
@@ -146,6 +156,7 @@ mod tests {
             outcome: crate::account_pool::WindowWarmupOutcome::Succeeded,
             attempted_at: now,
             retry_after: None,
+            consecutive_failures: 0,
         };
         assert_eq!(format_window_warmup_status(&succeeded, now), "5h warmed");
 
@@ -153,10 +164,22 @@ mod tests {
             outcome: crate::account_pool::WindowWarmupOutcome::Failed,
             attempted_at: now,
             retry_after: Some(now + chrono::Duration::minutes(15)),
+            consecutive_failures: 1,
         };
         assert_eq!(
             format_window_warmup_status(&failed, now),
             "warmup retry in 0:15"
+        );
+
+        let paused = crate::account_pool::WindowWarmupObservation {
+            outcome: crate::account_pool::WindowWarmupOutcome::Failed,
+            attempted_at: now,
+            retry_after: Some(now + chrono::Duration::hours(2)),
+            consecutive_failures: 2,
+        };
+        assert_eq!(
+            format_window_warmup_status(&paused, now),
+            "warmup paused in 2:00"
         );
     }
 }

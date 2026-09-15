@@ -185,6 +185,7 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
             retry_after: warmup
                 .retry_after
                 .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
+            consecutive_failures: 0,
         };
         lines.push(format!(
             "Warmup: {}",
