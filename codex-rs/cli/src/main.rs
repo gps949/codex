@@ -554,6 +554,18 @@ struct LogoutCommand {
 }
 
 #[derive(Debug, Parser)]
+#[command(after_help = "Examples:\n  \
+        codex account add --label \"Work Pro\"\n  \
+        codex account list\n  \
+        codex account list --show-profile\n  \
+        codex account set \"Work Pro\" --priority 0\n  \
+        codex account use \"Work Pro\"\n  \
+        codex account pool\n\n\
+        Labels are optional human names stored locally. Prefer them for day-to-day\n\
+        commands (`use`, `set`, `enable`, `disable`, `login`, `remove`). Opaque\n\
+        profile ids (acct-…) stay hidden in list/pool unless you pass --show-profile.\n\n\
+        The pool keeps separate profiles for the same person in different ChatGPT\n\
+        workspaces, and for different seats in the same Business workspace.")]
 struct AccountCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
@@ -565,6 +577,9 @@ struct AccountCommand {
 #[derive(Debug, clap::Subcommand)]
 enum AccountSubcommand {
     /// Add another Codex account profile via ChatGPT login.
+    #[command(after_help = "Example:\n  codex account add --label \"Work Pro\"\n\n\
+            If this ChatGPT user+workspace is already in the pool, login refreshes\n\
+            that profile instead of creating a duplicate.")]
     Add {
         /// Human-readable label for the new account profile.
         #[arg(long)]
@@ -580,11 +595,21 @@ enum AccountSubcommand {
     },
 
     /// List configured account profiles and their scheduler state.
-    List,
+    #[command(
+        after_help = "By default the opaque profile id column is omitted. Pass\n\
+            --show-profile when you need the acct-… id for scripting.\n\n\
+            Example:\n  codex account list\n  codex account list --show-profile"
+    )]
+    List {
+        /// Include the opaque local profile id column (acct-…).
+        #[arg(long = "show-profile")]
+        show_profile: bool,
+    },
 
     /// Re-run ChatGPT login for an existing account profile in place.
     Login {
-        /// Account profile id to re-authenticate.
+        /// Exact profile ID or unique label to re-authenticate.
+        #[arg(value_name = "ID_OR_LABEL")]
         profile_id: String,
 
         /// Use device-code auth instead of the local browser flow.
@@ -593,8 +618,14 @@ enum AccountSubcommand {
     },
 
     /// Update priority or label of an account profile.
+    #[command(after_help = "Examples:\n  \
+            codex account set acct-… --label \"Work Pro\"\n  \
+            codex account set \"Work Pro\" --priority 0\n  \
+            codex account set \"Work Pro\" --clear-label\n\n\
+            Use `codex account list --show-profile` if the account has no unique label yet.")]
     Set {
-        /// Account profile id to update.
+        /// Exact profile ID or unique label to update.
+        #[arg(value_name = "ID_OR_LABEL")]
         profile_id: String,
 
         /// New scheduling priority (lower is preferred).
@@ -612,13 +643,15 @@ enum AccountSubcommand {
 
     /// Re-enable a disabled account profile for scheduling.
     Enable {
-        /// Account profile id to enable.
+        /// Exact profile ID or unique label to enable.
+        #[arg(value_name = "ID_OR_LABEL")]
         profile_id: String,
     },
 
     /// Park an account profile: keep its credentials but never schedule it.
     Disable {
-        /// Account profile id to disable.
+        /// Exact profile ID or unique label to disable.
+        #[arg(value_name = "ID_OR_LABEL")]
         profile_id: String,
     },
 
@@ -635,7 +668,8 @@ enum AccountSubcommand {
 
     /// Remove an account profile from the pool.
     Remove {
-        /// Account profile id to remove.
+        /// Exact profile ID or unique label to remove.
+        #[arg(value_name = "ID_OR_LABEL")]
         profile_id: String,
 
         /// Keep the stored credentials instead of revoking and deleting them.
@@ -644,7 +678,16 @@ enum AccountSubcommand {
     },
 
     /// Show the live multi-account scheduler state (availability, cooldowns, active profile).
-    Pool,
+    #[command(
+        after_help = "By default the opaque profile id column is omitted. Pass\n\
+            --show-profile when you need the acct-… id.\n\n\
+            Example:\n  codex account pool\n  codex account pool --show-profile"
+    )]
+    Pool {
+        /// Include the opaque local profile id column (acct-…).
+        #[arg(long = "show-profile")]
+        show_profile: bool,
+    },
 
     /// Show or update native account-pool settings in config.toml.
     #[command(subcommand)]
@@ -1775,8 +1818,8 @@ async fn cli_main(
                     )
                     .await;
                 }
-                AccountSubcommand::List => {
-                    account_cmd::run_account_list(account_cli.config_overrides).await;
+                AccountSubcommand::List { show_profile } => {
+                    account_cmd::run_account_list(account_cli.config_overrides, show_profile).await;
                 }
                 AccountSubcommand::Login {
                     profile_id,
@@ -1842,8 +1885,8 @@ async fn cli_main(
                     )
                     .await;
                 }
-                AccountSubcommand::Pool => {
-                    account_cmd::run_account_pool(account_cli.config_overrides).await;
+                AccountSubcommand::Pool { show_profile } => {
+                    account_cmd::run_account_pool(account_cli.config_overrides, show_profile).await;
                 }
                 AccountSubcommand::Config(action) => match action {
                     AccountConfigSubcommand::Show => {

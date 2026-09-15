@@ -16,12 +16,12 @@ pub(crate) fn resolve_account<'a>(
         .filter(|record| record.profile.label.as_deref() == Some(selector));
     let Some(record) = matches.next() else {
         return Err(format!(
-            "No account matches {selector:?}. Use `codex account list` to see IDs and labels."
+            "No account matches {selector:?}. Use `codex account list` (or `codex account list --show-profile`) to see emails, labels, and ids."
         ));
     };
     if matches.next().is_some() {
         return Err(format!(
-            "Account label {selector:?} is ambiguous. Select an exact profile ID or assign a unique label with `codex account set <id> --label <label>`."
+            "Account label {selector:?} is ambiguous. Select an exact profile ID from `codex account list --show-profile`, or assign a unique label with `codex account set <id> --label <label>`."
         ));
     }
     Ok(record)

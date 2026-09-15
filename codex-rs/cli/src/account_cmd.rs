@@ -143,8 +143,8 @@ pub(crate) async fn run_account_relogin(
         eprintln!("ChatGPT login is disabled by the current authentication policy.");
         std::process::exit(1);
     }
-    let profile_id = parse_profile_id_or_exit(&profile_id);
     let store = AccountProfileStore::new(config.codex_home.to_path_buf());
+    let profile_id = resolve_profile_id_or_exit(&store, &profile_id);
     let options = ServerOptions::new(
         config.codex_home.to_path_buf(),
         CLIENT_ID.to_string(),
@@ -200,8 +200,8 @@ pub(crate) async fn run_account_set(
     disabled: Option<bool>,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
-    let profile_id = parse_profile_id_or_exit(&profile_id);
     let store = AccountProfileStore::new(config.codex_home.to_path_buf());
+    let profile_id = resolve_profile_id_or_exit(&store, &profile_id);
     let label_update = if clear_label {
         Some(codex_login::AccountLabelUpdate::Clear)
     } else {
@@ -241,7 +241,10 @@ pub(crate) async fn run_account_set(
     }
 }
 
-pub(crate) async fn run_account_list(cli_config_overrides: CliConfigOverrides) -> ! {
+pub(crate) async fn run_account_list(
+    cli_config_overrides: CliConfigOverrides,
+    show_profile: bool,
+) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let store = AccountProfileStore::new(config.codex_home.to_path_buf());
     let records = match store.load_profile_records() {
@@ -273,30 +276,48 @@ pub(crate) async fn run_account_list(cli_config_overrides: CliConfigOverrides) -
             .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
     });
 
-    println!("ACTIVE\tPRIORITY\tPROFILE\tSTATE\tPLAN\tEMAIL\tCOOLDOWN\tLABEL");
+    if show_profile {
+        println!("ACTIVE\tPRIORITY\tPROFILE\tSTATE\tPLAN\tEMAIL\tCOOLDOWN\tLABEL");
+    } else {
+        println!("ACTIVE\tPRIORITY\tSTATE\tPLAN\tEMAIL\tCOOLDOWN\tLABEL");
+    }
     for record in records {
         let active = runtime_state.active_profile_id.as_ref() == Some(&record.profile.id);
         let runtime = runtime_by_id.get(&record.profile.id).copied();
         let cooldown = format_cooldown(runtime);
         let (plan, email) = load_profile_identity(&config, &record.profile).await;
-        println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            if active { "*" } else { "" },
-            record.profile.priority,
-            record.profile.id,
-            if record.profile.disabled {
-                "disabled"
-            } else {
-                match record.state {
-                    AccountProfileState::PendingLogin => "pending_login",
-                    AccountProfileState::Ready => "ready",
-                }
-            },
-            plan.unwrap_or_else(|| "-".to_string()),
-            email.unwrap_or_else(|| "-".to_string()),
-            cooldown,
-            record.profile.label.as_deref().unwrap_or("-"),
-        );
+        let state = if record.profile.disabled {
+            "disabled"
+        } else {
+            match record.state {
+                AccountProfileState::PendingLogin => "pending_login",
+                AccountProfileState::Ready => "ready",
+            }
+        };
+        if show_profile {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                if active { "*" } else { "" },
+                record.profile.priority,
+                record.profile.id,
+                state,
+                plan.unwrap_or_else(|| "-".to_string()),
+                email.unwrap_or_else(|| "-".to_string()),
+                cooldown,
+                record.profile.label.as_deref().unwrap_or("-"),
+            );
+        } else {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                if active { "*" } else { "" },
+                record.profile.priority,
+                state,
+                plan.unwrap_or_else(|| "-".to_string()),
+                email.unwrap_or_else(|| "-".to_string()),
+                cooldown,
+                record.profile.label.as_deref().unwrap_or("-"),
+            );
+        }
     }
     std::process::exit(0);
 }
@@ -363,7 +384,6 @@ pub(crate) async fn run_account_remove(
     keep_credentials: bool,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
-    let profile_id = parse_profile_id_or_exit(&profile_id);
     let store = AccountProfileStore::new(config.codex_home.to_path_buf());
     let records = match store.load_profile_records() {
         Ok(records) => records,
@@ -372,13 +392,14 @@ pub(crate) async fn run_account_remove(
             std::process::exit(1);
         }
     };
-    let Some(record) = records
-        .into_iter()
-        .find(|record| record.profile.id == profile_id)
-    else {
-        eprintln!("Unknown Codex account profile: {profile_id}");
-        std::process::exit(1);
+    let record = match crate::account_selector::resolve_account(&records, &profile_id) {
+        Ok(record) => record.clone(),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
     };
+    let profile_id = record.profile.id.clone();
 
     if !keep_credentials
         && profile_id.as_str() != "legacy-root"
@@ -431,7 +452,10 @@ pub(crate) async fn run_account_remove(
     std::process::exit(0);
 }
 
-pub(crate) async fn run_account_pool(cli_config_overrides: CliConfigOverrides) -> ! {
+pub(crate) async fn run_account_pool(
+    cli_config_overrides: CliConfigOverrides,
+    show_profile: bool,
+) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let auth_manager =
         match AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await {
@@ -464,7 +488,11 @@ pub(crate) async fn run_account_pool(cli_config_overrides: CliConfigOverrides) -
     println!(
         "rotation_strategy={rotation}\treturn_to_preferred={return_to_preferred}\tpreemptive_switch={preemptive}"
     );
-    println!("ACTIVE\tPRIORITY\tPROFILE\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL");
+    if show_profile {
+        println!("ACTIVE\tPRIORITY\tPROFILE\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL");
+    } else {
+        println!("ACTIVE\tPRIORITY\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL");
+    }
     for snapshot in pool_handle.snapshots() {
         let (plan, email) = load_profile_identity(&config, &snapshot.profile).await;
         let availability = match &snapshot.availability {
@@ -495,19 +523,34 @@ pub(crate) async fn run_account_pool(cli_config_overrides: CliConfigOverrides) -
             .as_ref()
             .map(|observation| codex_login::format_window_warmup_status(observation, Utc::now()))
             .unwrap_or_else(|| "-".to_string());
-        println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            if snapshot.is_active { "*" } else { "" },
-            snapshot.profile.priority,
-            snapshot.profile.id,
-            availability,
-            plan.unwrap_or_else(|| "-".to_string()),
-            email.unwrap_or_else(|| "-".to_string()),
-            primary,
-            secondary,
-            warmup,
-            snapshot.profile.label.as_deref().unwrap_or("-"),
-        );
+        if show_profile {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                if snapshot.is_active { "*" } else { "" },
+                snapshot.profile.priority,
+                snapshot.profile.id,
+                availability,
+                plan.unwrap_or_else(|| "-".to_string()),
+                email.unwrap_or_else(|| "-".to_string()),
+                primary,
+                secondary,
+                warmup,
+                snapshot.profile.label.as_deref().unwrap_or("-"),
+            );
+        } else {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                if snapshot.is_active { "*" } else { "" },
+                snapshot.profile.priority,
+                availability,
+                plan.unwrap_or_else(|| "-".to_string()),
+                email.unwrap_or_else(|| "-".to_string()),
+                primary,
+                secondary,
+                warmup,
+                snapshot.profile.label.as_deref().unwrap_or("-"),
+            );
+        }
     }
     std::process::exit(0);
 }
@@ -679,11 +722,18 @@ fn format_cooldown(state: Option<&AccountRuntimeProfileState>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn parse_profile_id_or_exit(value: &str) -> AccountProfileId {
-    match AccountProfileId::new(value.to_string()) {
-        Ok(profile_id) => profile_id,
+fn resolve_profile_id_or_exit(store: &AccountProfileStore, selector: &str) -> AccountProfileId {
+    let records = match store.load_profile_records() {
+        Ok(records) => records,
         Err(error) => {
-            eprintln!("Invalid account profile id: {error}");
+            eprintln!("Error reading account profiles: {error}");
+            std::process::exit(1);
+        }
+    };
+    match crate::account_selector::resolve_account(&records, selector) {
+        Ok(record) => record.profile.id.clone(),
+        Err(error) => {
+            eprintln!("{error}");
             std::process::exit(1);
         }
     }
