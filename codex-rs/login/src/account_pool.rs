@@ -166,7 +166,8 @@ pub enum WindowWarmupOutcome {
     SkippedNoAuth,
 }
 
-/// Persisted warmup attempt so UIs can show status and the scheduler can honor backoff.
+/// Warmup attempt persisted in `account-runtime-state.json` so UIs can show status
+/// and every Codex process on this home honors the same backoff.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowWarmupObservation {
     pub outcome: WindowWarmupOutcome,

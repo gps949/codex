@@ -16,6 +16,7 @@ use codex_login::AccountPool;
 use codex_login::AccountProfileId;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
+use codex_login::AccountRuntimeStateStore;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::WindowWarmupObservation;
@@ -85,6 +86,12 @@ pub(crate) fn spawn_window_warmup_task(pool: Arc<AccountPool>, config: Config) -
 }
 
 async fn run_warmup_pass(pool: &AccountPool, config: &Config) -> anyhow::Result<()> {
+    let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
+    let lock_store = store.clone();
+    let _lock = tokio::task::spawn_blocking(move || lock_store.lock_window_warmup())
+        .await
+        .map_err(|error| anyhow::anyhow!("window warmup lock join failed: {error}"))??;
+    store.apply_window_warmup_to_pool(pool)?;
     let Some(profile_id) = pool.window_warmup_candidates().into_iter().next() else {
         return Ok(());
     };
@@ -95,7 +102,11 @@ async fn run_warmup_pass(pool: &AccountPool, config: &Config) -> anyhow::Result<
     else {
         return Ok(());
     };
-    warm_profile(pool, config, &profile_id, auth_manager).await
+    let result = warm_profile(pool, config, &profile_id, auth_manager).await;
+    if let Err(error) = store.synchronize(pool) {
+        debug!(error = %error, "failed to persist window warmup observation");
+    }
+    result
 }
 
 async fn warm_profile(
@@ -329,6 +340,11 @@ async fn warm_profile(
         record_failure(pool, profile_id, attempted_at, FailureKind::Noop, None);
         warn!(
             %profile_id,
+            stream_started,
+            get_primary = best_limits
+                .as_ref()
+                .and_then(|limits| limits.primary.as_ref())
+                .map(|window| window.used_percent),
             "standby window warmup completed without starting the 5h window"
         );
         return Ok(());

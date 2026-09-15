@@ -100,7 +100,7 @@ impl AccountRequestProcessor {
                     if !value.is_empty() { return Err(invalid_request("Usage: /account auto")); }
                     None
                 } else { Some(view::resolve(&pool, value).map_err(invalid_request)?.profile_id.clone()) };
-                self.use_account_pool_response(codex_app_server_protocol::AccountPoolUseParams { profile_id, force: false }).await?;
+                self.use_account_pool_response(codex_app_server_protocol::AccountPoolUseParams { profile_id, force: true }).await?;
                 pool = self.get_account_pool_response().await?;
                 let label = pool.accounts.iter().find(|account| account.is_active)
                     .map(view::label).unwrap_or_else(|| "Account".into());

@@ -8,6 +8,7 @@ use crate::AccountPool;
 use crate::AccountPoolError;
 use crate::AccountPoolExternalAuth;
 use crate::AccountProfile;
+use crate::AccountProfileId;
 use crate::AccountProfileStore;
 use crate::AccountProfileStoreError;
 use crate::AccountRuntimeState;
@@ -34,6 +35,7 @@ pub struct AccountPoolRuntime {
     pool: Arc<AccountPool>,
     store: AccountProfileStore,
     runtime_state_store: AccountRuntimeStateStore,
+    auth_config: AuthConfig,
     outer_auth_manager: Arc<AuthManager>,
     profile_issues: Vec<AccountPoolRuntimeProfileIssue>,
     runtime_state_issue: Option<String>,
@@ -122,40 +124,12 @@ impl AccountPoolRuntime {
         let pool = Arc::new(AccountPool::new());
         let mut profile_issues = Vec::new();
         for profile in profiles {
-            let mut profile_auth_config = auth_config.clone();
-            profile_auth_config.codex_home = profile.credential_home.clone();
-            let manager = AuthManager::shared_from_auth_config(
-                profile_auth_config,
-                /*enable_codex_api_key_env*/ false,
-            )
-            .await?;
-
-            if manager.is_workload_identity_selected() {
-                return Err(AccountPoolRuntimeError::WorkloadIdentitySelected);
-            }
-
-            // A disabled profile keeps its slot without an auth probe: the user parked it on
-            // purpose and its credentials must not be touched until it is re-enabled.
-            if profile.disabled {
-                pool.register(profile, manager)?;
-                continue;
-            }
-
-            match manager.auth().await {
-                Some(auth) if auth.is_chatgpt_auth() => {
-                    pool.register(profile, manager)?;
+            match materialize_profile(&pool, &auth_config, profile).await? {
+                MaterializeProfile::Registered | MaterializeProfile::Duplicate => {}
+                MaterializeProfile::Unsupported(issue) => profile_issues.push(issue),
+                MaterializeProfile::WorkloadIdentity => {
+                    return Err(AccountPoolRuntimeError::WorkloadIdentitySelected);
                 }
-                Some(auth) => profile_issues.push(AccountPoolRuntimeProfileIssue {
-                    profile,
-                    reason: format!(
-                        "profile uses unsupported auth mode {:?}; native subscription pooling requires ChatGPT auth",
-                        auth.api_auth_mode()
-                    ),
-                }),
-                None => profile_issues.push(AccountPoolRuntimeProfileIssue {
-                    profile,
-                    reason: "profile has no usable stored authentication".to_string(),
-                }),
             }
         }
 
@@ -191,12 +165,60 @@ impl AccountPoolRuntime {
             pool,
             store,
             runtime_state_store,
+            auth_config,
             outer_auth_manager,
             profile_issues,
             runtime_state_issue,
             auth_sync_task,
             keepalive_task,
         })
+    }
+
+    /// Registers Ready profiles that appeared on disk after this process installed the pool.
+    ///
+    /// Long-lived TUI/app-server daemons otherwise keep serving the startup snapshot, so
+    /// `codex account add` is invisible to `/account` until restart.
+    pub async fn sync_missing_profiles(
+        &self,
+    ) -> Result<Vec<AccountProfileId>, AccountPoolRuntimeError> {
+        let known = self
+            .pool
+            .snapshots()
+            .into_iter()
+            .map(|snapshot| snapshot.profile.id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut added = Vec::new();
+        for profile in self.store.load_profiles()? {
+            if known.contains(&profile.id) {
+                continue;
+            }
+            let id = profile.id.clone();
+            match materialize_profile(&self.pool, &self.auth_config, profile).await? {
+                MaterializeProfile::Registered => added.push(id),
+                MaterializeProfile::Duplicate => {}
+                MaterializeProfile::Unsupported(issue) => {
+                    tracing::warn!(
+                        profile_id = %issue.profile.id,
+                        reason = %issue.reason,
+                        "skipping newly added account profile"
+                    );
+                }
+                MaterializeProfile::WorkloadIdentity => {
+                    tracing::warn!(
+                        %id,
+                        "skipping newly added account profile that uses workload identity"
+                    );
+                }
+            }
+        }
+        if !added.is_empty()
+            && let Ok(state) = self.runtime_state_store.load()
+            && let Some(selected) = state.active_profile_id
+            && added.contains(&selected)
+        {
+            let _ = self.pool.activate(&selected);
+        }
+        Ok(added)
     }
 
     pub fn pool(&self) -> Arc<AccountPool> {
@@ -231,6 +253,64 @@ impl Drop for AccountPoolRuntime {
     }
 }
 
+enum MaterializeProfile {
+    Registered,
+    Duplicate,
+    Unsupported(AccountPoolRuntimeProfileIssue),
+    WorkloadIdentity,
+}
+
+async fn materialize_profile(
+    pool: &AccountPool,
+    auth_config: &AuthConfig,
+    profile: AccountProfile,
+) -> Result<MaterializeProfile, AccountPoolRuntimeError> {
+    let mut profile_auth_config = auth_config.clone();
+    profile_auth_config.codex_home = profile.credential_home.clone();
+    let manager = AuthManager::shared_from_auth_config(
+        profile_auth_config,
+        /*enable_codex_api_key_env*/ false,
+    )
+    .await?;
+
+    if manager.is_workload_identity_selected() {
+        return Ok(MaterializeProfile::WorkloadIdentity);
+    }
+
+    // A disabled profile keeps its slot without an auth probe: the user parked it on
+    // purpose and its credentials must not be touched until it is re-enabled.
+    if profile.disabled {
+        return match pool.register(profile, manager) {
+            Ok(()) => Ok(MaterializeProfile::Registered),
+            Err(AccountPoolError::DuplicateProfile(_)) => Ok(MaterializeProfile::Duplicate),
+            Err(error) => Err(error.into()),
+        };
+    }
+
+    match manager.auth().await {
+        Some(auth) if auth.is_chatgpt_auth() => match pool.register(profile, manager) {
+            Ok(()) => Ok(MaterializeProfile::Registered),
+            Err(AccountPoolError::DuplicateProfile(_)) => Ok(MaterializeProfile::Duplicate),
+            Err(error) => Err(error.into()),
+        },
+        Some(auth) => Ok(MaterializeProfile::Unsupported(
+            AccountPoolRuntimeProfileIssue {
+                profile,
+                reason: format!(
+                    "profile uses unsupported auth mode {:?}; native subscription pooling requires ChatGPT auth",
+                    auth.api_auth_mode()
+                ),
+            },
+        )),
+        None => Ok(MaterializeProfile::Unsupported(
+            AccountPoolRuntimeProfileIssue {
+                profile,
+                reason: "profile has no usable stored authentication".to_string(),
+            },
+        )),
+    }
+}
+
 fn restore_runtime_state(
     pool: &AccountPool,
     runtime_state: &AccountRuntimeState,
@@ -246,6 +326,9 @@ fn restore_runtime_state(
             continue;
         }
         pool.update_rate_limits(&profile_state.profile_id, profile_state.rate_limits.clone())?;
+        if let Some(observation) = profile_state.window_warmup.clone() {
+            let _ = pool.record_window_warmup(&profile_state.profile_id, observation);
+        }
     }
 
     // Recreate known future cooldowns before selecting the persisted active account. We use the

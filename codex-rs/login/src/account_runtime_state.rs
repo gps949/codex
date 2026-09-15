@@ -13,6 +13,7 @@ use crate::AccountPool;
 use crate::AccountPoolSnapshot;
 use crate::AccountProfileId;
 use crate::AccountRateLimits;
+use crate::WindowWarmupObservation;
 
 const ACCOUNT_RUNTIME_STATE_VERSION: u32 = 1;
 const ACCOUNT_RUNTIME_STATE_FILE: &str = "account-runtime-state.json";
@@ -42,6 +43,11 @@ pub struct AccountRuntimeProfileState {
     pub exhausted_until: Option<DateTime<Utc>>,
     #[serde(default)]
     pub rate_limits: AccountRateLimits,
+    /// Latest identity-preserving 5h-window warmup observation. Shared across
+    /// processes so two `codex` invocations do not independently retry the same
+    /// standby account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_warmup: Option<WindowWarmupObservation>,
 }
 
 /// Whether explicit selection may clear an observed cooldown for a fresh backend probe.
@@ -146,6 +152,34 @@ impl AccountRuntimeStateStore {
         self.save(&runtime_state_from_snapshots(&snapshots))
     }
 
+    /// Blocks until this process owns the home-scoped window-warmup lock.
+    pub fn lock_window_warmup(&self) -> io::Result<std::fs::File> {
+        crate::account_file::warmup_lock(&self.codex_home)
+    }
+
+    /// Copies persisted warmup observations onto a live pool without treating
+    /// empty in-memory warmup as an authoritative clear.
+    pub fn apply_window_warmup_to_pool(
+        &self,
+        pool: &AccountPool,
+    ) -> Result<(), AccountRuntimeStateError> {
+        let state = self.load()?;
+        for profile in state.profiles {
+            let Some(observation) = profile.window_warmup else {
+                continue;
+            };
+            let _ = pool.record_window_warmup(&profile.profile_id, observation);
+        }
+        Ok(())
+    }
+
+    /// Three-way merge of the live pool against disk. Use this after mutating
+    /// warmup or quota so another process sees the observation immediately.
+    pub fn synchronize(&self, pool: &AccountPool) -> Result<(), AccountRuntimeStateError> {
+        let mut previous = self.load()?;
+        self.synchronize_pool(pool, &mut previous)
+    }
+
     /// Applies external selections and merges observations as one cross-process transaction.
     pub(crate) fn synchronize_pool(
         &self,
@@ -246,6 +280,7 @@ impl AccountRuntimeStateStore {
                 profile_id: profile_id.clone(),
                 exhausted_until: None,
                 rate_limits: limits,
+                window_warmup: None,
             });
         }
         self.save_unlocked(&state)
@@ -288,6 +323,7 @@ fn runtime_state_from_snapshots(snapshots: &[AccountPoolSnapshot]) -> AccountRun
                     _ => None,
                 },
                 rate_limits: snapshot.rate_limits.clone(),
+                window_warmup: snapshot.window_warmup.clone(),
             })
             .collect(),
     }
@@ -353,6 +389,7 @@ mod tests {
                     profile_id,
                     exhausted_until: Some(Utc::now() - Duration::minutes(1)),
                     rate_limits: AccountRateLimits::default(),
+                    window_warmup: None,
                 }],
             })
             .expect("save state");
@@ -374,6 +411,7 @@ mod tests {
                 profile_id,
                 exhausted_until: Some(reset),
                 rate_limits: AccountRateLimits::default(),
+                window_warmup: None,
             }],
         };
         store.save(&state).expect("save state");
