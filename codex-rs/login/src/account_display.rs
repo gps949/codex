@@ -72,8 +72,9 @@ pub fn format_relative_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> String
 }
 
 /// After this much remaining cool-down, show "paused" instead of "retry" so long NOOP/API
-/// backoffs do not look like an urgent failing loop.
-const WARMUP_PAUSED_THRESHOLD_SECS: i64 = 30 * 60;
+/// backoffs do not look like an urgent failing loop. Must stay below the first NOOP backoff
+/// (30m); a 30m threshold flipped the first failure to "retry" after one second.
+const WARMUP_PAUSED_THRESHOLD_SECS: i64 = 5 * 60;
 
 /// Compact status line for the latest standby 5h-window warmup observation.
 pub fn format_window_warmup_status(
@@ -160,15 +161,28 @@ mod tests {
         };
         assert_eq!(format_window_warmup_status(&succeeded, now), "5h warmed");
 
-        let failed = crate::account_pool::WindowWarmupObservation {
+        let soon = crate::account_pool::WindowWarmupObservation {
             outcome: crate::account_pool::WindowWarmupOutcome::Failed,
             attempted_at: now,
-            retry_after: Some(now + chrono::Duration::minutes(15)),
+            retry_after: Some(now + chrono::Duration::minutes(2)),
             consecutive_failures: 1,
         };
         assert_eq!(
-            format_window_warmup_status(&failed, now),
-            "warmup retry in 0:15"
+            format_window_warmup_status(&soon, now),
+            "warmup retry in 0:02"
+        );
+
+        // First NOOP backoff is 30m. That must stay "paused", not flip to "retry"
+        // one second after the attempt (the previous 30m threshold caused this).
+        let first_noop = crate::account_pool::WindowWarmupObservation {
+            outcome: crate::account_pool::WindowWarmupOutcome::Failed,
+            attempted_at: now,
+            retry_after: Some(now + chrono::Duration::minutes(29)),
+            consecutive_failures: 1,
+        };
+        assert_eq!(
+            format_window_warmup_status(&first_noop, now),
+            "warmup paused in 0:29"
         );
 
         let paused = crate::account_pool::WindowWarmupObservation {

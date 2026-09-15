@@ -329,6 +329,11 @@ async fn warm_profile(
         record_failure(pool, profile_id, attempted_at, FailureKind::Noop, None);
         warn!(
             %profile_id,
+            stream_started,
+            get_primary = best_limits
+                .as_ref()
+                .and_then(|limits| limits.primary.as_ref())
+                .map(|window| window.used_percent),
             "standby window warmup completed without starting the 5h window"
         );
         return Ok(());
