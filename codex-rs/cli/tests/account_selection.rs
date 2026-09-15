@@ -5,7 +5,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 
-fn write_sample_profiles(home: &TempDir) {
+fn write_sample_profiles(home: &TempDir) -> std::io::Result<()> {
     let profiles = json!({"version": 1, "profiles": [
         {"id": "first", "label": "Work Pro", "priority": 0, "credential_location": "managed_profile", "state": "ready", "disabled": false},
         {"id": "second", "label": "Shared", "priority": 1, "credential_location": "managed_profile", "state": "ready", "disabled": false},
@@ -15,15 +15,15 @@ fn write_sample_profiles(home: &TempDir) {
     std::fs::write(
         home.path().join("account-profiles.json"),
         profiles.to_string(),
-    )
-    .unwrap();
-    std::fs::write(home.path().join("config.toml"), "").unwrap();
+    )?;
+    std::fs::write(home.path().join("config.toml"), "")?;
+    Ok(())
 }
 
 #[test]
 fn account_use_resolves_labels_and_rejects_ambiguous_or_disabled_profiles() {
     let home = TempDir::new().unwrap();
-    write_sample_profiles(&home);
+    write_sample_profiles(&home).unwrap();
     for (selector, expected) in [
         ("Work Pro", Some("first")),
         ("second", Some("second")),
@@ -57,7 +57,7 @@ fn account_use_resolves_labels_and_rejects_ambiguous_or_disabled_profiles() {
 #[test]
 fn account_set_resolves_labels_and_list_hides_profile_by_default() {
     let home = TempDir::new().unwrap();
-    write_sample_profiles(&home);
+    write_sample_profiles(&home).unwrap();
 
     let set = Command::new(cargo_bin("codex").unwrap())
         .env("CODEX_HOME", home.path())
