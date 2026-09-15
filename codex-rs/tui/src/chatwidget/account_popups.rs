@@ -85,7 +85,8 @@ impl ChatWidget {
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::ActivateAccountPoolProfile {
                     profile_id: Some(profile_id.clone()),
-                    force: false,
+                    // Explicit picker selection must probe cooling-down accounts.
+                    force: true,
                 });
             })];
             items.push(SelectionItem {

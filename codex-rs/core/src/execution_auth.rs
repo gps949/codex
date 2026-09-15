@@ -249,6 +249,9 @@ impl ExecutionAuth {
         config: &Config,
     ) -> Result<(), AccountPoolRuntimeError> {
         if let Some(runtime) = self.runtime() {
+            if let Err(error) = runtime.sync_missing_profiles().await {
+                tracing::warn!("failed to register newly added account profiles: {error}");
+            }
             let pool = runtime.pool();
             pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
             pool.set_rotation_strategy(config.account_pool.effective_rotation_strategy());

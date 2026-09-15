@@ -347,7 +347,7 @@ pub(crate) async fn run_account_use(
         std::process::exit(1);
     }
     eprintln!(
-        "Selected Codex account {} ({profile_id}). Running processes synchronize configured accounts shortly; restart a process to load newly added accounts.",
+        "Selected Codex account {} ({profile_id}). Running sessions pick up the selection shortly. Open /account (or start a new turn) to load newly added accounts.",
         record
             .profile
             .label

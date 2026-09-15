@@ -592,3 +592,51 @@ async fn explicitly_removed_root_profile_stays_out_of_pool_after_restart() {
     );
     assert!(home.path().join("auth.json").exists());
 }
+
+#[tokio::test]
+async fn installed_runtime_registers_profiles_added_after_install() {
+    let home = TempDir::new().unwrap();
+    save_auth(
+        home.path(),
+        &chatgpt_auth("root"),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .unwrap();
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    store
+        .ensure_legacy_root_profile(Some("Root".to_string()), /*priority*/ 0)
+        .unwrap();
+    let runtime = AccountPoolRuntime::install(
+        test_auth_manager(home.path()).await,
+        test_auth_config(home.path().to_path_buf()),
+        /*include_existing_root_login*/ true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(runtime.pool().snapshots().len(), 1);
+
+    let added = store
+        .allocate_profile(Some("admin".to_string()), /*priority*/ 10)
+        .unwrap();
+    save_auth(
+        &added.credential_home,
+        &chatgpt_auth("admin-account"),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .unwrap();
+    store.complete_profile(&added.id).unwrap();
+
+    let registered = runtime.sync_missing_profiles().await.unwrap();
+    assert_eq!(registered, vec![added.id.clone()]);
+    let ids = runtime
+        .pool()
+        .snapshots()
+        .into_iter()
+        .map(|snapshot| snapshot.profile.id)
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&added.id), "live pool must include {added:?}");
+    assert_eq!(ids.len(), 2);
+    assert!(runtime.sync_missing_profiles().await.unwrap().is_empty());
+}
