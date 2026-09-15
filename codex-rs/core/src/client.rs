@@ -130,6 +130,8 @@ use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
+use codex_features::Feature;
+use codex_features::Features;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
 use codex_login::auth::AgentIdentityAuthPolicy;
@@ -429,6 +431,19 @@ fn sideband_websocket_auth_headers(api_auth: &dyn AuthProvider) -> ApiHeaderMap 
     let mut headers = ApiHeaderMap::new();
     api_auth.add_auth_headers(&mut headers);
     headers
+}
+
+/// Auth policy used by interactive sessions and standby window warmup.
+///
+/// `UseAgentIdentity` is under development and default-off. Warmup must follow
+/// the same gate: otherwise a failing `/v1/agent/register` hard-stops `1+1?`
+/// while the user's actual turns still use ChatGPT bearer auth.
+pub(crate) fn agent_identity_auth_policy(features: &Features) -> AgentIdentityAuthPolicy {
+    if features.enabled(Feature::UseAgentIdentity) {
+        AgentIdentityAuthPolicy::ChatGptAuth
+    } else {
+        AgentIdentityAuthPolicy::JwtOnly
+    }
 }
 
 impl ModelClient {

@@ -21,7 +21,6 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::WindowWarmupObservation;
 use codex_login::WindowWarmupOutcome;
-use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
@@ -37,6 +36,7 @@ use tracing::debug;
 use tracing::warn;
 
 use crate::client::ModelClient;
+use crate::client::agent_identity_auth_policy;
 use crate::client_common::Prompt;
 use crate::config::Config;
 use crate::responses_metadata::CodexResponsesMetadata;
@@ -171,7 +171,7 @@ async fn warm_profile(
     let thread_id = ThreadId::new();
     let client = ModelClient::new(
         Some(Arc::clone(&auth_manager)),
-        AgentIdentityAuthPolicy::ChatGptAuth,
+        agent_identity_auth_policy(&config.features),
         thread_id,
         provider,
         SessionSource::Cli,

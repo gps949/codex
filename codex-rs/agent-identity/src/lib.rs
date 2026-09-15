@@ -384,9 +384,24 @@ pub async fn register_agent_identity(
     let response = request_builder
         .send()
         .await
-        .with_context(|| format!("failed to send agent identity registration request to {url}"))?
-        .error_for_status()
-        .with_context(|| format!("agent identity registration failed for {url}"))?
+        .with_context(|| format!("failed to send agent identity registration request to {url}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let body = if body.len() > 512 {
+            format!("{}...", body.chars().take(512).collect::<String>())
+        } else {
+            body
+        };
+        return Err(AgentIdentityRegistrationHttpError::new(
+            "agent identity registration",
+            status,
+            body,
+        )
+        .into());
+    }
+
+    let response = response
         .json::<RegisterAgentResponse>()
         .await
         .with_context(|| format!("failed to parse agent identity response from {url}"))?;
