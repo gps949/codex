@@ -187,7 +187,7 @@ pub struct WindowWarmupObservation {
 
 /// Current warmup request contract. Idle standbys with an older persisted generation are
 /// eligible immediately so a release that fixes the request is not blocked by leftover backoff.
-pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 1;
+pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 2;
 
 impl WindowWarmupObservation {
     pub fn current(

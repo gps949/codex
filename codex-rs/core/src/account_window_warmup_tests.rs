@@ -366,6 +366,20 @@ async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<
         codex_login::default_client::is_first_party_originator(originator),
         "warmup originator must be first-party, got {originator}"
     );
+    let turn_metadata: serde_json::Value = warmup
+        .headers
+        .get("x-codex-turn-metadata")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|json| serde_json::from_str(json).ok())
+        .expect("turn metadata");
+    let installation_id = turn_metadata["installation_id"]
+        .as_str()
+        .expect("installation_id");
+    assert_ne!(installation_id, "account-window-warmup");
+    assert!(
+        uuid::Uuid::parse_str(installation_id).is_ok(),
+        "warmup installation id must be a UUID, got {installation_id}"
+    );
     Ok(())
 }
 

@@ -39,8 +39,10 @@ use crate::client::ModelClient;
 use crate::client::agent_identity_auth_policy;
 use crate::client_common::Prompt;
 use crate::config::Config;
+use crate::resolve_installation_id;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
+use codex_protocol::protocol::ThreadSource;
 use codex_rollout_trace::InferenceTraceContext;
 
 const WARMUP_PROMPT: &str = "1+1?";
@@ -139,9 +141,11 @@ async fn warm_profile(
         return Ok(());
     };
 
-    let mut provider = config.model_provider.clone();
-    // Force HTTP so warmup never shares or perturbs the active session's websocket.
-    provider.supports_websockets = false;
+    // Keep the session provider as-is (including websockets). A new ModelClient /
+    // thread does not share the active session socket. Forcing HTTP was another
+    // unusable dependency: interactive Codex turns meter the 5h window and emit
+    // `codex.rate_limits` on the session websocket.
+    let provider = config.model_provider.clone();
 
     // Prefer the session model when it can start the 5h window over ordinary Responses HTTP.
     // Catalog "cheapest" used to follow gpt-5.4-mini → gpt-5.6-luna; Luna is Responses Lite
@@ -219,10 +223,19 @@ async fn warm_profile(
         },
         ..Default::default()
     };
+    // Interactive turns persist a UUID installation id and reject non-UUID files.
+    // The previous literal is not a UUID and is not a real install identity.
+    let installation_id = resolve_installation_id(&config.codex_home)
+        .await
+        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    let turn_id = uuid::Uuid::now_v7().to_string();
     let responses_metadata = CodexResponsesMetadata {
         request_kind: Some(CodexResponsesRequestKind::Turn),
+        turn_id: Some(turn_id.clone()),
+        root_turn_id: Some(turn_id),
+        thread_source: Some(ThreadSource::User),
         ..CodexResponsesMetadata::new(
-            "account-window-warmup".to_string(),
+            installation_id,
             thread_id.to_string(),
             thread_id.to_string(),
             format!("{thread_id}:warmup"),
