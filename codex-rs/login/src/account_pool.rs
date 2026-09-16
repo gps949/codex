@@ -185,8 +185,8 @@ pub struct WindowWarmupObservation {
 
 /// Written onto new warmup observations. Not used for candidate selection.
 ///
-/// 5: Session/catalog default model; failures are logged only and not persisted.
-pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 5;
+/// 6: Catalog-backed usable models only; same-pass retry if the API rejects a slug.
+pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 6;
 
 impl WindowWarmupObservation {
     pub fn current(
