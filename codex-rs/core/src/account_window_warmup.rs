@@ -298,9 +298,11 @@ async fn warm_profile(
         .is_some_and(|window| window.used_percent > 0.0);
     let stream_account_limits = stream_limits.as_ref().map(convert_rate_limits);
 
-    // If the profile became active while we were warming, avoid clobbering fresher active-session
-    // rate-limit state — but still keep stream evidence that the 5h window already started when
-    // the active cache still looks idle (otherwise mid-warmup activate silently drops success).
+    // earliest-reset can activate this profile while the POST is in flight. Pool writes are
+    // monotonic, so a 0% GET cannot unstart an active session. Do not skip GET verify or
+    // outcome recording — cold-idle Responses headers are usually 0%, and skipping here
+    // silently drops both success and NOOP (reporter: "profile became active mid-warmup"
+    // after a Luna POST, leftover Failed stays on the now-current account).
     let still_standby = pool
         .snapshots()
         .into_iter()
@@ -310,34 +312,29 @@ async fn warm_profile(
     let mut started = stream_started;
     let mut best_limits = stream_account_limits.clone();
 
-    if still_standby || stream_started {
-        if let Some(limits) = stream_account_limits.as_ref() {
-            pool.update_rate_limits(profile_id, limits.clone())?;
-            if still_standby {
-                debug!(%profile_id, "warmed standby 5h rate-limit window");
-            } else {
-                debug!(%profile_id, "kept mid-warmup stream evidence after profile activated");
-            }
-        } else if still_standby {
-            debug!(%profile_id, "warmup completed without rate-limit headers");
-        }
-
-        // Cold-idle Responses headers typically still show 0%. Retry accounts usage GET with short
-        // delays before declaring NOOP — lagging GETs were the main false "warmup retry" source.
-        if let Some(limits) =
-            refresh_rate_limits_via_get_with_retries(config, &auth, stream_started).await
-        {
-            if account_primary_started(&limits) {
-                started = true;
-            }
-            let merged = merge_account_rate_limits_monotonic(best_limits.as_ref(), limits);
-            pool.update_rate_limits(profile_id, merged.clone())?;
-            best_limits = Some(merged);
-            debug!(%profile_id, "refreshed standby rate limits after window warmup");
+    if let Some(limits) = stream_account_limits.as_ref() {
+        pool.update_rate_limits(profile_id, limits.clone())?;
+        if still_standby {
+            debug!(%profile_id, "warmed standby 5h rate-limit window");
+        } else {
+            debug!(%profile_id, "kept mid-warmup stream evidence after profile activated");
         }
     } else {
-        debug!(%profile_id, "skipping warmup rate-limit writes; profile became active mid-warmup");
-        return Ok(());
+        debug!(%profile_id, "warmup completed without rate-limit headers");
+    }
+
+    // Cold-idle Responses headers typically still show 0%. Retry accounts usage GET with short
+    // delays before declaring NOOP — lagging GETs were the main false "warmup retry" source.
+    if let Some(limits) =
+        refresh_rate_limits_via_get_with_retries(config, &auth, stream_started).await
+    {
+        if account_primary_started(&limits) {
+            started = true;
+        }
+        let merged = merge_account_rate_limits_monotonic(best_limits.as_ref(), limits);
+        pool.update_rate_limits(profile_id, merged.clone())?;
+        best_limits = Some(merged);
+        debug!(%profile_id, "refreshed standby rate limits after window warmup");
     }
 
     // Prefer local evidence over a racy pool re-read: concurrent quota sync can briefly regress
