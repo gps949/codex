@@ -50,7 +50,7 @@ fn rate_limit_snapshot(limit_id: Option<&str>, used_percent: f64) -> RateLimitSn
 #[test]
 fn catalog_driven_warmup_selection_is_available_to_core() {
     let catalog = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
-    let model = codex_models_manager::select_cheapest_warmup_model(&catalog)
+    let model = codex_models_manager::select_warmup_model(&catalog, /*preferred_slug*/ None)
         .expect("bundled catalog should expose a cheapest warmup model");
     let effort = codex_models_manager::cheapest_supported_effort(&model)
         .expect("selected warmup model should advertise at least one effort");
@@ -151,6 +151,7 @@ struct WarmupRequestFixture {
     auth_manager: Arc<AuthManager>,
     config: Config,
     register_count: Arc<AtomicUsize>,
+    server: MockServer,
     _codex_home: TempDir,
 }
 
@@ -237,6 +238,7 @@ async fn warmup_request_fixture(
         auth_manager,
         config,
         register_count,
+        server,
         _codex_home: codex_home,
     })
 }
@@ -304,5 +306,41 @@ async fn warmup_still_registers_agent_identity_when_feature_is_on() -> anyhow::R
         WindowWarmupOutcome::Failed
     );
     assert!(fixture.register_count.load(Ordering::SeqCst) >= 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<()> {
+    let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    let requests = fixture.server.received_requests().await.expect("requests");
+    let warmup = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .expect("warmup responses POST");
+    let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
+    let model = body["model"].as_str().expect("model");
+    assert_ne!(model, "gpt-5.6-luna");
+    assert!(
+        !model.contains("luna"),
+        "warmup must not send a Luna/reserve model: {model}"
+    );
+    let originator = warmup
+        .headers
+        .get("originator")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or(codex_login::default_client::DEFAULT_ORIGINATOR);
+    assert!(
+        codex_login::default_client::is_first_party_originator(originator),
+        "warmup originator must be first-party, got {originator}"
+    );
     Ok(())
 }

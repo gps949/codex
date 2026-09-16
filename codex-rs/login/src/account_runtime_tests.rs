@@ -449,12 +449,12 @@ fn idle_primary_limits() -> crate::AccountRateLimits {
 }
 
 fn failed_warmup(retry_after: chrono::DateTime<Utc>) -> WindowWarmupObservation {
-    WindowWarmupObservation {
-        outcome: WindowWarmupOutcome::Failed,
-        attempted_at: Utc::now(),
-        retry_after: Some(retry_after),
-        consecutive_failures: 1,
-    }
+    WindowWarmupObservation::current(
+        WindowWarmupOutcome::Failed,
+        Utc::now(),
+        Some(retry_after),
+        /*consecutive_failures*/ 1,
+    )
 }
 
 #[tokio::test]

@@ -52,6 +52,7 @@ pub use account_pool::AccountProfile;
 pub use account_pool::AccountProfileId;
 pub use account_pool::AccountRateLimitWindow;
 pub use account_pool::AccountRateLimits;
+pub use account_pool::CURRENT_WARMUP_REQUEST_GENERATION;
 pub use account_pool::WindowWarmupObservation;
 pub use account_pool::WindowWarmupOutcome;
 pub use account_runtime::AccountPoolRuntime;
