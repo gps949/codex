@@ -6,6 +6,7 @@ use super::step_settings::StepSettingsConstraints;
 use super::step_settings::StepSettingsUpdate;
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
+use crate::client::agent_identity_auth_policy;
 use crate::config::ConstraintError;
 use crate::context::GuardianContextMode;
 use crate::environment_selection::ThreadEnvironments;
@@ -18,7 +19,6 @@ use crate::state::ActiveTurn;
 use codex_extension_api::ExtensionDataInit;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::RouteAwareClientPool;
-use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::SharedModelProvider;
 use codex_protocol::SessionId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -1462,11 +1462,7 @@ impl Session {
                 time_provider,
                 model_client: ModelClient::new(
                     Some(Arc::clone(&auth_manager)),
-                    if config.features.enabled(Feature::UseAgentIdentity) {
-                        AgentIdentityAuthPolicy::ChatGptAuth
-                    } else {
-                        AgentIdentityAuthPolicy::JwtOnly
-                    },
+                    agent_identity_auth_policy(&config.features),
                     thread_id,
                     session_configuration.provider.info().clone(),
                     session_configuration.session_source.clone(),

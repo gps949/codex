@@ -779,6 +779,7 @@ async fn chatgpt_auth_manager(
     let auth = auth_manager.auth().await.expect("auth should load");
     AuthManager::from_auth_for_testing_with_agent_identity_authapi_base_url(
         auth,
+        codex_home.path().to_path_buf(),
         agent_identity_authapi_base_url,
     )
 }

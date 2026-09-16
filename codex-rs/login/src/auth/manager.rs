@@ -2259,6 +2259,7 @@ impl AuthManager {
     #[doc(hidden)]
     pub fn from_auth_for_testing_with_agent_identity_authapi_base_url(
         auth: CodexAuth,
+        codex_home: PathBuf,
         agent_identity_authapi_base_url: String,
     ) -> Arc<Self> {
         let cached = CachedAuth {
@@ -2267,7 +2268,7 @@ impl AuthManager {
         };
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
         Arc::new(Self {
-            codex_home: PathBuf::from("non-existent"),
+            codex_home,
             inner: RwLock::new(cached),
             auth_change_tx,
             auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
