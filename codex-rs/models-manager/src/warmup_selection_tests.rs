@@ -1,5 +1,7 @@
+use super::is_unusable_warmup_model_error;
 use super::select_default_warmup_model;
 use super::select_warmup_model;
+use super::select_warmup_models;
 use super::warmup_models_catalog;
 use super::warmup_supported_effort;
 use codex_protocol::openai_models::ModelInfo;
@@ -206,4 +208,61 @@ fn select_warmup_model_ignores_chatgpt_unsupported_session_slug() {
     assert_ne!(selected.slug, "gpt-5.2");
     assert_ne!(selected.slug, "gpt-5.5");
     assert_eq!(selected.slug, "gpt-6-astra");
+}
+
+#[test]
+fn select_warmup_models_ignores_unknown_session_slug() {
+    let catalog = ModelsResponse {
+        models: vec![
+            model(
+                "frontier",
+                /*priority*/ 1,
+                ModelVisibility::List,
+                None,
+                &[ReasoningEffort::Low],
+                None,
+            ),
+            model(
+                "spare",
+                /*priority*/ 6,
+                ModelVisibility::List,
+                None,
+                &[ReasoningEffort::Low],
+                None,
+            ),
+        ],
+    };
+    let selected = select_warmup_models(&catalog, Some("does-not-exist"));
+    assert_eq!(
+        selected
+            .iter()
+            .map(|model| model.slug.as_str())
+            .collect::<Vec<_>>(),
+        vec!["frontier", "spare"]
+    );
+    assert!(selected.iter().all(|model| model.slug != "does-not-exist"));
+}
+
+#[test]
+fn select_warmup_models_keeps_session_and_catalog_default() {
+    let catalog = warmup_models_catalog(/*preferred*/ None);
+    let selected = select_warmup_models(&catalog, Some("gpt-5.6-sol"));
+    assert_eq!(selected[0].slug, "gpt-5.6-sol");
+    assert_eq!(selected[1].slug, "gpt-6-astra");
+    assert!(selected.iter().all(|model| {
+        model.slug != "gpt-5.2" && model.slug != "gpt-5.5" && !model.slug.contains("luna")
+    }));
+}
+
+#[test]
+fn is_unusable_warmup_model_error_matches_chatgpt_and_missing_slugs() {
+    assert!(is_unusable_warmup_model_error(
+        "api error 400: The 'gpt-5.2' model is not supported when using Codex with a ChatGPT account."
+    ));
+    assert!(is_unusable_warmup_model_error(
+        "Model not found gpt-does-not-exist"
+    ));
+    assert!(!is_unusable_warmup_model_error(
+        "api error 400: invalid_request_error: tools must not be empty"
+    ));
 }

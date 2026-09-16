@@ -2,14 +2,14 @@
 //!
 //! Codex has no versionless GPT alias (the catalog does not ship a DeepSeek-style
 //! `flashthink` name). The Responses API still requires a `model` field, so "do not
-//! specify a special warmup model" means: use the live session slug when it can start
-//! the 5h ChatGPT window, otherwise the catalog picker default. Do not invent a cheap
-//! or reserved slug — a `1+1?` turn does not need a price-optimized model.
+//! specify a special warmup model" means: use a slug that already exists in the
+//! catalog we are sending against. Never synthesize a missing name and never post a
+//! reserved or ChatGPT-rejected slug.
 //!
-//! 1. Prefer the caller's current session model when it can start the 5h Codex window.
-//!    That is the same request shape interactive turns already use, including current
-//!    ChatGPT Codex models that advertise Responses Lite / `code_mode_only`.
-//! 2. Else the lowest-`priority` list-visible warmup-capable model (the picker default).
+//! Candidates, in order, all from one catalog:
+//! 1. The live session slug, only when that exact catalog entry is warmup-capable.
+//! 2. The lowest-`priority` list-visible capable model (the picker default).
+//! 3. The next lowest-priority capable list model, used only if the API rejects #1/#2.
 //!
 //! Effort follows the session reasoning setting when the selected model advertises it,
 //! otherwise the model's own `default_reasoning_level`.
@@ -33,25 +33,73 @@ pub fn select_warmup_model(
     catalog: &ModelsResponse,
     preferred_slug: Option<&str>,
 ) -> Option<ModelInfo> {
+    select_warmup_models(catalog, preferred_slug)
+        .into_iter()
+        .next()
+}
+
+/// Catalog-backed warmup candidates from a single catalog.
+///
+/// Unknown or unusable preferred slugs are ignored rather than posted. The spare
+/// entry is the next picker-default capable model so one same-pass retry can
+/// recover from an API "model not supported" / "model not found" rejection.
+pub fn select_warmup_models(
+    catalog: &ModelsResponse,
+    preferred_slug: Option<&str>,
+) -> Vec<ModelInfo> {
+    let mut selected = Vec::new();
     if let Some(slug) = preferred_slug.filter(|slug| !slug.is_empty())
         && let Some(model) = catalog
             .models
             .iter()
             .find(|model| model.slug == slug && is_warmup_capable(model))
     {
-        return Some(model.clone());
+        selected.push(model.clone());
     }
-    select_default_warmup_model(catalog)
+    if let Some(default) = select_default_warmup_model(catalog)
+        && selected
+            .iter()
+            .all(|existing| existing.slug != default.slug)
+    {
+        selected.push(default);
+    }
+    if selected.len() < 2
+        && let Some(spare) = catalog_capable_list_models(catalog)
+            .into_iter()
+            .find(|model| selected.iter().all(|existing| existing.slug != model.slug))
+    {
+        selected.push(spare);
+    }
+    selected
+}
+
+/// True when a Responses/API error means the posted slug cannot be used.
+pub fn is_unusable_warmup_model_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    if !error.contains("model") {
+        return false;
+    }
+    error.contains("not supported when using codex with a chatgpt account")
+        || error.contains("model not found")
+        || error.contains("unknown model")
+        || error.contains("does not exist")
+        || error.contains("is not supported")
 }
 
 /// Select the catalog picker-default warmup-capable model.
 fn select_default_warmup_model(catalog: &ModelsResponse) -> Option<ModelInfo> {
-    catalog
+    catalog_capable_list_models(catalog).into_iter().next()
+}
+
+fn catalog_capable_list_models(catalog: &ModelsResponse) -> Vec<ModelInfo> {
+    let mut models: Vec<ModelInfo> = catalog
         .models
         .iter()
         .filter(|model| is_warmup_eligible(model))
-        .min_by_key(|model| model.priority)
         .cloned()
+        .collect();
+    models.sort_by_key(|model| model.priority);
+    models
 }
 
 /// Reasoning effort for a warmup turn: session preference when advertised, else the

@@ -153,6 +153,7 @@ async fn warmup_request_fixture_with_primary_used_percent(
             ev_response_created("resp-warmup"),
             ev_completed("resp-warmup"),
         ]),
+        /*first_unusable_model_message*/ None,
     )
     .await
 }
@@ -161,6 +162,7 @@ async fn warmup_request_fixture_with_sse(
     enable_agent_identity: bool,
     primary_used_percent: Option<&'static str>,
     sse_body: String,
+    first_unusable_model_message: Option<&'static str>,
 ) -> anyhow::Result<WarmupRequestFixture> {
     let server = MockServer::start().await;
     let register_count = Arc::new(AtomicUsize::new(0));
@@ -182,9 +184,23 @@ async fn warmup_request_fixture_with_sse(
             .insert_header("x-codex-primary-used-percent", used_percent)
             .insert_header("x-codex-primary-window-minutes", "300");
     }
+    let response_hits = Arc::new(AtomicUsize::new(0));
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
-        .respond_with(responses)
+        .respond_with(move |_request: &wiremock::Request| {
+            let attempt = response_hits.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0
+                && let Some(message) = first_unusable_model_message
+            {
+                return ResponseTemplate::new(/*status*/ 400).set_body_json(serde_json::json!({
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": message,
+                    }
+                }));
+            }
+            responses.clone()
+        })
         .mount(&server)
         .await;
 
@@ -429,6 +445,75 @@ async fn warmup_posts_session_model_when_chatgpt_capable() -> anyhow::Result<()>
 }
 
 #[tokio::test]
+async fn warmup_does_not_post_unknown_session_slug() -> anyhow::Result<()> {
+    let mut fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+    fixture.config.model = Some("does-not-exist".to_string());
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    let requests = fixture.server.received_requests().await.expect("requests");
+    let warmup = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .expect("warmup responses POST");
+    let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
+    let model = body["model"].as_str().expect("model");
+    assert_ne!(model, "does-not-exist");
+    assert_ne!(model, "gpt-5.2");
+    assert_ne!(model, "gpt-5.5");
+    assert!(!model.contains("luna"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_retries_catalog_default_after_unusable_model_error() -> anyhow::Result<()> {
+    let mut fixture = warmup_request_fixture_with_sse(
+        /*enable_agent_identity*/ false,
+        /*primary_used_percent*/ Some("1.0"),
+        sse(vec![
+            ev_response_created("resp-warmup"),
+            ev_completed("resp-warmup"),
+        ]),
+        Some("The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."),
+    )
+    .await?;
+    fixture.config.model = Some("gpt-5.6-sol".to_string());
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    let requests = fixture.server.received_requests().await.expect("requests");
+    let models: Vec<String> = requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .map(|request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).expect("body");
+            body["model"].as_str().expect("model").to_string()
+        })
+        .collect();
+    assert_eq!(
+        models,
+        vec!["gpt-5.6-sol".to_string(), "gpt-6-astra".to_string()]
+    );
+    assert_eq!(
+        warmup_outcome(&fixture.pool, &fixture.profile_id),
+        WindowWarmupOutcome::Succeeded
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn warmup_get_verifies_after_profile_becomes_active() -> anyhow::Result<()> {
     let fixture = warmup_request_fixture_idle_stream(/*enable_agent_identity*/ false).await?;
     Mock::given(method("GET"))
@@ -487,6 +572,7 @@ async fn warmup_get_verifies_after_tool_call_without_completed() -> anyhow::Resu
             ev_response_created("resp-warmup"),
             ev_function_call("call-warmup", "exec_command", r#"{"cmd":"true"}"#),
         ]),
+        /*first_unusable_model_message*/ None,
     )
     .await?;
     Mock::given(method("GET"))

@@ -6,9 +6,12 @@
 //! turn with that profile's own AuthManager. It does not call `activate` / `lease`, so the
 //! active execution identity and prompt cache stay put.
 //!
-//! A pass posts one turn, reads 5h usage, and updates rate limits when the window started.
-//! If it did not start, the attempt is logged and otherwise discarded — no Failed
-//! observation, no backoff clock. The next interval retries any profile still at 0%.
+//! A pass posts one turn with a catalog-backed ChatGPT-capable model, reads 5h
+//! usage, and updates rate limits when the window started. Unknown or reserved
+//! slugs are never posted. If the API rejects the first slug as unusable, the
+//! same pass tries the catalog default once. If the window still did not start,
+//! the attempt is logged and otherwise discarded — no Failed observation, no
+//! backoff clock. The next interval retries any profile still at 0%.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,8 +45,12 @@ use crate::account_window_warmup_request::warmup_prompt;
 use crate::account_window_warmup_request::warmup_responses_metadata;
 use crate::client::ModelClient;
 use crate::client::agent_identity_auth_policy;
+use crate::client_common::Prompt;
 use crate::config::Config;
 use crate::resolve_installation_id;
+use crate::responses_metadata::CodexResponsesMetadata;
+use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_rollout_trace::InferenceTraceContext;
 
 /// Full Codex instructions + tools take longer than the old toy prompt.
@@ -131,34 +138,15 @@ async fn warm_profile(
     // `codex.rate_limits` on the session websocket.
     let provider = config.model_provider.clone();
 
-    // Prefer the session model when it can start the 5h window. Do not invent a cheap
-    // warmup slug: catalog "cheapest" followed gpt-5.4-mini → luna, then gpt-5.2, which
-    // ChatGPT Codex rejects with 400. Codex has no versionless GPT alias; Responses still
-    // needs a model field, so the fallback is the catalog picker default.
-    let preferred_catalog =
-        codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
-    let Some(model_info) =
-        codex_models_manager::select_warmup_model(&preferred_catalog, config.model.as_deref())
-            .or_else(|| {
-                // Live catalogs can be non-empty yet have no warmup-eligible models; fall back to bundled.
-                let bundled = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
-                codex_models_manager::select_warmup_model(&bundled, config.model.as_deref())
-            })
-    else {
-        warn!(%profile_id, "standby window warmup skipped: empty model catalog");
+    // Use one catalog only. A missing/unusable session slug is ignored; we never
+    // synthesize a name or mix a live catalog with bundled slugs the backend may
+    // not have. If that catalog has no capable model, skip rather than guess.
+    let catalog = codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
+    let models = codex_models_manager::select_warmup_models(&catalog, config.model.as_deref());
+    if models.is_empty() {
+        warn!(%profile_id, "standby window warmup skipped: no catalog-backed ChatGPT model");
         return Ok(());
-    };
-    let effort = codex_models_manager::warmup_supported_effort(
-        &model_info,
-        config.model_reasoning_effort.as_ref(),
-    );
-    debug!(
-        %profile_id,
-        model = %model_info.slug,
-        ?effort,
-        use_responses_lite = model_info.use_responses_lite,
-        "starting standby window warmup"
-    );
+    }
     let thread_id = ThreadId::new();
     let client = ModelClient::new(
         Some(Arc::clone(&auth_manager)),
@@ -176,19 +164,6 @@ async fn warm_profile(
         /*attestation_provider*/ None,
         config.http_client_factory(),
     );
-    let session_telemetry = SessionTelemetry::new(
-        thread_id,
-        &model_info.slug,
-        &model_info.slug,
-        /*account_id*/ None,
-        /*account_email*/ None,
-        /*auth_mode*/ None,
-        warmup_originator(),
-        /*log_user_prompts*/ false,
-        "account-window-warmup".to_string(),
-        SessionSource::Cli,
-    );
-    let prompt = warmup_prompt(&model_info, config);
     // Interactive turns persist a UUID installation id and reject non-UUID files.
     // The previous literal is not a UUID and is not a real install identity.
     let installation_id = resolve_installation_id(&config.codex_home)
@@ -199,68 +174,86 @@ async fn warm_profile(
     // Share observed rate limits outside the timeout future so a late timeout can still keep
     // headers that already arrived (timeout otherwise drops them and falsely records failure).
     let observed_limits = Arc::new(tokio::sync::Mutex::new(None));
-    let warm = {
-        let observed_limits = Arc::clone(&observed_limits);
-        async move {
-            let mut session = client.new_session();
-            let mut stream = session
-                .stream(
-                    &prompt,
-                    &model_info,
-                    &session_telemetry,
-                    effort.clone(),
-                    ReasoningSummary::None,
-                    /*service_tier*/ None,
-                    &responses_metadata,
-                    &InferenceTraceContext::disabled(),
-                )
-                .await?;
-            let mut observed = None;
-            while let Some(event) = stream.next().await {
-                match event? {
-                    ResponseEvent::RateLimits(snapshot) => {
-                        let preferred = prefer_rate_limit_snapshot(observed.clone(), snapshot);
-                        observed = Some(preferred.clone());
-                        *observed_limits.lock().await = Some(preferred);
-                    }
-                    ResponseEvent::Completed { .. } => break,
-                    ResponseEvent::OutputItemDone(item) | ResponseEvent::OutputItemAdded(item)
-                        if is_warmup_tool_call(&item) =>
-                    {
-                        break;
-                    }
-                    _ => {}
-                }
+    let mut stream_limits = None;
+    for (index, model_info) in models.iter().enumerate() {
+        let effort = codex_models_manager::warmup_supported_effort(
+            model_info,
+            config.model_reasoning_effort.as_ref(),
+        );
+        debug!(
+            %profile_id,
+            model = %model_info.slug,
+            ?effort,
+            use_responses_lite = model_info.use_responses_lite,
+            "starting standby window warmup"
+        );
+        *observed_limits.lock().await = None;
+        let session_telemetry = SessionTelemetry::new(
+            thread_id,
+            &model_info.slug,
+            &model_info.slug,
+            /*account_id*/ None,
+            /*account_email*/ None,
+            /*auth_mode*/ None,
+            warmup_originator(),
+            /*log_user_prompts*/ false,
+            "account-window-warmup".to_string(),
+            SessionSource::Cli,
+        );
+        let prompt = warmup_prompt(model_info, config);
+        let stream_result = tokio::time::timeout(
+            PER_PROFILE_TIMEOUT,
+            stream_warmup_turn(
+                &client,
+                &prompt,
+                model_info,
+                &session_telemetry,
+                effort,
+                &responses_metadata,
+                &observed_limits,
+            ),
+        )
+        .await;
+        match stream_result {
+            Ok(Ok(observed)) => {
+                stream_limits = observed;
+                break;
             }
-            anyhow::Ok(observed)
-        }
-    };
-
-    let stream_result = tokio::time::timeout(PER_PROFILE_TIMEOUT, warm).await;
-    let stream_limits = match stream_result {
-        Ok(Ok(observed)) => observed,
-        Ok(Err(error)) => {
-            warn!(%profile_id, error = %error, "standby window warmup request failed");
-            return Ok(());
-        }
-        Err(_elapsed) => {
-            let partial = observed_limits.lock().await.clone();
-            if partial
-                .as_ref()
-                .and_then(|snapshot| snapshot.primary.as_ref())
-                .is_some_and(|window| window.used_percent > 0.0)
-            {
-                warn!(
-                    %profile_id,
-                    "standby window warmup timed out after rate-limit headers; keeping partial success"
-                );
-                partial
-            } else {
+            Ok(Err(error)) => {
+                let can_retry = index + 1 < models.len()
+                    && codex_models_manager::is_unusable_warmup_model_error(&error.to_string());
+                if can_retry {
+                    warn!(
+                        %profile_id,
+                        rejected_model = %model_info.slug,
+                        fallback_model = %models[index + 1].slug,
+                        error = %error,
+                        "standby window warmup rejected an unusable model; trying the catalog default"
+                    );
+                    continue;
+                }
+                warn!(%profile_id, error = %error, "standby window warmup request failed");
+                return Ok(());
+            }
+            Err(_elapsed) => {
+                let partial = observed_limits.lock().await.clone();
+                if partial
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.primary.as_ref())
+                    .is_some_and(|window| window.used_percent > 0.0)
+                {
+                    warn!(
+                        %profile_id,
+                        "standby window warmup timed out after rate-limit headers; keeping partial success"
+                    );
+                    stream_limits = partial;
+                    break;
+                }
                 warn!(%profile_id, "standby window warmup timed out");
                 return Ok(());
             }
         }
-    };
+    }
 
     let stream_started = stream_limits
         .as_ref()
@@ -338,6 +331,48 @@ async fn warm_profile(
         ),
     );
     Ok(())
+}
+
+async fn stream_warmup_turn(
+    client: &ModelClient,
+    prompt: &Prompt,
+    model_info: &ModelInfo,
+    session_telemetry: &SessionTelemetry,
+    effort: Option<ReasoningEffort>,
+    responses_metadata: &CodexResponsesMetadata,
+    observed_limits: &Arc<tokio::sync::Mutex<Option<RateLimitSnapshot>>>,
+) -> anyhow::Result<Option<RateLimitSnapshot>> {
+    let mut session = client.new_session();
+    let mut stream = session
+        .stream(
+            prompt,
+            model_info,
+            session_telemetry,
+            effort,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            responses_metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await?;
+    let mut observed = None;
+    while let Some(event) = stream.next().await {
+        match event? {
+            ResponseEvent::RateLimits(snapshot) => {
+                let preferred = prefer_rate_limit_snapshot(observed.clone(), snapshot);
+                observed = Some(preferred.clone());
+                *observed_limits.lock().await = Some(preferred);
+            }
+            ResponseEvent::Completed { .. } => break,
+            ResponseEvent::OutputItemDone(item) | ResponseEvent::OutputItemAdded(item)
+                if is_warmup_tool_call(&item) =>
+            {
+                break;
+            }
+            _ => {}
+        }
+    }
+    Ok(observed)
 }
 
 fn prefer_rate_limit_snapshot(
