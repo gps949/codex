@@ -388,7 +388,7 @@ async fn warmup_still_registers_agent_identity_when_feature_is_on() -> anyhow::R
 }
 
 #[tokio::test]
-async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<()> {
+async fn warmup_posts_chatgpt_capable_model_with_process_originator() -> anyhow::Result<()> {
     let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
 
     warm_profile(
@@ -437,10 +437,18 @@ async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<
         "warmup installation id must be a UUID, got {installation_id}"
     );
     let instructions = body["instructions"].as_str().unwrap_or("");
+    let input_text_len = body["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|part| part["text"].as_str())
+        .map(str::len)
+        .sum::<usize>();
     assert_ne!(instructions, "Reply with one short token.");
     assert!(
-        instructions.len() > 200,
-        "warmup must send real Codex instructions, got {} chars",
+        instructions.len() > 200 || input_text_len > 200,
+        "warmup must send real Codex instructions, got {} top-level chars and {input_text_len} input chars",
         instructions.len()
     );
     if let Some(tools) = body["tools"].as_array() {
