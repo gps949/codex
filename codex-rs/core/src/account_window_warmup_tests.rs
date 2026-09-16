@@ -5,6 +5,7 @@
 use super::*;
 use crate::config::ConfigBuilder;
 use codex_features::Feature;
+use codex_login::AccountProfile;
 use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use core_test_support::responses::ev_completed;
