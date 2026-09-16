@@ -166,8 +166,9 @@ pub enum WindowWarmupOutcome {
     SkippedNoAuth,
 }
 
-/// Warmup attempt persisted in `account-runtime-state.json` so UIs can show the last outcome.
+/// Warmup attempt persisted in `account-runtime-state.json`.
 /// Scheduling does not read this: a later pass retries whenever the 5h window is still 0%.
+/// New attempts only persist [`WindowWarmupOutcome::Succeeded`]. Failures stay log-only.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowWarmupObservation {
     pub outcome: WindowWarmupOutcome,
@@ -184,8 +185,8 @@ pub struct WindowWarmupObservation {
 
 /// Written onto new warmup observations. Not used for candidate selection.
 ///
-/// 4: ChatGPT-capable model selection (stop posting `gpt-5.2` / retired ChatGPT slugs).
-pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 4;
+/// 5: Session/catalog default model; failures are logged only and not persisted.
+pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 5;
 
 impl WindowWarmupObservation {
     pub fn current(
@@ -691,7 +692,7 @@ impl AccountPool {
         candidates.into_iter().map(|(_, _, id)| id).collect()
     }
 
-    /// Records a warmup attempt so UIs can show the last outcome.
+    /// Records a warmup attempt. UIs hide failure; only success is written by new attempts.
     pub fn record_window_warmup(
         &self,
         profile_id: &AccountProfileId,

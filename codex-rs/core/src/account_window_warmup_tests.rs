@@ -1,6 +1,6 @@
 //! Warmup model/effort selection lives in `codex-models-manager::warmup_selection`.
 //! Keep a thin smoke test here so core still exercises the catalog-driven path.
-//! Also cover escalating failure backoff and success-path helpers that prevent false NOOP retries.
+//! Also cover success-path helpers that prevent false NOOP retries.
 
 use super::*;
 use crate::config::ConfigBuilder;
@@ -52,8 +52,8 @@ fn rate_limit_snapshot(limit_id: Option<&str>, used_percent: f64) -> RateLimitSn
 fn catalog_driven_warmup_selection_is_available_to_core() {
     let catalog = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
     let model = codex_models_manager::select_warmup_model(&catalog, /*preferred_slug*/ None)
-        .expect("bundled catalog should expose a cheapest warmup model");
-    let effort = codex_models_manager::cheapest_supported_effort(&model)
+        .expect("bundled catalog should expose a default warmup model");
+    let effort = codex_models_manager::warmup_supported_effort(&model, /*preferred*/ None)
         .expect("selected warmup model should advertise at least one effort");
 
     assert!(
@@ -66,38 +66,8 @@ fn catalog_driven_warmup_selection_is_available_to_core() {
     assert_ne!(
         effort,
         codex_protocol::openai_models::ReasoningEffort::Minimal,
-        "bundled cheapest model currently rejects unsupported minimal effort"
+        "bundled default model currently rejects unsupported minimal effort"
     );
-}
-
-#[tokio::test]
-async fn record_failure_does_not_schedule_a_backoff() -> anyhow::Result<()> {
-    let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
-    let now = Utc::now();
-    fixture.pool.record_window_warmup(
-        &fixture.profile_id,
-        WindowWarmupObservation {
-            outcome: WindowWarmupOutcome::Failed,
-            attempted_at: now,
-            retry_after: Some(now + chrono::Duration::hours(6)),
-            consecutive_failures: 5,
-            request_generation: 0,
-        },
-    )?;
-
-    record_failure(&fixture.pool, &fixture.profile_id, now);
-
-    let observation = fixture
-        .pool
-        .snapshots()
-        .into_iter()
-        .find(|snapshot| snapshot.profile.id == fixture.profile_id)
-        .and_then(|snapshot| snapshot.window_warmup)
-        .expect("warmup observation");
-    assert_eq!(observation.outcome, WindowWarmupOutcome::Failed);
-    assert_eq!(observation.retry_after, None);
-    assert_eq!(observation.consecutive_failures, 0);
-    Ok(())
 }
 
 #[test]
@@ -292,13 +262,19 @@ fn write_chatgpt_auth_json(codex_home: &std::path::Path) {
     .expect("write auth.json");
 }
 
-fn warmup_outcome(pool: &AccountPool, profile_id: &AccountProfileId) -> WindowWarmupOutcome {
+fn warmup_outcome_opt(
+    pool: &AccountPool,
+    profile_id: &AccountProfileId,
+) -> Option<WindowWarmupOutcome> {
     pool.snapshots()
         .into_iter()
         .find(|snapshot| &snapshot.profile.id == profile_id)
         .and_then(|snapshot| snapshot.window_warmup)
         .map(|observation| observation.outcome)
-        .expect("warmup observation")
+}
+
+fn warmup_outcome(pool: &AccountPool, profile_id: &AccountProfileId) -> WindowWarmupOutcome {
+    warmup_outcome_opt(pool, profile_id).expect("warmup observation")
 }
 
 #[tokio::test]
@@ -333,10 +309,7 @@ async fn warmup_still_registers_agent_identity_when_feature_is_on() -> anyhow::R
     )
     .await?;
 
-    assert_eq!(
-        warmup_outcome(&fixture.pool, &fixture.profile_id),
-        WindowWarmupOutcome::Failed
-    );
+    assert_eq!(warmup_outcome_opt(&fixture.pool, &fixture.profile_id), None);
     assert!(fixture.register_count.load(Ordering::SeqCst) >= 1);
     Ok(())
 }

@@ -4,8 +4,11 @@
 //! backup accounts can sit idle indefinitely until failover. Every few minutes this task
 //! picks one standby whose 5h window is still unused and sends one Codex-shaped Responses
 //! turn with that profile's own AuthManager. It does not call `activate` / `lease`, so the
-//! active execution identity and prompt cache stay put. Failures are not put on a backoff
-//! clock; the next interval retries any profile that is still at 0%.
+//! active execution identity and prompt cache stay put.
+//!
+//! A pass posts one turn, reads 5h usage, and updates rate limits when the window started.
+//! If it did not start, the attempt is logged and otherwise discarded — no Failed
+//! observation, no backoff clock. The next interval retries any profile still at 0%.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,15 +122,6 @@ async fn warm_profile(
     let _ = auth_manager.reload().await;
     let Some(auth) = auth_manager.auth().await.filter(CodexAuth::is_chatgpt_auth) else {
         debug!(%profile_id, "skipping window warmup without ChatGPT auth");
-        let _ = pool.record_window_warmup(
-            profile_id,
-            WindowWarmupObservation::current(
-                WindowWarmupOutcome::SkippedNoAuth,
-                attempted_at,
-                None,
-                /*consecutive_failures*/ 0,
-            ),
-        );
         return Ok(());
     };
 
@@ -137,9 +131,10 @@ async fn warm_profile(
     // `codex.rate_limits` on the session websocket.
     let provider = config.model_provider.clone();
 
-    // Prefer the session model when it can start the 5h window. Catalog "cheapest" used to
-    // follow gpt-5.4-mini → gpt-5.6-luna (reserve) and then gpt-5.2, which ChatGPT Codex
-    // rejects with 400. Current ChatGPT models such as gpt-5.6-sol are Responses Lite.
+    // Prefer the session model when it can start the 5h window. Do not invent a cheap
+    // warmup slug: catalog "cheapest" followed gpt-5.4-mini → luna, then gpt-5.2, which
+    // ChatGPT Codex rejects with 400. Codex has no versionless GPT alias; Responses still
+    // needs a model field, so the fallback is the catalog picker default.
     let preferred_catalog =
         codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
     let Some(model_info) =
@@ -151,10 +146,12 @@ async fn warm_profile(
             })
     else {
         warn!(%profile_id, "standby window warmup skipped: empty model catalog");
-        record_failure(pool, profile_id, attempted_at);
         return Ok(());
     };
-    let effort = codex_models_manager::cheapest_supported_effort(&model_info);
+    let effort = codex_models_manager::warmup_supported_effort(
+        &model_info,
+        config.model_reasoning_effort.as_ref(),
+    );
     debug!(
         %profile_id,
         model = %model_info.slug,
@@ -243,7 +240,6 @@ async fn warm_profile(
     let stream_limits = match stream_result {
         Ok(Ok(observed)) => observed,
         Ok(Err(error)) => {
-            record_failure(pool, profile_id, attempted_at);
             warn!(%profile_id, error = %error, "standby window warmup request failed");
             return Ok(());
         }
@@ -260,7 +256,6 @@ async fn warm_profile(
                 );
                 partial
             } else {
-                record_failure(pool, profile_id, attempted_at);
                 warn!(%profile_id, "standby window warmup timed out");
                 return Ok(());
             }
@@ -315,7 +310,6 @@ async fn warm_profile(
     // Prefer local evidence over a racy pool re-read: concurrent quota sync can briefly regress
     // primary usage back to 0% after we already observed a start.
     if !started && !primary_window_started(pool, profile_id) {
-        record_failure(pool, profile_id, attempted_at);
         warn!(
             %profile_id,
             stream_started,
@@ -344,18 +338,6 @@ async fn warm_profile(
         ),
     );
     Ok(())
-}
-
-fn record_failure(pool: &AccountPool, profile_id: &AccountProfileId, attempted_at: DateTime<Utc>) {
-    let _ = pool.record_window_warmup(
-        profile_id,
-        WindowWarmupObservation::current(
-            WindowWarmupOutcome::Failed,
-            attempted_at,
-            None,
-            /*consecutive_failures*/ 0,
-        ),
-    );
 }
 
 fn prefer_rate_limit_snapshot(

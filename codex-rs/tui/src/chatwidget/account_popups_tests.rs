@@ -136,7 +136,7 @@ fn account_display_name_prefers_email_over_label_and_profile_id() {
 }
 
 #[test]
-fn idle_failed_warmup_appears_in_account_description() {
+fn idle_failed_warmup_is_hidden_in_account_description() {
     let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
     let account = AccountPoolAccount {
         profile_id: "backup".to_string(),
@@ -178,7 +178,7 @@ fn idle_failed_warmup_appears_in_account_description() {
     assert!(
         description
             .iter()
-            .any(|span| span.content.contains("warmup failed") && !span.content.contains("next")),
+            .all(|span| !span.content.contains("warmup failed")),
         "{description:?}"
     );
 }
@@ -218,7 +218,7 @@ fn started_five_hour_window_hides_warmup_failure() {
 }
 
 #[test]
-fn active_account_still_shows_warmup_failure() {
+fn active_account_hides_leftover_warmup_failure() {
     let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
     let account = AccountPoolAccount {
         profile_id: "backup".to_string(),
@@ -246,7 +246,7 @@ fn active_account_still_shows_warmup_failure() {
     assert!(
         description
             .iter()
-            .any(|span| span.content.contains("warmup failed") && !span.content.contains("next")),
+            .all(|span| !span.content.contains("warmup failed")),
         "{description:?}"
     );
 }

@@ -9,10 +9,9 @@ pub mod warmup_selection;
 
 pub use codex_protocol::auth::AuthMode;
 pub use config::ModelsManagerConfig;
-pub use warmup_selection::cheapest_supported_effort;
-pub use warmup_selection::select_cheapest_warmup_model;
 pub use warmup_selection::select_warmup_model;
 pub use warmup_selection::warmup_models_catalog;
+pub use warmup_selection::warmup_supported_effort;
 
 /// Load the bundled model catalog shipped with `codex-models-manager`.
 pub fn bundled_models_response()
