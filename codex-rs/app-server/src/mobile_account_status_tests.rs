@@ -88,7 +88,7 @@ fn mobile_account_detail_marks_idle_primary_window_not_started() {
 }
 
 #[test]
-fn mobile_account_detail_includes_warmup_status() {
+fn mobile_account_detail_hides_warmup_failure() {
     let mut pool = pool();
     pool.accounts[0].rate_limits.primary = Some(AccountPoolRateLimitWindow {
         used_percent: 0.0,
@@ -100,7 +100,8 @@ fn mobile_account_detail_includes_warmup_status() {
         retry_after: None,
     });
     let text = detail(&pool, "Work").unwrap();
-    assert!(text.contains("Warmup: warmup failed"));
+    assert!(!text.contains("Warmup:"));
+    assert!(!text.contains("warmup failed"));
     assert!(!text.contains("5h warmed"));
 }
 

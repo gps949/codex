@@ -73,45 +73,29 @@ pub fn format_relative_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> String
 
 /// Compact status line for the latest standby 5h-window warmup observation.
 ///
-/// Failed attempts use one label. paused/retry were the same Failed outcome with
-/// different remaining-time thresholds and hid that warmup had not started the window.
+/// Kept for leftover persisted outcomes. User-facing surfaces use
+/// [`visible_window_warmup_status`], which does not show these labels.
 pub fn format_window_warmup_status(
     observation: &crate::account_pool::WindowWarmupObservation,
-    now: DateTime<Utc>,
+    _now: DateTime<Utc>,
 ) -> String {
     use crate::account_pool::WindowWarmupOutcome;
     match observation.outcome {
         WindowWarmupOutcome::Succeeded => "5h warmed".to_string(),
         WindowWarmupOutcome::SkippedNoAuth => "warmup skipped (no auth)".to_string(),
-        WindowWarmupOutcome::Failed => match observation.retry_after {
-            Some(retry_after) if retry_after > now => {
-                format!(
-                    "warmup failed, next {}",
-                    format_relative_reset(retry_after, now)
-                )
-            }
-            _ => "warmup failed".to_string(),
-        },
+        WindowWarmupOutcome::Failed => "warmup failed".to_string(),
     }
 }
 
-/// User-facing warmup copy. The 5h used% line is the success signal; extra
-/// "warmed"/"paused"/"retry" labels next to `0% not started` were contradictory.
+/// User-facing warmup copy. The 5h used% line is the success signal. A failed
+/// attempt is treated as if nothing happened, so leftover Failed/Skipped labels
+/// stay off the picker and CLI.
 pub fn visible_window_warmup_status(
-    observation: &crate::account_pool::WindowWarmupObservation,
-    primary_used_percent: Option<f64>,
-    now: DateTime<Utc>,
+    _observation: &crate::account_pool::WindowWarmupObservation,
+    _primary_used_percent: Option<f64>,
+    _now: DateTime<Utc>,
 ) -> Option<String> {
-    use crate::account_pool::WindowWarmupOutcome;
-    if primary_used_percent.is_some_and(|used| used > 0.0) {
-        return None;
-    }
-    match observation.outcome {
-        WindowWarmupOutcome::Succeeded => None,
-        WindowWarmupOutcome::Failed | WindowWarmupOutcome::SkippedNoAuth => {
-            Some(format_window_warmup_status(observation, now))
-        }
-    }
+    None
 }
 
 pub fn format_plan_type_label(plan_type: Option<&str>) -> String {
@@ -175,42 +159,17 @@ mod tests {
         );
         assert_eq!(format_window_warmup_status(&succeeded, now), "5h warmed");
 
-        let soon = crate::account_pool::WindowWarmupObservation::current(
+        let failed = crate::account_pool::WindowWarmupObservation::current(
             crate::account_pool::WindowWarmupOutcome::Failed,
             now,
-            Some(now + chrono::Duration::minutes(2)),
-            /*consecutive_failures*/ 1,
+            Some(now + chrono::Duration::hours(6)),
+            /*consecutive_failures*/ 5,
         );
-        assert_eq!(
-            format_window_warmup_status(&soon, now),
-            "warmup failed, next in 0:02"
-        );
-
-        let first_noop = crate::account_pool::WindowWarmupObservation::current(
-            crate::account_pool::WindowWarmupOutcome::Failed,
-            now,
-            Some(now + chrono::Duration::minutes(29)),
-            /*consecutive_failures*/ 1,
-        );
-        assert_eq!(
-            format_window_warmup_status(&first_noop, now),
-            "warmup failed, next in 0:29"
-        );
-
-        let later = crate::account_pool::WindowWarmupObservation::current(
-            crate::account_pool::WindowWarmupOutcome::Failed,
-            now,
-            Some(now + chrono::Duration::hours(2)),
-            /*consecutive_failures*/ 2,
-        );
-        assert_eq!(
-            format_window_warmup_status(&later, now),
-            "warmup failed, next in 2:00"
-        );
+        assert_eq!(format_window_warmup_status(&failed, now), "warmup failed");
     }
 
     #[test]
-    fn visible_window_warmup_status_only_explains_idle_failures() {
+    fn visible_window_warmup_status_hides_leftover_failures() {
         let now = Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap();
         let succeeded = crate::account_pool::WindowWarmupObservation::current(
             crate::account_pool::WindowWarmupOutcome::Succeeded,
@@ -238,9 +197,8 @@ mod tests {
             None
         );
         assert_eq!(
-            visible_window_warmup_status(&failed, /*primary_used_percent*/ Some(0.0), now)
-                .as_deref(),
-            Some("warmup failed, next in 0:02")
+            visible_window_warmup_status(&failed, /*primary_used_percent*/ Some(0.0), now),
+            None
         );
     }
 }

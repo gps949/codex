@@ -1,6 +1,6 @@
 //! Warmup model/effort selection lives in `codex-models-manager::warmup_selection`.
 //! Keep a thin smoke test here so core still exercises the catalog-driven path.
-//! Also cover escalating failure backoff and success-path helpers that prevent false NOOP retries.
+//! Also cover success-path helpers that prevent false NOOP retries.
 
 use super::*;
 use crate::config::ConfigBuilder;
@@ -16,7 +16,6 @@ use core_test_support::responses::sse;
 use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 use tempfile::TempDir;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -53,55 +52,21 @@ fn rate_limit_snapshot(limit_id: Option<&str>, used_percent: f64) -> RateLimitSn
 fn catalog_driven_warmup_selection_is_available_to_core() {
     let catalog = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
     let model = codex_models_manager::select_warmup_model(&catalog, /*preferred_slug*/ None)
-        .expect("bundled catalog should expose a cheapest warmup model");
-    let effort = codex_models_manager::cheapest_supported_effort(&model)
+        .expect("bundled catalog should expose a default warmup model");
+    let effort = codex_models_manager::warmup_supported_effort(&model, /*preferred*/ None)
         .expect("selected warmup model should advertise at least one effort");
 
     assert!(
         !model.slug.is_empty(),
         "warmup model slug must come from the official catalog"
     );
+    assert_ne!(model.slug, "gpt-5.2");
+    assert_ne!(model.slug, "gpt-5.5");
+    assert!(!model.slug.contains("luna"));
     assert_ne!(
         effort,
         codex_protocol::openai_models::ReasoningEffort::Minimal,
-        "bundled cheapest model currently rejects unsupported minimal effort"
-    );
-}
-
-#[test]
-fn backoff_for_streak_escalates_hard_and_noop() {
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 1),
-        Duration::from_secs(5 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 2),
-        Duration::from_secs(15 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 3),
-        Duration::from_secs(45 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 4),
-        Duration::from_secs(3 * 60 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 5),
-        MAX_FAILURE_BACKOFF
-    );
-
-    assert_eq!(
-        backoff_for_streak(FailureKind::Noop, 1),
-        Duration::from_secs(30 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Noop, 2),
-        Duration::from_secs(2 * 60 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Noop, 3),
-        MAX_FAILURE_BACKOFF
+        "bundled default model currently rejects unsupported minimal effort"
     );
 }
 
@@ -297,13 +262,19 @@ fn write_chatgpt_auth_json(codex_home: &std::path::Path) {
     .expect("write auth.json");
 }
 
-fn warmup_outcome(pool: &AccountPool, profile_id: &AccountProfileId) -> WindowWarmupOutcome {
+fn warmup_outcome_opt(
+    pool: &AccountPool,
+    profile_id: &AccountProfileId,
+) -> Option<WindowWarmupOutcome> {
     pool.snapshots()
         .into_iter()
         .find(|snapshot| &snapshot.profile.id == profile_id)
         .and_then(|snapshot| snapshot.window_warmup)
         .map(|observation| observation.outcome)
-        .expect("warmup observation")
+}
+
+fn warmup_outcome(pool: &AccountPool, profile_id: &AccountProfileId) -> WindowWarmupOutcome {
+    warmup_outcome_opt(pool, profile_id).expect("warmup observation")
 }
 
 #[tokio::test]
@@ -338,16 +309,13 @@ async fn warmup_still_registers_agent_identity_when_feature_is_on() -> anyhow::R
     )
     .await?;
 
-    assert_eq!(
-        warmup_outcome(&fixture.pool, &fixture.profile_id),
-        WindowWarmupOutcome::Failed
-    );
+    assert_eq!(warmup_outcome_opt(&fixture.pool, &fixture.profile_id), None);
     assert!(fixture.register_count.load(Ordering::SeqCst) >= 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<()> {
+async fn warmup_posts_chatgpt_capable_model_with_process_originator() -> anyhow::Result<()> {
     let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
 
     warm_profile(
@@ -366,6 +334,8 @@ async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<
     let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
     let model = body["model"].as_str().expect("model");
     assert_ne!(model, "gpt-5.6-luna");
+    assert_ne!(model, "gpt-5.2");
+    assert_ne!(model, "gpt-5.5");
     assert!(
         !model.contains("luna"),
         "warmup must not send a Luna/reserve model: {model}"
@@ -394,26 +364,67 @@ async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<
         "warmup installation id must be a UUID, got {installation_id}"
     );
     let instructions = body["instructions"].as_str().unwrap_or("");
+    let input_text_len = body["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|part| part["text"].as_str())
+        .map(str::len)
+        .sum::<usize>();
     assert_ne!(instructions, "Reply with one short token.");
     assert!(
-        instructions.len() > 200,
-        "warmup must send real Codex instructions, got {} chars",
+        instructions.len() > 200 || input_text_len > 200,
+        "warmup must send real Codex instructions, got {} top-level chars and {input_text_len} input chars",
         instructions.len()
     );
-    let tools = body["tools"].as_array().expect("tools");
-    assert!(
-        !tools.is_empty(),
-        "warmup must send the default Codex tool harness"
-    );
-    assert!(
-        tools.iter().any(|tool| {
-            matches!(
-                tool["name"].as_str(),
-                Some("exec_command" | "apply_patch" | "update_plan")
-            )
-        }),
-        "warmup tools must include a real Codex tool, got {tools:?}"
-    );
+    if let Some(tools) = body["tools"].as_array() {
+        assert!(
+            !tools.is_empty(),
+            "warmup must send the default Codex tool harness"
+        );
+        assert!(
+            tools.iter().any(|tool| {
+                matches!(
+                    tool["name"].as_str(),
+                    Some("exec_command" | "apply_patch" | "update_plan")
+                )
+            }),
+            "warmup tools must include a real Codex tool, got {tools:?}"
+        );
+    } else {
+        let input = body["input"].as_array().expect("lite input");
+        assert!(
+            input.iter().any(|item| item["type"] == "additional_tools"
+                && item["tools"]
+                    .as_array()
+                    .is_some_and(|tools| !tools.is_empty())),
+            "lite warmup must still send tools in input, got {input:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_posts_session_model_when_chatgpt_capable() -> anyhow::Result<()> {
+    let mut fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+    fixture.config.model = Some("gpt-5.6-sol".to_string());
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    let requests = fixture.server.received_requests().await.expect("requests");
+    let warmup = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .expect("warmup responses POST");
+    let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
+    assert_eq!(body["model"].as_str(), Some("gpt-5.6-sol"));
     Ok(())
 }
 
