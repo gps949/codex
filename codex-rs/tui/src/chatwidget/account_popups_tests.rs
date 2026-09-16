@@ -198,7 +198,7 @@ fn active_account_still_shows_warmup_failure() {
     assert!(
         description
             .iter()
-            .any(|span| span.content.contains("warmup retry")),
+            .any(|span| span.content.contains("warmup failed, next in 0:01")),
         "{description:?}"
     );
 }

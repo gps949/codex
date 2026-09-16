@@ -71,12 +71,10 @@ pub fn format_relative_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> String
     format!("in {}", format_reset_countdown(remaining_seconds as u64))
 }
 
-/// After this much remaining cool-down, show "paused" instead of "retry" so long NOOP/API
-/// backoffs do not look like an urgent failing loop. Must stay below the first NOOP backoff
-/// (30m); a 30m threshold flipped the first failure to "retry" after one second.
-const WARMUP_PAUSED_THRESHOLD_SECS: i64 = 5 * 60;
-
 /// Compact status line for the latest standby 5h-window warmup observation.
+///
+/// Failed attempts use one label. paused/retry were the same Failed outcome with
+/// different remaining-time thresholds and hid that warmup had not started the window.
 pub fn format_window_warmup_status(
     observation: &crate::account_pool::WindowWarmupObservation,
     now: DateTime<Utc>,
@@ -87,13 +85,10 @@ pub fn format_window_warmup_status(
         WindowWarmupOutcome::SkippedNoAuth => "warmup skipped (no auth)".to_string(),
         WindowWarmupOutcome::Failed => match observation.retry_after {
             Some(retry_after) if retry_after > now => {
-                let remaining = retry_after.signed_duration_since(now).num_seconds();
-                let label = if remaining >= WARMUP_PAUSED_THRESHOLD_SECS {
-                    "warmup paused"
-                } else {
-                    "warmup retry"
-                };
-                format!("{label} {}", format_relative_reset(retry_after, now))
+                format!(
+                    "warmup failed, next {}",
+                    format_relative_reset(retry_after, now)
+                )
             }
             _ => "warmup failed".to_string(),
         },
@@ -169,11 +164,9 @@ mod tests {
         );
         assert_eq!(
             format_window_warmup_status(&soon, now),
-            "warmup retry in 0:02"
+            "warmup failed, next in 0:02"
         );
 
-        // First NOOP backoff is 30m. That must stay "paused", not flip to "retry"
-        // one second after the attempt (the previous 30m threshold caused this).
         let first_noop = crate::account_pool::WindowWarmupObservation::current(
             crate::account_pool::WindowWarmupOutcome::Failed,
             now,
@@ -182,18 +175,18 @@ mod tests {
         );
         assert_eq!(
             format_window_warmup_status(&first_noop, now),
-            "warmup paused in 0:29"
+            "warmup failed, next in 0:29"
         );
 
-        let paused = crate::account_pool::WindowWarmupObservation::current(
+        let later = crate::account_pool::WindowWarmupObservation::current(
             crate::account_pool::WindowWarmupOutcome::Failed,
             now,
             Some(now + chrono::Duration::hours(2)),
             /*consecutive_failures*/ 2,
         );
         assert_eq!(
-            format_window_warmup_status(&paused, now),
-            "warmup paused in 2:00"
+            format_window_warmup_status(&later, now),
+            "warmup failed, next in 2:00"
         );
     }
 }
