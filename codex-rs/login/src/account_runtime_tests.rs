@@ -458,7 +458,7 @@ fn failed_warmup(retry_after: chrono::DateTime<Utc>) -> WindowWarmupObservation 
 }
 
 #[tokio::test]
-async fn second_pool_honors_persisted_window_warmup_backoff() {
+async fn second_pool_restores_persisted_window_warmup_outcome() {
     let home = TempDir::new().unwrap();
     let writer = AccountPool::new();
     let reader = AccountPool::new();
@@ -501,14 +501,15 @@ async fn second_pool_honors_persisted_window_warmup_backoff() {
             .map(|observation| observation.outcome),
         Some(WindowWarmupOutcome::Failed)
     );
-    assert!(
-        reader.window_warmup_candidates().is_empty(),
-        "a second Codex process must inherit warmup backoff from disk"
+    assert_eq!(
+        reader.window_warmup_candidates(),
+        vec![second.clone()],
+        "a persisted Failed outcome must not block the next interval when 5h is still 0%"
     );
 }
 
 #[tokio::test]
-async fn restore_runtime_state_reapplies_window_warmup_backoff() {
+async fn restore_runtime_state_keeps_idle_warmup_candidates() {
     let pool = AccountPool::new();
     let first = profile("first", 0);
     let second = profile("second", 10);
@@ -545,7 +546,7 @@ async fn restore_runtime_state_reapplies_window_warmup_backoff() {
         },
     )
     .unwrap();
-    assert!(pool.window_warmup_candidates().is_empty());
+    assert_eq!(pool.window_warmup_candidates(), vec![second.id]);
 }
 
 #[tokio::test]

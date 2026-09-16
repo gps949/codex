@@ -166,27 +166,23 @@ pub enum WindowWarmupOutcome {
     SkippedNoAuth,
 }
 
-/// Warmup attempt persisted in `account-runtime-state.json` so UIs can show status
-/// and every Codex process on this home honors the same backoff.
+/// Warmup attempt persisted in `account-runtime-state.json` so UIs can show the last outcome.
+/// Scheduling does not read this: a later pass retries whenever the 5h window is still 0%.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowWarmupObservation {
     pub outcome: WindowWarmupOutcome,
     pub attempted_at: DateTime<Utc>,
-    /// When set and still in the future, this profile is skipped by warmup candidate selection.
+    /// Leftover field from the old backoff clock. New attempts leave this unset.
     pub retry_after: Option<DateTime<Utc>>,
-    /// Consecutive Failed outcomes for this profile (resets on success / no-auth skip).
-    /// Used to escalate backoff so NOOP/API failures do not paint "warmup retry" every few minutes.
+    /// Leftover streak field from the old backoff clock. New attempts leave this at 0.
     #[serde(default)]
     pub consecutive_failures: u32,
-    /// Bumped when the warmup request contract changes (auth policy, model class, originator).
-    /// Older persisted failures must not keep idle standbys in a multi-hour backoff after the
-    /// request itself was fixed. Missing values deserialize as 0.
+    /// Request-contract generation written on new attempts. Scheduling ignores it.
     #[serde(default)]
     pub request_generation: u32,
 }
 
-/// Current warmup request contract. Idle standbys with an older persisted generation are
-/// eligible immediately so a release that fixes the request is not blocked by leftover backoff.
+/// Written onto new warmup observations. Not used for candidate selection.
 ///
 /// 4: ChatGPT-capable model selection (stop posting `gpt-5.2` / retired ChatGPT slugs).
 pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 4;
@@ -675,21 +671,6 @@ impl AccountPool {
                         None => true,
                         Some(window) => is_idle_primary_five_hour_window(window),
                     }
-                    && account.window_warmup.as_ref().is_none_or(|observation| {
-                        match observation.outcome {
-                            // Keep successful warmups out of the queue even if a lagging quota
-                            // probe temporarily shows primary back at 0%.
-                            WindowWarmupOutcome::Succeeded => false,
-                            _ if observation.request_generation
-                                < CURRENT_WARMUP_REQUEST_GENERATION =>
-                            {
-                                true
-                            }
-                            _ => observation
-                                .retry_after
-                                .is_none_or(|retry_after| retry_after <= now),
-                        }
-                    })
             })
             .map(|account| {
                 // Probe unknown quota before known-idle so we learn state sooner.
@@ -710,7 +691,7 @@ impl AccountPool {
         candidates.into_iter().map(|(_, _, id)| id).collect()
     }
 
-    /// Records a warmup attempt so UIs can show status and subsequent passes honor backoff.
+    /// Records a warmup attempt so UIs can show the last outcome.
     pub fn record_window_warmup(
         &self,
         profile_id: &AccountProfileId,
@@ -723,8 +704,8 @@ impl AccountPool {
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
         let succeeded = matches!(observation.outcome, WindowWarmupOutcome::Succeeded);
         account.window_warmup = Some(observation);
-        // A successful warmup necessarily starts the 5h window (`used > 0`). Keep that
-        // observation so a lagging 0% GET does not re-queue the same profile.
+        // Keep Succeeded when usage later looks started so a lagging 0% GET does not
+        // replace it with a stale Failed label. Scheduling still keys off used%.
         if !succeeded {
             clear_started_window_warmup(account);
         }
@@ -1239,8 +1220,8 @@ fn clear_started_window_warmup(account: &mut ManagedAccount) {
     if !window_started {
         return;
     }
-    // Keep Succeeded so a lagging 0% GET does not re-queue. Failure/skip are cleared once
-    // the window is known started so stale backoff text does not linger.
+    // Keep Succeeded once usage is known started. Failure/skip are cleared so stale
+    // "warmup failed" text does not linger next to a ticking 5h window.
     if matches!(
         account
             .window_warmup
@@ -1726,7 +1707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_warmup_backoff_skips_candidates_until_retry_after() {
+    async fn window_warmup_candidates_retry_failed_even_with_future_retry_after() {
         let pool = AccountPool::new();
         let active = profile("active", 0);
         let idle = profile("idle", 10);
@@ -1758,31 +1739,11 @@ mod tests {
             WindowWarmupObservation::current(
                 WindowWarmupOutcome::Failed,
                 now,
-                Some(now + chrono::Duration::minutes(15)),
-                /*consecutive_failures*/ 0,
+                Some(now + chrono::Duration::hours(6)),
+                /*consecutive_failures*/ 5,
             ),
         )
-        .expect("record failure");
-        assert!(pool.window_warmup_candidates().is_empty());
-        assert_eq!(
-            pool.snapshots()
-                .into_iter()
-                .find(|snapshot| snapshot.profile.id == idle.id)
-                .and_then(|snapshot| snapshot.window_warmup)
-                .map(|observation| observation.outcome),
-            Some(WindowWarmupOutcome::Failed)
-        );
-
-        pool.record_window_warmup(
-            &idle.id,
-            WindowWarmupObservation::current(
-                WindowWarmupOutcome::Failed,
-                now,
-                Some(now - chrono::Duration::seconds(1)),
-                /*consecutive_failures*/ 0,
-            ),
-        )
-        .expect("record expired backoff");
+        .expect("record leftover failure");
         assert_eq!(pool.window_warmup_candidates(), vec![idle.id]);
     }
 
@@ -1827,7 +1788,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_warmup_candidates_skip_succeeded_even_when_primary_idle() {
+    async fn window_warmup_candidates_retry_succeeded_when_primary_still_idle() {
         let pool = AccountPool::new();
         let active = profile("active", 0);
         let idle = profile("idle", 10);
@@ -1859,14 +1820,15 @@ mod tests {
             WindowWarmupObservation::current(
                 WindowWarmupOutcome::Succeeded,
                 now,
-                Some(now - chrono::Duration::minutes(1)),
+                None,
                 /*consecutive_failures*/ 0,
             ),
         )
         .expect("record succeeded");
-        assert!(
-            pool.window_warmup_candidates().is_empty(),
-            "succeeded warmup must not re-queue when primary still looks idle"
+        assert_eq!(
+            pool.window_warmup_candidates(),
+            vec![idle.id],
+            "5h still at 0% must be retried even after a Succeeded observation"
         );
     }
 

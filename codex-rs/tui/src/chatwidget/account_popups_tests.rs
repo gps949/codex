@@ -178,7 +178,7 @@ fn idle_failed_warmup_appears_in_account_description() {
     assert!(
         description
             .iter()
-            .any(|span| span.content.contains("warmup failed, next in 0:01")),
+            .any(|span| span.content.contains("warmup failed") && !span.content.contains("next")),
         "{description:?}"
     );
 }
@@ -246,7 +246,7 @@ fn active_account_still_shows_warmup_failure() {
     assert!(
         description
             .iter()
-            .any(|span| span.content.contains("warmup failed, next in 0:01")),
+            .any(|span| span.content.contains("warmup failed") && !span.content.contains("next")),
         "{description:?}"
     );
 }

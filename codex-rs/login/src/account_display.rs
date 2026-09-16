@@ -73,25 +73,17 @@ pub fn format_relative_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> String
 
 /// Compact status line for the latest standby 5h-window warmup observation.
 ///
-/// Failed attempts use one label. paused/retry were the same Failed outcome with
-/// different remaining-time thresholds and hid that warmup had not started the window.
+/// Failed attempts use one label. The next try is the regular interval whenever 5h
+/// is still 0%, so this string does not invent a backoff countdown.
 pub fn format_window_warmup_status(
     observation: &crate::account_pool::WindowWarmupObservation,
-    now: DateTime<Utc>,
+    _now: DateTime<Utc>,
 ) -> String {
     use crate::account_pool::WindowWarmupOutcome;
     match observation.outcome {
         WindowWarmupOutcome::Succeeded => "5h warmed".to_string(),
         WindowWarmupOutcome::SkippedNoAuth => "warmup skipped (no auth)".to_string(),
-        WindowWarmupOutcome::Failed => match observation.retry_after {
-            Some(retry_after) if retry_after > now => {
-                format!(
-                    "warmup failed, next {}",
-                    format_relative_reset(retry_after, now)
-                )
-            }
-            _ => "warmup failed".to_string(),
-        },
+        WindowWarmupOutcome::Failed => "warmup failed".to_string(),
     }
 }
 
@@ -175,38 +167,13 @@ mod tests {
         );
         assert_eq!(format_window_warmup_status(&succeeded, now), "5h warmed");
 
-        let soon = crate::account_pool::WindowWarmupObservation::current(
+        let failed = crate::account_pool::WindowWarmupObservation::current(
             crate::account_pool::WindowWarmupOutcome::Failed,
             now,
-            Some(now + chrono::Duration::minutes(2)),
-            /*consecutive_failures*/ 1,
+            Some(now + chrono::Duration::hours(6)),
+            /*consecutive_failures*/ 5,
         );
-        assert_eq!(
-            format_window_warmup_status(&soon, now),
-            "warmup failed, next in 0:02"
-        );
-
-        let first_noop = crate::account_pool::WindowWarmupObservation::current(
-            crate::account_pool::WindowWarmupOutcome::Failed,
-            now,
-            Some(now + chrono::Duration::minutes(29)),
-            /*consecutive_failures*/ 1,
-        );
-        assert_eq!(
-            format_window_warmup_status(&first_noop, now),
-            "warmup failed, next in 0:29"
-        );
-
-        let later = crate::account_pool::WindowWarmupObservation::current(
-            crate::account_pool::WindowWarmupOutcome::Failed,
-            now,
-            Some(now + chrono::Duration::hours(2)),
-            /*consecutive_failures*/ 2,
-        );
-        assert_eq!(
-            format_window_warmup_status(&later, now),
-            "warmup failed, next in 2:00"
-        );
+        assert_eq!(format_window_warmup_status(&failed, now), "warmup failed");
     }
 
     #[test]
@@ -240,7 +207,7 @@ mod tests {
         assert_eq!(
             visible_window_warmup_status(&failed, /*primary_used_percent*/ Some(0.0), now)
                 .as_deref(),
-            Some("warmup failed, next in 0:02")
+            Some("warmup failed")
         );
     }
 }

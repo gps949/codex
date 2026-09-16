@@ -16,7 +16,6 @@ use core_test_support::responses::sse;
 use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 use tempfile::TempDir;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -71,45 +70,8 @@ fn catalog_driven_warmup_selection_is_available_to_core() {
     );
 }
 
-#[test]
-fn backoff_for_streak_escalates_hard_and_noop() {
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 1),
-        Duration::from_secs(5 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 2),
-        Duration::from_secs(15 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 3),
-        Duration::from_secs(45 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 4),
-        Duration::from_secs(3 * 60 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Hard, 5),
-        MAX_FAILURE_BACKOFF
-    );
-
-    assert_eq!(
-        backoff_for_streak(FailureKind::Noop, 1),
-        Duration::from_secs(30 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Noop, 2),
-        Duration::from_secs(2 * 60 * 60)
-    );
-    assert_eq!(
-        backoff_for_streak(FailureKind::Noop, 3),
-        MAX_FAILURE_BACKOFF
-    );
-}
-
 #[tokio::test]
-async fn record_failure_resets_leftover_streak_on_new_request_generation() -> anyhow::Result<()> {
+async fn record_failure_does_not_schedule_a_backoff() -> anyhow::Result<()> {
     let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
     let now = Utc::now();
     fixture.pool.record_window_warmup(
@@ -123,13 +85,7 @@ async fn record_failure_resets_leftover_streak_on_new_request_generation() -> an
         },
     )?;
 
-    record_failure(
-        &fixture.pool,
-        &fixture.profile_id,
-        now,
-        FailureKind::Hard,
-        None,
-    );
+    record_failure(&fixture.pool, &fixture.profile_id, now);
 
     let observation = fixture
         .pool
@@ -138,11 +94,9 @@ async fn record_failure_resets_leftover_streak_on_new_request_generation() -> an
         .find(|snapshot| snapshot.profile.id == fixture.profile_id)
         .and_then(|snapshot| snapshot.window_warmup)
         .expect("warmup observation");
-    assert_eq!(observation.consecutive_failures, 1);
-    assert_eq!(
-        observation.request_generation,
-        CURRENT_WARMUP_REQUEST_GENERATION
-    );
+    assert_eq!(observation.outcome, WindowWarmupOutcome::Failed);
+    assert_eq!(observation.retry_after, None);
+    assert_eq!(observation.consecutive_failures, 0);
     Ok(())
 }
 
