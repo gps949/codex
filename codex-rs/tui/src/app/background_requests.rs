@@ -893,6 +893,14 @@ pub(super) async fn fetch_account_pool(
     use codex_app_server_protocol::GetAccountParams;
     use codex_app_server_protocol::GetAccountResponse;
 
+    // `/account` must GET-refresh quotas. `account/read` always embeds a cached
+    // pool snapshot and skips those probes, so prefer experimental
+    // `accountPool/read` (TUI enables experimentalApi). Fall back to the
+    // stable snapshot if a stale daemon does not expose the method.
+    if let Ok(pool) = refresh_account_pool_quotas(request_handle.clone()).await {
+        return Ok(pool);
+    }
+
     let request_id = RequestId::String(format!("account-read-pool-{}", Uuid::new_v4()));
     let account: GetAccountResponse = request_handle
         .request_typed(ClientRequest::GetAccount {
@@ -1809,6 +1817,92 @@ mod tests {
         );
         assert_eq!(params.include_logs, true);
         assert_eq!(params.extra_log_files, Some(vec![rollout_path]));
+    }
+
+    #[tokio::test]
+    async fn fetch_account_pool_refreshes_quotas_instead_of_cached_account_read() {
+        let mut app = make_test_app().await;
+        let server = wiremock::MockServer::start().await;
+        app.config.chatgpt_base_url = server.uri();
+        app.config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
+        std::fs::write(
+            app.config.codex_home.join("config.toml"),
+            format!("chatgpt_base_url = \"{}\"\n", server.uri()),
+        )
+        .expect("write chatgpt_base_url for quota probes");
+        let credential_home = app.config.codex_home.join("auth-profiles").join("work");
+        std::fs::create_dir_all(&credential_home).expect("credential home");
+        write_chatgpt_auth(
+            &credential_home,
+            ChatGptAuthFixture::new("pool-token")
+                .account_id("account-work")
+                .email("work@example.com")
+                .plan_type("plus"),
+            AuthCredentialsStoreMode::File,
+        )
+        .expect("write pooled ChatGPT authentication");
+        std::fs::write(
+            app.config.codex_home.join("account-profiles.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 1,
+                "profiles": [{
+                    "id": "work",
+                    "label": "Work",
+                    "priority": 0,
+                    "credential_location": "managed_profile",
+                    "state": "ready",
+                    "disabled": false,
+                }],
+            }))
+            .expect("serialize account profiles"),
+        )
+        .expect("write account-profiles.json");
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/codex/usage"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer pool-token",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(/*s*/ 200).set_body_json(
+                serde_json::json!({
+                    "plan_type": "plus",
+                    "rate_limit": {
+                        "allowed": true,
+                        "limit_reached": false,
+                        "primary_window": {
+                            "used_percent": 17,
+                            "limit_window_seconds": 18000,
+                            "reset_after_seconds": 3600,
+                            "reset_at": chrono::Utc::now().timestamp() + 3600
+                        }
+                    }
+                }),
+            ))
+            .expect(/*r*/ 1)
+            .mount(&server)
+            .await;
+
+        let app_server = crate::start_embedded_app_server_for_picker(&app.config)
+            .await
+            .expect("start authenticated embedded app server");
+        let pool = fetch_account_pool(app_server.request_handle())
+            .await
+            .expect("open /account through accountPool/read");
+        let account = pool
+            .accounts
+            .iter()
+            .find(|account| account.profile_id == "work")
+            .expect("work profile");
+        assert_eq!(
+            account
+                .rate_limits
+                .primary
+                .as_ref()
+                .map(|window| window.used_percent),
+            Some(17.0)
+        );
+        server.verify().await;
     }
 
     #[test]
