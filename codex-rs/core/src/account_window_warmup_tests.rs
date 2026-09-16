@@ -61,6 +61,9 @@ fn catalog_driven_warmup_selection_is_available_to_core() {
         !model.slug.is_empty(),
         "warmup model slug must come from the official catalog"
     );
+    assert_ne!(model.slug, "gpt-5.2");
+    assert_ne!(model.slug, "gpt-5.5");
+    assert!(!model.slug.contains("luna"));
     assert_ne!(
         effort,
         codex_protocol::openai_models::ReasoningEffort::Minimal,
@@ -103,6 +106,44 @@ fn backoff_for_streak_escalates_hard_and_noop() {
         backoff_for_streak(FailureKind::Noop, 3),
         MAX_FAILURE_BACKOFF
     );
+}
+
+#[tokio::test]
+async fn record_failure_resets_leftover_streak_on_new_request_generation() -> anyhow::Result<()> {
+    let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+    let now = Utc::now();
+    fixture.pool.record_window_warmup(
+        &fixture.profile_id,
+        WindowWarmupObservation {
+            outcome: WindowWarmupOutcome::Failed,
+            attempted_at: now,
+            retry_after: Some(now + chrono::Duration::hours(6)),
+            consecutive_failures: 5,
+            request_generation: 0,
+        },
+    )?;
+
+    record_failure(
+        &fixture.pool,
+        &fixture.profile_id,
+        now,
+        FailureKind::Hard,
+        None,
+    );
+
+    let observation = fixture
+        .pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.profile.id == fixture.profile_id)
+        .and_then(|snapshot| snapshot.window_warmup)
+        .expect("warmup observation");
+    assert_eq!(observation.consecutive_failures, 1);
+    assert_eq!(
+        observation.request_generation,
+        CURRENT_WARMUP_REQUEST_GENERATION
+    );
+    Ok(())
 }
 
 #[test]
@@ -366,6 +407,8 @@ async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<
     let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
     let model = body["model"].as_str().expect("model");
     assert_ne!(model, "gpt-5.6-luna");
+    assert_ne!(model, "gpt-5.2");
+    assert_ne!(model, "gpt-5.5");
     assert!(
         !model.contains("luna"),
         "warmup must not send a Luna/reserve model: {model}"
@@ -400,20 +443,53 @@ async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<
         "warmup must send real Codex instructions, got {} chars",
         instructions.len()
     );
-    let tools = body["tools"].as_array().expect("tools");
-    assert!(
-        !tools.is_empty(),
-        "warmup must send the default Codex tool harness"
-    );
-    assert!(
-        tools.iter().any(|tool| {
-            matches!(
-                tool["name"].as_str(),
-                Some("exec_command" | "apply_patch" | "update_plan")
-            )
-        }),
-        "warmup tools must include a real Codex tool, got {tools:?}"
-    );
+    if let Some(tools) = body["tools"].as_array() {
+        assert!(
+            !tools.is_empty(),
+            "warmup must send the default Codex tool harness"
+        );
+        assert!(
+            tools.iter().any(|tool| {
+                matches!(
+                    tool["name"].as_str(),
+                    Some("exec_command" | "apply_patch" | "update_plan")
+                )
+            }),
+            "warmup tools must include a real Codex tool, got {tools:?}"
+        );
+    } else {
+        let input = body["input"].as_array().expect("lite input");
+        assert!(
+            input.iter().any(|item| item["type"] == "additional_tools"
+                && item["tools"]
+                    .as_array()
+                    .is_some_and(|tools| !tools.is_empty())),
+            "lite warmup must still send tools in input, got {input:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_posts_session_model_when_chatgpt_capable() -> anyhow::Result<()> {
+    let mut fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+    fixture.config.model = Some("gpt-5.6-sol".to_string());
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    let requests = fixture.server.received_requests().await.expect("requests");
+    let warmup = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .expect("warmup responses POST");
+    let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
+    assert_eq!(body["model"].as_str(), Some("gpt-5.6-sol"));
     Ok(())
 }
 

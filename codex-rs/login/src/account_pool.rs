@@ -187,7 +187,9 @@ pub struct WindowWarmupObservation {
 
 /// Current warmup request contract. Idle standbys with an older persisted generation are
 /// eligible immediately so a release that fixes the request is not blocked by leftover backoff.
-pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 3;
+///
+/// 4: ChatGPT-capable model selection (stop posting `gpt-5.2` / retired ChatGPT slugs).
+pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 4;
 
 impl WindowWarmupObservation {
     pub fn current(

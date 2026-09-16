@@ -172,9 +172,9 @@ fn select_cheapest_returns_none_when_only_ineligible_models_exist() {
 fn bundled_catalog_selects_upgrade_successor_of_hidden_mini_tier() {
     let catalog = warmup_models_catalog(/*preferred*/ None);
     let selected = select_cheapest_warmup_model(&catalog).expect("bundled model");
-    // gpt-5.4-mini upgrades to gpt-5.6-luna, but Luna is not warmup-capable. The
-    // cheapest remaining classic list model is currently gpt-5.2.
-    assert_eq!(selected.slug, "gpt-5.2");
+    // gpt-5.4-mini upgrades to gpt-5.6-luna (reserve, not warmup-capable). The next
+    // hidden upgrade is gpt-5.4 → gpt-5.6-terra, which ChatGPT Codex accepts.
+    assert_eq!(selected.slug, "gpt-5.6-terra");
     assert_eq!(
         cheapest_supported_effort(&selected),
         Some(ReasoningEffort::Low)
@@ -182,22 +182,17 @@ fn bundled_catalog_selects_upgrade_successor_of_hidden_mini_tier() {
 }
 
 #[test]
-fn bundled_catalog_skips_lite_and_code_mode_only_warmup_models() {
+fn bundled_catalog_skips_reserve_and_chatgpt_unsupported_warmup_models() {
     let catalog = warmup_models_catalog(/*preferred*/ None);
     let selected = select_cheapest_warmup_model(&catalog).expect("bundled model");
-    // gpt-5.4-mini upgrades to gpt-5.6-luna, but Luna is Responses Lite +
-    // code_mode_only. Warmup forces HTTP and has no code-mode host; those
-    // requests Hard-fail and paint "warmup retry" while 5h stays at 0%.
+    // Luna is a reserve slug. gpt-5.2 / gpt-5.5 400 on ChatGPT Codex even though
+    // they are list-visible and supported_in_api.
     assert_ne!(selected.slug, "gpt-5.6-luna");
+    assert_ne!(selected.slug, "gpt-5.2");
+    assert_ne!(selected.slug, "gpt-5.5");
     assert!(
-        !selected.use_responses_lite,
-        "warmup must not pick a Responses Lite model: {}",
-        selected.slug
-    );
-    assert_ne!(
-        selected.tool_mode,
-        Some(codex_protocol::openai_models::ToolMode::CodeModeOnly),
-        "warmup must not pick a code_mode_only model: {}",
+        !selected.slug.contains("luna"),
+        "warmup must not pick a Luna/reserve model: {}",
         selected.slug
     );
     assert_eq!(
@@ -210,15 +205,47 @@ fn bundled_catalog_skips_lite_and_code_mode_only_warmup_models() {
 fn select_warmup_model_prefers_capable_session_slug() {
     let catalog = warmup_models_catalog(/*preferred*/ None);
     let selected =
-        select_warmup_model(&catalog, Some("gpt-5.5")).expect("session model should win");
-    assert_eq!(selected.slug, "gpt-5.5");
-    assert!(!selected.use_responses_lite);
+        select_warmup_model(&catalog, Some("gpt-5.6-sol")).expect("session model should win");
+    assert_eq!(selected.slug, "gpt-5.6-sol");
 }
 
 #[test]
-fn select_warmup_model_ignores_lite_session_slug() {
+fn select_warmup_model_ignores_reserve_session_slug() {
     let catalog = warmup_models_catalog(/*preferred*/ None);
     let selected = select_warmup_model(&catalog, Some("gpt-5.6-luna")).expect("fallback");
     assert_ne!(selected.slug, "gpt-5.6-luna");
-    assert!(!selected.use_responses_lite);
+}
+
+#[test]
+fn select_warmup_model_ignores_chatgpt_unsupported_session_slug() {
+    let catalog = warmup_models_catalog(/*preferred*/ None);
+    let selected = select_warmup_model(&catalog, Some("gpt-5.2")).expect("fallback");
+    assert_ne!(selected.slug, "gpt-5.2");
+    assert_ne!(selected.slug, "gpt-5.5");
+}
+
+#[test]
+fn select_cheapest_skips_chatgpt_unsupported_highest_priority_list_model() {
+    let catalog = ModelsResponse {
+        models: vec![
+            model(
+                "capable",
+                /*priority*/ 7,
+                ModelVisibility::List,
+                None,
+                &[ReasoningEffort::Low],
+                None,
+            ),
+            model(
+                "gpt-5.2",
+                /*priority*/ 29,
+                ModelVisibility::List,
+                None,
+                &[ReasoningEffort::Low],
+                None,
+            ),
+        ],
+    };
+    let selected = select_cheapest_warmup_model(&catalog).expect("model");
+    assert_eq!(selected.slug, "capable");
 }

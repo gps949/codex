@@ -18,6 +18,7 @@ use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AccountRuntimeStateStore;
 use codex_login::AuthManager;
+use codex_login::CURRENT_WARMUP_REQUEST_GENERATION;
 use codex_login::CodexAuth;
 use codex_login::WindowWarmupObservation;
 use codex_login::WindowWarmupOutcome;
@@ -142,9 +143,9 @@ async fn warm_profile(
     // `codex.rate_limits` on the session websocket.
     let provider = config.model_provider.clone();
 
-    // Prefer the session model when it can start the 5h window over ordinary Responses HTTP.
-    // Catalog "cheapest" used to follow gpt-5.4-mini → gpt-5.6-luna; Luna is Responses Lite
-    // + code_mode_only, so those warmup POSTs Hard-failed and the picker kept showing retry.
+    // Prefer the session model when it can start the 5h window. Catalog "cheapest" used to
+    // follow gpt-5.4-mini → gpt-5.6-luna (reserve) and then gpt-5.2, which ChatGPT Codex
+    // rejects with 400. Current ChatGPT models such as gpt-5.6-sol are Responses Lite.
     let preferred_catalog =
         codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
     let Some(model_info) =
@@ -378,7 +379,13 @@ fn record_failure(
         .find(|snapshot| &snapshot.profile.id == profile_id)
         .and_then(|snapshot| snapshot.window_warmup)
         .filter(|observation| matches!(observation.outcome, WindowWarmupOutcome::Failed))
-        .map(|observation| observation.consecutive_failures)
+        .map(|observation| {
+            if observation.request_generation < CURRENT_WARMUP_REQUEST_GENERATION {
+                0
+            } else {
+                observation.consecutive_failures
+            }
+        })
         .unwrap_or(0);
     let consecutive_failures = previous_streak.saturating_add(1);
     let backoff =
