@@ -31,6 +31,7 @@ pub use account_display::format_primary_window_reset;
 pub use account_display::format_relative_reset;
 pub use account_display::format_reset_countdown;
 pub use account_display::format_window_warmup_status;
+pub use account_display::visible_window_warmup_status;
 pub use account_external_auth::AccountPoolExternalAuth;
 pub use account_identity::AccountLoginIdentity;
 pub use account_login::AccountLoginFlowError;

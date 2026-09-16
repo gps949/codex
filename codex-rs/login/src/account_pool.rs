@@ -187,7 +187,7 @@ pub struct WindowWarmupObservation {
 
 /// Current warmup request contract. Idle standbys with an older persisted generation are
 /// eligible immediately so a release that fixes the request is not blocked by leftover backoff.
-pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 1;
+pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 3;
 
 impl WindowWarmupObservation {
     pub fn current(
@@ -721,8 +721,8 @@ impl AccountPool {
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
         let succeeded = matches!(observation.outcome, WindowWarmupOutcome::Succeeded);
         account.window_warmup = Some(observation);
-        // A successful warmup necessarily starts the 5h window (`used > 0`). Do not immediately
-        // wipe that success observation or the picker can never show "5h warmed".
+        // A successful warmup necessarily starts the 5h window (`used > 0`). Keep that
+        // observation so a lagging 0% GET does not re-queue the same profile.
         if !succeeded {
             clear_started_window_warmup(account);
         }
@@ -1237,8 +1237,8 @@ fn clear_started_window_warmup(account: &mut ManagedAccount) {
     if !window_started {
         return;
     }
-    // Keep a successful observation so the picker can show "5h warmed". Failure/skip are cleared
-    // once the window is known started so stale backoff text does not linger.
+    // Keep Succeeded so a lagging 0% GET does not re-queue. Failure/skip are cleared once
+    // the window is known started so stale backoff text does not linger.
     if matches!(
         account
             .window_warmup

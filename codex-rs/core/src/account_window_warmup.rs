@@ -1,8 +1,8 @@
 //! Identity-preserving primary (5h) window warmup for standby account-pool profiles.
 //!
 //! ChatGPT's 5h window does not start ticking while usage stays at 0%. Under `fill_first`,
-//! backup accounts can sit idle indefinitely until failover. This task sends a tiny generating
-//! Responses request with each standby profile's own AuthManager without calling `activate` /
+//! backup accounts can sit idle indefinitely until failover. This task sends one Codex-shaped
+//! Responses turn with each standby profile's own AuthManager without calling `activate` /
 //! `lease`, so the active execution identity and prompt cache stay put.
 
 use std::sync::Arc;
@@ -24,9 +24,6 @@ use codex_login::WindowWarmupOutcome;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::models::BaseInstructions;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::SessionSource;
@@ -35,17 +32,17 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 use tracing::warn;
 
+use crate::account_window_warmup_request::is_warmup_tool_call;
+use crate::account_window_warmup_request::warmup_prompt;
+use crate::account_window_warmup_request::warmup_responses_metadata;
 use crate::client::ModelClient;
 use crate::client::agent_identity_auth_policy;
-use crate::client_common::Prompt;
 use crate::config::Config;
-use crate::responses_metadata::CodexResponsesMetadata;
-use crate::responses_metadata::CodexResponsesRequestKind;
+use crate::resolve_installation_id;
 use codex_rollout_trace::InferenceTraceContext;
 
-const WARMUP_PROMPT: &str = "1+1?";
-const WARMUP_INSTRUCTIONS: &str = "Reply with one short token.";
-const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Full Codex instructions + tools take longer than the old toy prompt.
+const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Cap for escalated cool-downs after repeated warmup failures.
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const SUCCESS_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
@@ -54,7 +51,7 @@ const EMPTY_CATALOG_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const GET_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 /// Cold-idle Responses headers usually still show 0%. Poll accounts usage a few times before
 /// declaring NOOP so lagging GETs do not produce false "warmup retry" loops.
-const GET_VERIFY_DELAYS_SECS: &[u64] = &[0, 1, 2, 4];
+const GET_VERIFY_DELAYS_SECS: &[u64] = &[0, 1, 2, 4, 8];
 const URGENT_WARMUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Give quota probes a moment to land, then start warming — do not wait a full interval.
 const INITIAL_WARMUP_SETTLE: Duration = Duration::from_secs(30);
@@ -139,9 +136,11 @@ async fn warm_profile(
         return Ok(());
     };
 
-    let mut provider = config.model_provider.clone();
-    // Force HTTP so warmup never shares or perturbs the active session's websocket.
-    provider.supports_websockets = false;
+    // Keep the session provider as-is (including websockets). A new ModelClient /
+    // thread does not share the active session socket. Forcing HTTP was another
+    // unusable dependency: interactive Codex turns meter the 5h window and emit
+    // `codex.rate_limits` on the session websocket.
+    let provider = config.model_provider.clone();
 
     // Prefer the session model when it can start the 5h window over ordinary Responses HTTP.
     // Catalog "cheapest" used to follow gpt-5.4-mini → gpt-5.6-luna; Luna is Responses Lite
@@ -203,31 +202,13 @@ async fn warm_profile(
         "account-window-warmup".to_string(),
         SessionSource::Cli,
     );
-    let prompt = Prompt {
-        input: vec![ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: WARMUP_PROMPT.to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }],
-        base_instructions: BaseInstructions {
-            text: WARMUP_INSTRUCTIONS.to_string(),
-            provenance: None,
-        },
-        ..Default::default()
-    };
-    let responses_metadata = CodexResponsesMetadata {
-        request_kind: Some(CodexResponsesRequestKind::Turn),
-        ..CodexResponsesMetadata::new(
-            "account-window-warmup".to_string(),
-            thread_id.to_string(),
-            thread_id.to_string(),
-            format!("{thread_id}:warmup"),
-        )
-    };
+    let prompt = warmup_prompt(&model_info, config);
+    // Interactive turns persist a UUID installation id and reject non-UUID files.
+    // The previous literal is not a UUID and is not a real install identity.
+    let installation_id = resolve_installation_id(&config.codex_home)
+        .await
+        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    let responses_metadata = warmup_responses_metadata(installation_id, thread_id);
 
     // Share observed rate limits outside the timeout future so a late timeout can still keep
     // headers that already arrived (timeout otherwise drops them and falsely records failure).
@@ -257,6 +238,11 @@ async fn warm_profile(
                         *observed_limits.lock().await = Some(preferred);
                     }
                     ResponseEvent::Completed { .. } => break,
+                    ResponseEvent::OutputItemDone(item) | ResponseEvent::OutputItemAdded(item)
+                        if is_warmup_tool_call(&item) =>
+                    {
+                        break;
+                    }
                     _ => {}
                 }
             }

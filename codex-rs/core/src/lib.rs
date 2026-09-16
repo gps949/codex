@@ -7,6 +7,7 @@
 
 mod account_transition;
 mod account_window_warmup;
+mod account_window_warmup_request;
 mod apply_patch;
 mod apps;
 mod client;

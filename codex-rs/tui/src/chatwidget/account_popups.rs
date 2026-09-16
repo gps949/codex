@@ -18,7 +18,7 @@ use codex_config::AccountPoolRotationStrategy;
 use codex_login::WindowWarmupObservation;
 use codex_login::WindowWarmupOutcome;
 use codex_login::format_reset_countdown;
-use codex_login::format_window_warmup_status;
+use codex_login::visible_window_warmup_status;
 use ratatui::text::Span;
 
 use super::*;
@@ -210,16 +210,15 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
         ));
     }
     if let Some(warmup) = account.window_warmup.as_ref().and_then(|warmup| {
-        // Keep failure/skip status visible on the active row so a manual switch does not look
-        // like warmup recovered. Successful warmup on the active account is noise.
-        if account.is_active && matches!(warmup.outcome, AccountPoolWindowWarmupOutcome::Succeeded)
-        {
-            return None;
-        }
-        Some(format_window_warmup_status(
+        visible_window_warmup_status(
             &protocol_warmup_to_login(warmup),
+            account
+                .rate_limits
+                .primary
+                .as_ref()
+                .map(|window| window.used_percent),
             now,
-        ))
+        )
     }) {
         parts.push(vec![warmup.dim()]);
     }
