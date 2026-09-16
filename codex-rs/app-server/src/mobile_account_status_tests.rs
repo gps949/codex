@@ -90,13 +90,18 @@ fn mobile_account_detail_marks_idle_primary_window_not_started() {
 #[test]
 fn mobile_account_detail_includes_warmup_status() {
     let mut pool = pool();
+    pool.accounts[0].rate_limits.primary = Some(AccountPoolRateLimitWindow {
+        used_percent: 0.0,
+        resets_at: Some(1_900_000_000),
+    });
     pool.accounts[0].window_warmup = Some(codex_app_server_protocol::AccountPoolWindowWarmup {
-        outcome: codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Succeeded,
+        outcome: codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Failed,
         attempted_at: 1_900_000_000,
         retry_after: None,
     });
     let text = detail(&pool, "Work").unwrap();
-    assert!(text.contains("Warmup: 5h warmed"));
+    assert!(text.contains("Warmup: warmup failed"));
+    assert!(!text.contains("5h warmed"));
 }
 
 #[test]

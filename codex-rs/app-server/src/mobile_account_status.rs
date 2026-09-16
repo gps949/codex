@@ -9,6 +9,7 @@ use codex_app_server_protocol::AccountPoolReadResponse;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_login::format_primary_window_reset;
 use codex_login::format_relative_reset;
+use codex_login::visible_window_warmup_status;
 
 pub(crate) fn pool_caption(pool: &AccountPoolReadResponse) -> Option<String> {
     pool.enabled.then(|| {
@@ -188,10 +189,17 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
             consecutive_failures: 0,
             request_generation: 0,
         };
-        lines.push(format!(
-            "Warmup: {}",
-            codex_login::format_window_warmup_status(&observation, now)
-        ));
+        if let Some(status) = visible_window_warmup_status(
+            &observation,
+            account
+                .rate_limits
+                .primary
+                .as_ref()
+                .map(|window| window.used_percent),
+            now,
+        ) {
+            lines.push(format!("Warmup: {status}"));
+        }
     }
     lines.push("Cached values remain if refresh fails.".into());
     Ok(lines.join("\n"))

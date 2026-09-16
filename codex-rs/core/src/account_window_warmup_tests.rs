@@ -10,6 +10,7 @@ use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::WindowWarmupOutcome;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::sse;
 use pretty_assertions::assert_eq;
@@ -180,6 +181,22 @@ async fn warmup_request_fixture_with_primary_used_percent(
     enable_agent_identity: bool,
     primary_used_percent: Option<&'static str>,
 ) -> anyhow::Result<WarmupRequestFixture> {
+    warmup_request_fixture_with_sse(
+        enable_agent_identity,
+        primary_used_percent,
+        sse(vec![
+            ev_response_created("resp-warmup"),
+            ev_completed("resp-warmup"),
+        ]),
+    )
+    .await
+}
+
+async fn warmup_request_fixture_with_sse(
+    enable_agent_identity: bool,
+    primary_used_percent: Option<&'static str>,
+    sse_body: String,
+) -> anyhow::Result<WarmupRequestFixture> {
     let server = MockServer::start().await;
     let register_count = Arc::new(AtomicUsize::new(0));
     let register_hits = Arc::clone(&register_count);
@@ -192,10 +209,6 @@ async fn warmup_request_fixture_with_primary_used_percent(
         .mount(&server)
         .await;
 
-    let sse_body = sse(vec![
-        ev_response_created("resp-warmup"),
-        ev_completed("resp-warmup"),
-    ]);
     let mut responses = ResponseTemplate::new(/*status*/ 200)
         .insert_header("content-type", "text/event-stream")
         .set_body_raw(sse_body, "text/event-stream");
@@ -380,6 +393,27 @@ async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<
         uuid::Uuid::parse_str(installation_id).is_ok(),
         "warmup installation id must be a UUID, got {installation_id}"
     );
+    let instructions = body["instructions"].as_str().unwrap_or("");
+    assert_ne!(instructions, "Reply with one short token.");
+    assert!(
+        instructions.len() > 200,
+        "warmup must send real Codex instructions, got {} chars",
+        instructions.len()
+    );
+    let tools = body["tools"].as_array().expect("tools");
+    assert!(
+        !tools.is_empty(),
+        "warmup must send the default Codex tool harness"
+    );
+    assert!(
+        tools.iter().any(|tool| {
+            matches!(
+                tool["name"].as_str(),
+                Some("exec_command" | "apply_patch" | "update_plan")
+            )
+        }),
+        "warmup tools must include a real Codex tool, got {tools:?}"
+    );
     Ok(())
 }
 
@@ -430,5 +464,51 @@ async fn warmup_get_verifies_after_profile_becomes_active() -> anyhow::Result<()
         .and_then(|snapshot| snapshot.rate_limits.primary)
         .map(|window| window.used_percent);
     assert_eq!(used, Some(2.0));
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_get_verifies_after_tool_call_without_completed() -> anyhow::Result<()> {
+    let fixture = warmup_request_fixture_with_sse(
+        /*enable_agent_identity*/ false,
+        /*primary_used_percent*/ None,
+        sse(vec![
+            ev_response_created("resp-warmup"),
+            ev_function_call("call-warmup", "exec_command", r#"{"cmd":"true"}"#),
+        ]),
+    )
+    .await?;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(serde_json::json!({
+                "plan_type": "plus",
+                "rate_limit": {
+                    "allowed": true,
+                    "limit_reached": false,
+                    "primary_window": {
+                        "used_percent": 2,
+                        "limit_window_seconds": 18000,
+                        "reset_after_seconds": 17000,
+                        "reset_at": 2_000_000_000
+                    }
+                }
+            })),
+        )
+        .mount(&fixture.server)
+        .await;
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    assert_eq!(
+        warmup_outcome(&fixture.pool, &fixture.profile_id),
+        WindowWarmupOutcome::Succeeded
+    );
     Ok(())
 }

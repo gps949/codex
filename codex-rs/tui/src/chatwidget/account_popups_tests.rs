@@ -136,7 +136,7 @@ fn account_display_name_prefers_email_over_label_and_profile_id() {
 }
 
 #[test]
-fn standby_warmup_status_appears_in_account_description() {
+fn idle_failed_warmup_appears_in_account_description() {
     let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
     let account = AccountPoolAccount {
         profile_id: "backup".to_string(),
@@ -164,7 +164,55 @@ fn standby_warmup_status_appears_in_account_description() {
     assert!(
         description
             .iter()
-            .any(|span| span.content.contains("5h warmed")),
+            .all(|span| !span.content.contains("5h warmed")),
+        "{description:?}"
+    );
+
+    let mut failed = account;
+    failed.window_warmup = Some(AccountPoolWindowWarmup {
+        outcome: AccountPoolWindowWarmupOutcome::Failed,
+        attempted_at: now.timestamp(),
+        retry_after: Some(now.timestamp() + 60),
+    });
+    let description = account_description(&failed, now);
+    assert!(
+        description
+            .iter()
+            .any(|span| span.content.contains("warmup failed, next in 0:01")),
+        "{description:?}"
+    );
+}
+
+#[test]
+fn started_five_hour_window_hides_warmup_failure() {
+    let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
+    let account = AccountPoolAccount {
+        profile_id: "backup".to_string(),
+        label: None,
+        priority: 10,
+        is_active: false,
+        availability: AccountPoolAvailability::Available,
+        plan_type: None,
+        email: None,
+        rate_limits: AccountPoolRateLimits {
+            primary: Some(AccountPoolRateLimitWindow {
+                used_percent: 4.0,
+                resets_at: Some(now.timestamp() + 5 * 3600),
+            }),
+            secondary: None,
+            observed_at: None,
+        },
+        window_warmup: Some(AccountPoolWindowWarmup {
+            outcome: AccountPoolWindowWarmupOutcome::Failed,
+            attempted_at: now.timestamp(),
+            retry_after: Some(now.timestamp() + 60),
+        }),
+    };
+    let description = account_description(&account, now);
+    assert!(
+        description
+            .iter()
+            .all(|span| !span.content.contains("warmup failed")),
         "{description:?}"
     );
 }

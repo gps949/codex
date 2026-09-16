@@ -521,7 +521,17 @@ pub(crate) async fn run_account_pool(
         let warmup = snapshot
             .window_warmup
             .as_ref()
-            .map(|observation| codex_login::format_window_warmup_status(observation, Utc::now()))
+            .and_then(|observation| {
+                codex_login::visible_window_warmup_status(
+                    observation,
+                    snapshot
+                        .rate_limits
+                        .primary
+                        .as_ref()
+                        .map(|window| window.used_percent),
+                    Utc::now(),
+                )
+            })
             .unwrap_or_else(|| "-".to_string());
         if show_profile {
             println!(
