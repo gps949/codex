@@ -12,6 +12,7 @@ use codex_login::WindowWarmupOutcome;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_models_once;
 use core_test_support::responses::sse;
 use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicUsize;
@@ -261,6 +262,21 @@ async fn warmup_request_fixture_with_sse(
     })
 }
 
+fn live_warmup_catalog(slug: &str) -> codex_protocol::openai_models::ModelsResponse {
+    let bundled = codex_models_manager::bundled_models_response().expect("bundled catalog");
+    let mut model = bundled
+        .models
+        .iter()
+        .find(|model| model.slug == "gpt-6-astra")
+        .cloned()
+        .expect("bundled gpt-6-astra");
+    model.slug = slug.to_string();
+    model.priority = 0;
+    codex_protocol::openai_models::ModelsResponse {
+        models: vec![model],
+    }
+}
+
 fn write_chatgpt_auth_json(codex_home: &std::path::Path) {
     let auth_json = serde_json::json!({
         "tokens": {
@@ -418,6 +434,40 @@ async fn warmup_posts_chatgpt_capable_model_with_process_originator() -> anyhow:
             "lite warmup must still send tools in input, got {input:?}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_uses_official_models_endpoint_catalog() -> anyhow::Result<()> {
+    let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+    let live_slug = "live-catalog-default";
+    mount_models_once(&fixture.server, live_warmup_catalog(live_slug)).await;
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    let requests = fixture.server.received_requests().await.expect("requests");
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.url.path().ends_with("/models")),
+        "warmup must list models via Codex GET /models, got {:?}",
+        requests
+            .iter()
+            .map(|request| request.url.path().to_string())
+            .collect::<Vec<_>>()
+    );
+    let warmup = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .expect("warmup responses POST");
+    let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
+    assert_eq!(body["model"].as_str(), Some(live_slug));
     Ok(())
 }
 

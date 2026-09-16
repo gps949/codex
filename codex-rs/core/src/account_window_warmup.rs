@@ -6,12 +6,16 @@
 //! turn with that profile's own AuthManager. It does not call `activate` / `lease`, so the
 //! active execution identity and prompt cache stay put.
 //!
-//! A pass posts one turn with a catalog-backed ChatGPT-capable model, reads 5h
+//! A pass lists models through the same `ModelsManager` path as the session
+//! picker and `codex debug models` (`GET /models`, cache then network). It then
+//! posts one turn with a ChatGPT-capable slug from that catalog, reads 5h
 //! usage, and updates rate limits when the window started. Unknown or reserved
 //! slugs are never posted. If the API rejects the first slug as unusable, the
-//! same pass tries the catalog default once. If the window still did not start,
-//! the attempt is logged and otherwise discarded — no Failed observation, no
-//! backoff clock. The next interval retries any profile still at 0%.
+//! same pass tries the catalog default once. `/models` is existence/source of
+//! truth, not a ChatGPT allowlist — gpt-5.2 still appears there. If the window
+//! still did not start, the attempt is logged and otherwise discarded — no
+//! Failed observation, no backoff clock. The next interval retries any profile
+//! still at 0%.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -138,10 +142,16 @@ async fn warm_profile(
     // `codex.rate_limits` on the session websocket.
     let provider = config.model_provider.clone();
 
-    // Use one catalog only. A missing/unusable session slug is ignored; we never
-    // synthesize a name or mix a live catalog with bundled slugs the backend may
-    // not have. If that catalog has no capable model, skip rather than guess.
-    let catalog = codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
+    // Official Codex list for this profile's auth. OnlineIfUncached matches
+    // interactive turns. Do not call get_default_model: a configured slug is
+    // returned unvalidated. One catalog only — never mix live slugs with
+    // bundled names the backend may not have.
+    let catalog = crate::thread_manager::build_models_manager(config, Arc::clone(&auth_manager))
+        .raw_model_catalog(
+            codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
+            config.http_client_factory(),
+        )
+        .await;
     let models = codex_models_manager::select_warmup_models(&catalog, config.model.as_deref());
     if models.is_empty() {
         warn!(%profile_id, "standby window warmup skipped: no catalog-backed ChatGPT model");

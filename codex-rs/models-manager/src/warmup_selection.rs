@@ -1,10 +1,13 @@
 //! Catalog-driven selection of the session/default model for standby window warmup.
 //!
-//! Codex has no versionless GPT alias (the catalog does not ship a DeepSeek-style
+//! The catalog should come from `ModelsManager::raw_model_catalog` (`GET /models`),
+//! the same official list the session picker and `codex debug models` use. Codex
+//! has no versionless GPT alias (the catalog does not ship a DeepSeek-style
 //! `flashthink` name). The Responses API still requires a `model` field, so "do not
-//! specify a special warmup model" means: use a slug that already exists in the
-//! catalog we are sending against. Never synthesize a missing name and never post a
-//! reserved or ChatGPT-rejected slug.
+//! specify a special warmup model" means: use a slug that already exists in that
+//! catalog. Never synthesize a missing name and never post a reserved or
+//! ChatGPT-rejected slug. `supported_in_api` and ChatGPT picker visibility are not
+//! a ChatGPT-usable allowlist — `/models` still lists gpt-5.2.
 //!
 //! Candidates, in order, all from one catalog:
 //! 1. The live session slug, only when that exact catalog entry is warmup-capable.
@@ -20,7 +23,8 @@ use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 
-/// Resolve the catalog to use for warmup: prefer a live/config catalog, else the bundled one.
+/// Resolve a fallback catalog when no `ModelsManager` snapshot is available.
+/// Prefer a live/config catalog, else the bundled `models.json`.
 pub fn warmup_models_catalog(preferred: Option<&ModelsResponse>) -> ModelsResponse {
     if let Some(catalog) = preferred.filter(|catalog| !catalog.models.is_empty()) {
         return catalog.clone();
