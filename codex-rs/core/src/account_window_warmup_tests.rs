@@ -8,6 +8,7 @@ use codex_features::Feature;
 use codex_login::AccountProfile;
 use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
+use codex_login::WindowWarmupOutcome;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::sse;
@@ -50,7 +51,7 @@ fn rate_limit_snapshot(limit_id: Option<&str>, used_percent: f64) -> RateLimitSn
 #[test]
 fn catalog_driven_warmup_selection_is_available_to_core() {
     let catalog = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
-    let model = codex_models_manager::select_cheapest_warmup_model(&catalog)
+    let model = codex_models_manager::select_warmup_model(&catalog, /*preferred_slug*/ None)
         .expect("bundled catalog should expose a cheapest warmup model");
     let effort = codex_models_manager::cheapest_supported_effort(&model)
         .expect("selected warmup model should advertise at least one effort");
@@ -151,11 +152,33 @@ struct WarmupRequestFixture {
     auth_manager: Arc<AuthManager>,
     config: Config,
     register_count: Arc<AtomicUsize>,
+    server: MockServer,
     _codex_home: TempDir,
 }
 
 async fn warmup_request_fixture(
     enable_agent_identity: bool,
+) -> anyhow::Result<WarmupRequestFixture> {
+    warmup_request_fixture_with_primary_used_percent(
+        enable_agent_identity,
+        /*primary_used_percent*/ Some("1.0"),
+    )
+    .await
+}
+
+async fn warmup_request_fixture_idle_stream(
+    enable_agent_identity: bool,
+) -> anyhow::Result<WarmupRequestFixture> {
+    warmup_request_fixture_with_primary_used_percent(
+        enable_agent_identity,
+        /*primary_used_percent*/ None,
+    )
+    .await
+}
+
+async fn warmup_request_fixture_with_primary_used_percent(
+    enable_agent_identity: bool,
+    primary_used_percent: Option<&'static str>,
 ) -> anyhow::Result<WarmupRequestFixture> {
     let server = MockServer::start().await;
     let register_count = Arc::new(AtomicUsize::new(0));
@@ -173,15 +196,17 @@ async fn warmup_request_fixture(
         ev_response_created("resp-warmup"),
         ev_completed("resp-warmup"),
     ]);
+    let mut responses = ResponseTemplate::new(/*status*/ 200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_raw(sse_body, "text/event-stream");
+    if let Some(used_percent) = primary_used_percent {
+        responses = responses
+            .insert_header("x-codex-primary-used-percent", used_percent)
+            .insert_header("x-codex-primary-window-minutes", "300");
+    }
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
-        .respond_with(
-            ResponseTemplate::new(/*status*/ 200)
-                .insert_header("content-type", "text/event-stream")
-                .insert_header("x-codex-primary-used-percent", "1.0")
-                .insert_header("x-codex-primary-window-minutes", "300")
-                .set_body_raw(sse_body, "text/event-stream"),
-        )
+        .respond_with(responses)
         .mount(&server)
         .await;
 
@@ -237,6 +262,7 @@ async fn warmup_request_fixture(
         auth_manager,
         config,
         register_count,
+        server,
         _codex_home: codex_home,
     })
 }
@@ -304,5 +330,91 @@ async fn warmup_still_registers_agent_identity_when_feature_is_on() -> anyhow::R
         WindowWarmupOutcome::Failed
     );
     assert!(fixture.register_count.load(Ordering::SeqCst) >= 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_posts_classic_model_with_process_originator() -> anyhow::Result<()> {
+    let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    let requests = fixture.server.received_requests().await.expect("requests");
+    let warmup = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .expect("warmup responses POST");
+    let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
+    let model = body["model"].as_str().expect("model");
+    assert_ne!(model, "gpt-5.6-luna");
+    assert!(
+        !model.contains("luna"),
+        "warmup must not send a Luna/reserve model: {model}"
+    );
+    let originator = warmup
+        .headers
+        .get("originator")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or(codex_login::default_client::DEFAULT_ORIGINATOR);
+    assert!(
+        codex_login::default_client::is_first_party_originator(originator),
+        "warmup originator must be first-party, got {originator}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_get_verifies_after_profile_becomes_active() -> anyhow::Result<()> {
+    let fixture = warmup_request_fixture_idle_stream(/*enable_agent_identity*/ false).await?;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(serde_json::json!({
+                "plan_type": "plus",
+                "rate_limit": {
+                    "allowed": true,
+                    "limit_reached": false,
+                    "primary_window": {
+                        "used_percent": 2,
+                        "limit_window_seconds": 18000,
+                        "reset_after_seconds": 17000,
+                        "reset_at": 2_000_000_000
+                    }
+                }
+            })),
+        )
+        .mount(&fixture.server)
+        .await;
+
+    // earliest-reset can activate the profile while the POST is in flight. By the
+    // post-stream check the target is current; GET must still prove the 5h start.
+    let _lease = fixture.pool.lease().expect("activate warmed profile");
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    assert_eq!(
+        warmup_outcome(&fixture.pool, &fixture.profile_id),
+        WindowWarmupOutcome::Succeeded
+    );
+    let used = fixture
+        .pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.profile.id == fixture.profile_id)
+        .and_then(|snapshot| snapshot.rate_limits.primary)
+        .map(|window| window.used_percent);
+    assert_eq!(used, Some(2.0));
     Ok(())
 }

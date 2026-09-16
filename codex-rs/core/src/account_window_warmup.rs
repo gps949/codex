@@ -45,7 +45,6 @@ use codex_rollout_trace::InferenceTraceContext;
 
 const WARMUP_PROMPT: &str = "1+1?";
 const WARMUP_INSTRUCTIONS: &str = "Reply with one short token.";
-const WARMUP_ORIGINATOR: &str = "codex_account_window_warmup";
 const PER_PROFILE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Cap for escalated cool-downs after repeated warmup failures.
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
@@ -59,6 +58,12 @@ const GET_VERIFY_DELAYS_SECS: &[u64] = &[0, 1, 2, 4];
 const URGENT_WARMUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Give quota probes a moment to land, then start warming — do not wait a full interval.
 const INITIAL_WARMUP_SETTLE: Duration = Duration::from_secs(30);
+
+/// Use the process originator (same header as interactive turns). A made-up warmup
+/// originator is not first-party and can be rejected independently of ChatGPT bearer auth.
+fn warmup_originator() -> String {
+    codex_login::default_client::originator().value
+}
 
 /// Spawns the periodic standby-window warmup loop. The caller owns the handle and may abort it.
 pub(crate) fn spawn_window_warmup_task(pool: Arc<AccountPool>, config: Config) -> JoinHandle<()> {
@@ -122,14 +127,14 @@ async fn warm_profile(
         debug!(%profile_id, "skipping window warmup without ChatGPT auth");
         let _ = pool.record_window_warmup(
             profile_id,
-            WindowWarmupObservation {
-                outcome: WindowWarmupOutcome::SkippedNoAuth,
+            WindowWarmupObservation::current(
+                WindowWarmupOutcome::SkippedNoAuth,
                 attempted_at,
-                retry_after: Some(
+                Some(
                     attempted_at + chrono::Duration::seconds(SKIPPED_AUTH_BACKOFF.as_secs() as i64),
                 ),
-                consecutive_failures: 0,
-            },
+                /*consecutive_failures*/ 0,
+            ),
         );
         return Ok(());
     };
@@ -138,17 +143,18 @@ async fn warm_profile(
     // Force HTTP so warmup never shares or perturbs the active session's websocket.
     provider.supports_websockets = false;
 
-    // Pick the cheapest model/effort from the official catalog (live config catalog when
-    // present, else bundled). Never invent effort levels the model does not advertise —
-    // that previously forced `minimal` and caused endless warmup retries.
+    // Prefer the session model when it can start the 5h window over ordinary Responses HTTP.
+    // Catalog "cheapest" used to follow gpt-5.4-mini → gpt-5.6-luna; Luna is Responses Lite
+    // + code_mode_only, so those warmup POSTs Hard-failed and the picker kept showing retry.
     let preferred_catalog =
         codex_models_manager::warmup_models_catalog(config.model_catalog.as_ref());
-    let Some(model_info) = codex_models_manager::select_cheapest_warmup_model(&preferred_catalog)
-        .or_else(|| {
-            // Live catalogs can be non-empty yet have no warmup-eligible models; fall back to bundled.
-            let bundled = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
-            codex_models_manager::select_cheapest_warmup_model(&bundled)
-        })
+    let Some(model_info) =
+        codex_models_manager::select_warmup_model(&preferred_catalog, config.model.as_deref())
+            .or_else(|| {
+                // Live catalogs can be non-empty yet have no warmup-eligible models; fall back to bundled.
+                let bundled = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
+                codex_models_manager::select_warmup_model(&bundled, config.model.as_deref())
+            })
     else {
         warn!(%profile_id, "standby window warmup skipped: empty model catalog");
         record_failure(
@@ -175,7 +181,7 @@ async fn warm_profile(
         thread_id,
         provider,
         SessionSource::Cli,
-        WARMUP_ORIGINATOR.to_string(),
+        warmup_originator(),
         /*model_verbosity*/ None,
         /*content_item_kinds_enabled*/ true,
         /*enable_request_compression*/ false,
@@ -192,7 +198,7 @@ async fn warm_profile(
         /*account_id*/ None,
         /*account_email*/ None,
         /*auth_mode*/ None,
-        WARMUP_ORIGINATOR.to_string(),
+        warmup_originator(),
         /*log_user_prompts*/ false,
         "account-window-warmup".to_string(),
         SessionSource::Cli,
@@ -292,9 +298,11 @@ async fn warm_profile(
         .is_some_and(|window| window.used_percent > 0.0);
     let stream_account_limits = stream_limits.as_ref().map(convert_rate_limits);
 
-    // If the profile became active while we were warming, avoid clobbering fresher active-session
-    // rate-limit state — but still keep stream evidence that the 5h window already started when
-    // the active cache still looks idle (otherwise mid-warmup activate silently drops success).
+    // earliest-reset can activate this profile while the POST is in flight. Pool writes are
+    // monotonic, so a 0% GET cannot unstart an active session. Do not skip GET verify or
+    // outcome recording — cold-idle Responses headers are usually 0%, and skipping here
+    // silently drops both success and NOOP (reporter: "profile became active mid-warmup"
+    // after a Luna POST, leftover Failed stays on the now-current account).
     let still_standby = pool
         .snapshots()
         .into_iter()
@@ -304,34 +312,29 @@ async fn warm_profile(
     let mut started = stream_started;
     let mut best_limits = stream_account_limits.clone();
 
-    if still_standby || stream_started {
-        if let Some(limits) = stream_account_limits.as_ref() {
-            pool.update_rate_limits(profile_id, limits.clone())?;
-            if still_standby {
-                debug!(%profile_id, "warmed standby 5h rate-limit window");
-            } else {
-                debug!(%profile_id, "kept mid-warmup stream evidence after profile activated");
-            }
-        } else if still_standby {
-            debug!(%profile_id, "warmup completed without rate-limit headers");
-        }
-
-        // Cold-idle Responses headers typically still show 0%. Retry accounts usage GET with short
-        // delays before declaring NOOP — lagging GETs were the main false "warmup retry" source.
-        if let Some(limits) =
-            refresh_rate_limits_via_get_with_retries(config, &auth, stream_started).await
-        {
-            if account_primary_started(&limits) {
-                started = true;
-            }
-            let merged = merge_account_rate_limits_monotonic(best_limits.as_ref(), limits);
-            pool.update_rate_limits(profile_id, merged.clone())?;
-            best_limits = Some(merged);
-            debug!(%profile_id, "refreshed standby rate limits after window warmup");
+    if let Some(limits) = stream_account_limits.as_ref() {
+        pool.update_rate_limits(profile_id, limits.clone())?;
+        if still_standby {
+            debug!(%profile_id, "warmed standby 5h rate-limit window");
+        } else {
+            debug!(%profile_id, "kept mid-warmup stream evidence after profile activated");
         }
     } else {
-        debug!(%profile_id, "skipping warmup rate-limit writes; profile became active mid-warmup");
-        return Ok(());
+        debug!(%profile_id, "warmup completed without rate-limit headers");
+    }
+
+    // Cold-idle Responses headers typically still show 0%. Retry accounts usage GET with short
+    // delays before declaring NOOP — lagging GETs were the main false "warmup retry" source.
+    if let Some(limits) =
+        refresh_rate_limits_via_get_with_retries(config, &auth, stream_started).await
+    {
+        if account_primary_started(&limits) {
+            started = true;
+        }
+        let merged = merge_account_rate_limits_monotonic(best_limits.as_ref(), limits);
+        pool.update_rate_limits(profile_id, merged.clone())?;
+        best_limits = Some(merged);
+        debug!(%profile_id, "refreshed standby rate limits after window warmup");
     }
 
     // Prefer local evidence over a racy pool re-read: concurrent quota sync can briefly regress
@@ -358,14 +361,12 @@ async fn warm_profile(
 
     let _ = pool.record_window_warmup(
         profile_id,
-        WindowWarmupObservation {
-            outcome: WindowWarmupOutcome::Succeeded,
+        WindowWarmupObservation::current(
+            WindowWarmupOutcome::Succeeded,
             attempted_at,
-            retry_after: Some(
-                attempted_at + chrono::Duration::seconds(SUCCESS_DEBOUNCE.as_secs() as i64),
-            ),
-            consecutive_failures: 0,
-        },
+            Some(attempted_at + chrono::Duration::seconds(SUCCESS_DEBOUNCE.as_secs() as i64)),
+            /*consecutive_failures*/ 0,
+        ),
     );
     Ok(())
 }
@@ -399,12 +400,12 @@ fn record_failure(
     let retry_after = attempted_at + chrono::Duration::seconds(backoff.as_secs() as i64);
     let _ = pool.record_window_warmup(
         profile_id,
-        WindowWarmupObservation {
-            outcome: WindowWarmupOutcome::Failed,
+        WindowWarmupObservation::current(
+            WindowWarmupOutcome::Failed,
             attempted_at,
-            retry_after: Some(retry_after),
+            Some(retry_after),
             consecutive_failures,
-        },
+        ),
     );
 }
 

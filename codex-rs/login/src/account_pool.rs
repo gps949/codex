@@ -178,6 +178,32 @@ pub struct WindowWarmupObservation {
     /// Used to escalate backoff so NOOP/API failures do not paint "warmup retry" every few minutes.
     #[serde(default)]
     pub consecutive_failures: u32,
+    /// Bumped when the warmup request contract changes (auth policy, model class, originator).
+    /// Older persisted failures must not keep idle standbys in a multi-hour backoff after the
+    /// request itself was fixed. Missing values deserialize as 0.
+    #[serde(default)]
+    pub request_generation: u32,
+}
+
+/// Current warmup request contract. Idle standbys with an older persisted generation are
+/// eligible immediately so a release that fixes the request is not blocked by leftover backoff.
+pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 1;
+
+impl WindowWarmupObservation {
+    pub fn current(
+        outcome: WindowWarmupOutcome,
+        attempted_at: DateTime<Utc>,
+        retry_after: Option<DateTime<Utc>>,
+        consecutive_failures: u32,
+    ) -> Self {
+        Self {
+            outcome,
+            attempted_at,
+            retry_after,
+            consecutive_failures,
+            request_generation: CURRENT_WARMUP_REQUEST_GENERATION,
+        }
+    }
 }
 
 /// Immutable execution binding handed to account-scoped clients.
@@ -652,6 +678,11 @@ impl AccountPool {
                             // Keep successful warmups out of the queue even if a lagging quota
                             // probe temporarily shows primary back at 0%.
                             WindowWarmupOutcome::Succeeded => false,
+                            _ if observation.request_generation
+                                < CURRENT_WARMUP_REQUEST_GENERATION =>
+                            {
+                                true
+                            }
                             _ => observation
                                 .retry_after
                                 .is_none_or(|retry_after| retry_after <= now),
@@ -1514,12 +1545,12 @@ mod tests {
         .expect("register");
         pool.record_window_warmup(
             &standby.id,
-            WindowWarmupObservation {
-                outcome: WindowWarmupOutcome::Succeeded,
-                attempted_at: Utc::now(),
-                retry_after: Some(Utc::now() + chrono::Duration::minutes(5)),
-                consecutive_failures: 0,
-            },
+            WindowWarmupObservation::current(
+                WindowWarmupOutcome::Succeeded,
+                Utc::now(),
+                Some(Utc::now() + chrono::Duration::minutes(5)),
+                /*consecutive_failures*/ 0,
+            ),
         )
         .expect("record success");
         pool.update_rate_limits(
@@ -1722,12 +1753,12 @@ mod tests {
 
         pool.record_window_warmup(
             &idle.id,
-            WindowWarmupObservation {
-                outcome: WindowWarmupOutcome::Failed,
-                attempted_at: now,
-                retry_after: Some(now + chrono::Duration::minutes(15)),
-                consecutive_failures: 0,
-            },
+            WindowWarmupObservation::current(
+                WindowWarmupOutcome::Failed,
+                now,
+                Some(now + chrono::Duration::minutes(15)),
+                /*consecutive_failures*/ 0,
+            ),
         )
         .expect("record failure");
         assert!(pool.window_warmup_candidates().is_empty());
@@ -1742,14 +1773,54 @@ mod tests {
 
         pool.record_window_warmup(
             &idle.id,
+            WindowWarmupObservation::current(
+                WindowWarmupOutcome::Failed,
+                now,
+                Some(now - chrono::Duration::seconds(1)),
+                /*consecutive_failures*/ 0,
+            ),
+        )
+        .expect("record expired backoff");
+        assert_eq!(pool.window_warmup_candidates(), vec![idle.id]);
+    }
+
+    #[tokio::test]
+    async fn window_warmup_candidates_retry_stale_request_generation() {
+        let pool = AccountPool::new();
+        let active = profile("active", 0);
+        let idle = profile("idle", 10);
+        for account in [&active, &idle] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        let _lease = pool.lease().expect("activate preferred");
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &idle.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("idle limits");
+        pool.record_window_warmup(
+            &idle.id,
             WindowWarmupObservation {
                 outcome: WindowWarmupOutcome::Failed,
                 attempted_at: now,
-                retry_after: Some(now - chrono::Duration::seconds(1)),
-                consecutive_failures: 0,
+                retry_after: Some(now + chrono::Duration::hours(6)),
+                consecutive_failures: 5,
+                request_generation: 0,
             },
         )
-        .expect("record expired backoff");
+        .expect("record leftover failure");
         assert_eq!(pool.window_warmup_candidates(), vec![idle.id]);
     }
 
@@ -1783,12 +1854,12 @@ mod tests {
 
         pool.record_window_warmup(
             &idle.id,
-            WindowWarmupObservation {
-                outcome: WindowWarmupOutcome::Succeeded,
-                attempted_at: now,
-                retry_after: Some(now - chrono::Duration::minutes(1)),
-                consecutive_failures: 0,
-            },
+            WindowWarmupObservation::current(
+                WindowWarmupOutcome::Succeeded,
+                now,
+                Some(now - chrono::Duration::minutes(1)),
+                /*consecutive_failures*/ 0,
+            ),
         )
         .expect("record succeeded");
         assert!(

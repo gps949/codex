@@ -153,20 +153,20 @@ mod tests {
     #[test]
     fn format_window_warmup_status_summarizes_outcomes() {
         let now = Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap();
-        let succeeded = crate::account_pool::WindowWarmupObservation {
-            outcome: crate::account_pool::WindowWarmupOutcome::Succeeded,
-            attempted_at: now,
-            retry_after: None,
-            consecutive_failures: 0,
-        };
+        let succeeded = crate::account_pool::WindowWarmupObservation::current(
+            crate::account_pool::WindowWarmupOutcome::Succeeded,
+            now,
+            None,
+            /*consecutive_failures*/ 0,
+        );
         assert_eq!(format_window_warmup_status(&succeeded, now), "5h warmed");
 
-        let soon = crate::account_pool::WindowWarmupObservation {
-            outcome: crate::account_pool::WindowWarmupOutcome::Failed,
-            attempted_at: now,
-            retry_after: Some(now + chrono::Duration::minutes(2)),
-            consecutive_failures: 1,
-        };
+        let soon = crate::account_pool::WindowWarmupObservation::current(
+            crate::account_pool::WindowWarmupOutcome::Failed,
+            now,
+            Some(now + chrono::Duration::minutes(2)),
+            /*consecutive_failures*/ 1,
+        );
         assert_eq!(
             format_window_warmup_status(&soon, now),
             "warmup retry in 0:02"
@@ -174,23 +174,23 @@ mod tests {
 
         // First NOOP backoff is 30m. That must stay "paused", not flip to "retry"
         // one second after the attempt (the previous 30m threshold caused this).
-        let first_noop = crate::account_pool::WindowWarmupObservation {
-            outcome: crate::account_pool::WindowWarmupOutcome::Failed,
-            attempted_at: now,
-            retry_after: Some(now + chrono::Duration::minutes(29)),
-            consecutive_failures: 1,
-        };
+        let first_noop = crate::account_pool::WindowWarmupObservation::current(
+            crate::account_pool::WindowWarmupOutcome::Failed,
+            now,
+            Some(now + chrono::Duration::minutes(29)),
+            /*consecutive_failures*/ 1,
+        );
         assert_eq!(
             format_window_warmup_status(&first_noop, now),
             "warmup paused in 0:29"
         );
 
-        let paused = crate::account_pool::WindowWarmupObservation {
-            outcome: crate::account_pool::WindowWarmupOutcome::Failed,
-            attempted_at: now,
-            retry_after: Some(now + chrono::Duration::hours(2)),
-            consecutive_failures: 2,
-        };
+        let paused = crate::account_pool::WindowWarmupObservation::current(
+            crate::account_pool::WindowWarmupOutcome::Failed,
+            now,
+            Some(now + chrono::Duration::hours(2)),
+            /*consecutive_failures*/ 2,
+        );
         assert_eq!(
             format_window_warmup_status(&paused, now),
             "warmup paused in 2:00"

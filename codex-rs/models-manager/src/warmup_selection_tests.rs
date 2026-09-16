@@ -1,5 +1,6 @@
 use super::cheapest_supported_effort;
 use super::select_cheapest_warmup_model;
+use super::select_warmup_model;
 use super::warmup_models_catalog;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelInfoUpgrade;
@@ -171,12 +172,53 @@ fn select_cheapest_returns_none_when_only_ineligible_models_exist() {
 fn bundled_catalog_selects_upgrade_successor_of_hidden_mini_tier() {
     let catalog = warmup_models_catalog(/*preferred*/ None);
     let selected = select_cheapest_warmup_model(&catalog).expect("bundled model");
-    // Snapshot of current official catalog policy: gpt-5.4-mini upgrades to gpt-5.6-luna.
-    // If the catalog migrates the cost tier, update this expectation — do not hardcode the
-    // slug in production selection logic.
-    assert_eq!(selected.slug, "gpt-5.6-luna");
+    // gpt-5.4-mini upgrades to gpt-5.6-luna, but Luna is not warmup-capable. The
+    // cheapest remaining classic list model is currently gpt-5.2.
+    assert_eq!(selected.slug, "gpt-5.2");
     assert_eq!(
         cheapest_supported_effort(&selected),
         Some(ReasoningEffort::Low)
     );
+}
+
+#[test]
+fn bundled_catalog_skips_lite_and_code_mode_only_warmup_models() {
+    let catalog = warmup_models_catalog(/*preferred*/ None);
+    let selected = select_cheapest_warmup_model(&catalog).expect("bundled model");
+    // gpt-5.4-mini upgrades to gpt-5.6-luna, but Luna is Responses Lite +
+    // code_mode_only. Warmup forces HTTP and has no code-mode host; those
+    // requests Hard-fail and paint "warmup retry" while 5h stays at 0%.
+    assert_ne!(selected.slug, "gpt-5.6-luna");
+    assert!(
+        !selected.use_responses_lite,
+        "warmup must not pick a Responses Lite model: {}",
+        selected.slug
+    );
+    assert_ne!(
+        selected.tool_mode,
+        Some(codex_protocol::openai_models::ToolMode::CodeModeOnly),
+        "warmup must not pick a code_mode_only model: {}",
+        selected.slug
+    );
+    assert_eq!(
+        cheapest_supported_effort(&selected),
+        Some(ReasoningEffort::Low)
+    );
+}
+
+#[test]
+fn select_warmup_model_prefers_capable_session_slug() {
+    let catalog = warmup_models_catalog(/*preferred*/ None);
+    let selected =
+        select_warmup_model(&catalog, Some("gpt-5.5")).expect("session model should win");
+    assert_eq!(selected.slug, "gpt-5.5");
+    assert!(!selected.use_responses_lite);
+}
+
+#[test]
+fn select_warmup_model_ignores_lite_session_slug() {
+    let catalog = warmup_models_catalog(/*preferred*/ None);
+    let selected = select_warmup_model(&catalog, Some("gpt-5.6-luna")).expect("fallback");
+    assert_ne!(selected.slug, "gpt-5.6-luna");
+    assert!(!selected.use_responses_lite);
 }
