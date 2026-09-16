@@ -511,6 +511,7 @@ pub(crate) async fn run_account_pool(
         let primary = snapshot
             .rate_limits
             .primary
+            .as_ref()
             .map(|window| format!("{:.0}", window.used_percent))
             .unwrap_or_else(|| "-".to_string());
         let secondary = snapshot
