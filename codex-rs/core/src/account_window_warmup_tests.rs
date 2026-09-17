@@ -309,6 +309,38 @@ fn warmup_outcome(pool: &AccountPool, profile_id: &AccountProfileId) -> WindowWa
     warmup_outcome_opt(pool, profile_id).expect("warmup observation")
 }
 
+fn warmup_request_tool_names(body: &serde_json::Value) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(tools) = body["tools"].as_array() {
+        collect_tool_names(tools, &mut names);
+    }
+    if let Some(input) = body["input"].as_array() {
+        for item in input {
+            if item["type"] != "additional_tools" {
+                continue;
+            }
+            if let Some(tools) = item["tools"].as_array() {
+                collect_tool_names(tools, &mut names);
+            }
+        }
+    }
+    names
+}
+
+fn collect_tool_names(tools: &[serde_json::Value], names: &mut Vec<String>) {
+    for tool in tools {
+        if let Some(name) = tool["name"]
+            .as_str()
+            .or_else(|| tool["function"]["name"].as_str())
+        {
+            names.push(name.to_string());
+        }
+        if let Some(nested) = tool["tools"].as_array() {
+            collect_tool_names(nested, names);
+        }
+    }
+}
+
 #[tokio::test]
 async fn warmup_sends_request_without_agent_identity_when_feature_is_off() -> anyhow::Result<()> {
     let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
@@ -410,30 +442,52 @@ async fn warmup_posts_chatgpt_capable_model_with_process_originator() -> anyhow:
         "warmup must send real Codex instructions, got {} top-level chars and {input_text_len} input chars",
         instructions.len()
     );
-    if let Some(tools) = body["tools"].as_array() {
-        assert!(
-            !tools.is_empty(),
-            "warmup must send the default Codex tool harness"
-        );
-        assert!(
-            tools.iter().any(|tool| {
-                matches!(
-                    tool["name"].as_str(),
-                    Some("exec_command" | "apply_patch" | "update_plan")
-                )
-            }),
-            "warmup tools must include a real Codex tool, got {tools:?}"
-        );
-    } else {
-        let input = body["input"].as_array().expect("lite input");
-        assert!(
-            input.iter().any(|item| item["type"] == "additional_tools"
-                && item["tools"]
-                    .as_array()
-                    .is_some_and(|tools| !tools.is_empty())),
-            "lite warmup must still send tools in input, got {input:?}"
-        );
-    }
+    let tool_names = warmup_request_tool_names(&body);
+    assert!(
+        tool_names.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "exec" | "wait" | "exec_command" | "apply_patch" | "update_plan"
+            )
+        }),
+        "warmup tools must include a real Codex tool, got {tool_names:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_posts_code_mode_tools_for_session_sol() -> anyhow::Result<()> {
+    let mut fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+    fixture.config.model = Some("gpt-5.6-sol".to_string());
+
+    warm_profile(
+        &fixture.pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    let requests = fixture.server.received_requests().await.expect("requests");
+    let warmup = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .expect("warmup responses POST");
+    let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
+    assert_eq!(body["model"].as_str(), Some("gpt-5.6-sol"));
+    let tool_names = warmup_request_tool_names(&body);
+    assert!(
+        tool_names.iter().any(|name| name == "exec"),
+        "code_mode_only warmup must advertise exec, got {tool_names:?}"
+    );
+    assert!(
+        tool_names.iter().any(|name| name == "wait"),
+        "code_mode_only warmup must advertise wait, got {tool_names:?}"
+    );
+    assert!(
+        !tool_names.iter().any(|name| name == "exec_command"),
+        "code_mode_only warmup must not advertise the classic CLI harness, got {tool_names:?}"
+    );
     Ok(())
 }
 
@@ -614,13 +668,14 @@ async fn warmup_get_verifies_after_profile_becomes_active() -> anyhow::Result<()
 }
 
 #[tokio::test]
-async fn warmup_get_verifies_after_tool_call_without_completed() -> anyhow::Result<()> {
+async fn warmup_get_verifies_after_tool_call_then_completed() -> anyhow::Result<()> {
     let fixture = warmup_request_fixture_with_sse(
         /*enable_agent_identity*/ false,
         /*primary_used_percent*/ None,
         sse(vec![
             ev_response_created("resp-warmup"),
-            ev_function_call("call-warmup", "exec_command", r#"{"cmd":"true"}"#),
+            ev_function_call("call-warmup", "exec", r#"{"cmd":"true"}"#),
+            ev_completed("resp-warmup"),
         ]),
         /*first_unusable_model_message*/ None,
     )
