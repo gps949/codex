@@ -163,6 +163,12 @@ impl WindowWarmupDebugLog {
     }
 }
 
+impl Default for WindowWarmupDebugLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 static LOG: Mutex<WindowWarmupDebugLog> = Mutex::new(WindowWarmupDebugLog::new());
 
 /// Append one warmup event to the process-local ring.

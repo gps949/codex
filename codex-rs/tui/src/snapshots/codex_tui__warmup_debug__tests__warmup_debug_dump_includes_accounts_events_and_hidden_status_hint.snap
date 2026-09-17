@@ -1,0 +1,25 @@
+---
+source: tui/src/warmup_debug_tests.rs
+assertion_line: 68
+expression: rendered.as_str()
+---
+/warmup
+
+Config:
+  window_warmup = true
+  task_running = true
+  pass_requested = false
+  interval = 300s
+  settle = 30s
+  rotation_strategy = earliestReset
+  session_model = gpt-5.6-sol
+
+Accounts:
+  kangweiye@gmail.com current pri=40 available 5h=0% candidate=no persisted=none id=acct-current
+  qihuangong@gmail.com standby pri=10 available 5h=0% candidate=yes persisted=failed id=acct-standby
+
+Events (oldest first):
+  2026-09-17 08:00:00  task spawned
+  2026-09-17 08:00:30  pass begin
+
+Picker hides warmup status. Success is 5h used% > 0. /warmup now requests one pass immediately.
