@@ -117,3 +117,56 @@ pub struct AccountPoolRateLimitWindow {
     #[ts(type = "number | null")]
     pub resets_at: Option<i64>,
 }
+
+/// Client->server request for the `/warmup` transcript dump.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountPoolWarmupDebugParams {
+    /// Request one warmup pass immediately. The response still returns now;
+    /// run `/warmup` again to read the new events.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_now: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountPoolWarmupDebugResponse {
+    pub enabled: bool,
+    pub task_running: bool,
+    pub pass_requested: bool,
+    #[ts(type = "number")]
+    pub interval_seconds: u64,
+    #[ts(type = "number")]
+    pub settle_seconds: u64,
+    pub rotation_strategy: String,
+    pub session_model: Option<String>,
+    pub accounts: Vec<AccountPoolWarmupDebugAccount>,
+    pub events: Vec<AccountPoolWarmupDebugEvent>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountPoolWarmupDebugAccount {
+    pub profile_id: String,
+    pub email: Option<String>,
+    pub label: Option<String>,
+    #[ts(type = "number")]
+    pub priority: u32,
+    pub is_active: bool,
+    pub is_candidate: bool,
+    pub availability: String,
+    pub primary_used_percent: Option<f64>,
+    pub persisted_warmup_outcome: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AccountPoolWarmupDebugEvent {
+    #[ts(type = "number")]
+    pub at: i64,
+    pub message: String,
+}

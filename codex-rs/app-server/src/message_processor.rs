@@ -1645,6 +1645,11 @@ impl MessageProcessor {
             ClientRequest::AccountPoolUse { params, .. } => {
                 self.account_processor.use_account_pool(params).await
             }
+            ClientRequest::AccountPoolWarmupDebug { params, .. } => {
+                self.account_processor
+                    .get_account_pool_warmup_debug(params)
+                    .await
+            }
             ClientRequest::GetAccountRateLimits { params, .. } => {
                 self.account_processor
                     .get_account_rate_limits(params, session.app_server_client_name())

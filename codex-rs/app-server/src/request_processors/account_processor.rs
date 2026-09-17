@@ -28,6 +28,7 @@ mod bedrock_setup;
 mod mobile_commands;
 mod pool_quota;
 mod rate_limit_resets;
+mod warmup_debug;
 
 // Duration before a browser ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);

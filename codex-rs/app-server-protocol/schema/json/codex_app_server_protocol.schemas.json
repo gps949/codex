@@ -6901,6 +6901,76 @@
         "title": "AccountPoolUpdatedNotification",
         "type": "object"
       },
+      "AccountPoolWarmupDebugAccount": {
+        "properties": {
+          "availability": {
+            "type": "string"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "isCandidate": {
+            "type": "boolean"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persistedWarmupOutcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "primaryUsedPercent": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "priority": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "profileId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "availability",
+          "isActive",
+          "isCandidate",
+          "priority",
+          "profileId"
+        ],
+        "type": "object"
+      },
+      "AccountPoolWarmupDebugEvent": {
+        "properties": {
+          "at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "message"
+        ],
+        "type": "object"
+      },
       "AccountPoolWindowWarmup": {
         "properties": {
           "attemptedAt": {

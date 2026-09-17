@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use crate::account_window_warmup::run_warmup_pass;
 use crate::account_window_warmup::spawn_window_warmup_task;
 use crate::config::Config;
 use crate::execution_request_auth::ExecutionRequestAuth;
@@ -24,6 +25,8 @@ use codex_login::AccountProfileStore;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AuthManager;
+use codex_login::WindowWarmupDebugKind;
+use codex_login::record_window_warmup_debug;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_protocol::auth::AuthMode;
@@ -311,10 +314,33 @@ impl ExecutionAuth {
             (false, true) => {
                 if let Some(previous) = slot.take() {
                     previous.abort();
+                    record_window_warmup_debug(WindowWarmupDebugKind::TaskStopped);
                 }
             }
             (true, true) | (false, false) => {}
         }
+    }
+
+    pub(crate) fn window_warmup_task_running(&self) -> bool {
+        self.window_warmup_task
+            .lock()
+            .ok()
+            .is_some_and(|slot| slot.as_ref().is_some_and(|handle| !handle.is_finished()))
+    }
+
+    pub(crate) fn request_window_warmup_pass_now(&self, config: Config) {
+        let Some(pool) = self.account_pool() else {
+            record_window_warmup_debug(WindowWarmupDebugKind::PassNoCandidate);
+            return;
+        };
+        record_window_warmup_debug(WindowWarmupDebugKind::RunNowRequested);
+        tokio::spawn(async move {
+            if let Err(error) = run_warmup_pass(&pool, &config).await {
+                record_window_warmup_debug(WindowWarmupDebugKind::PassFailed {
+                    error: error.to_string(),
+                });
+            }
+        });
     }
 
     pub(crate) fn runtime(&self) -> Option<Arc<AccountPoolRuntime>> {

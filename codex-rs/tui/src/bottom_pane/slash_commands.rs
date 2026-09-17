@@ -198,6 +198,14 @@ mod tests {
     }
 
     #[test]
+    fn warmup_command_resolves_for_dispatch() {
+        assert_eq!(
+            find_builtin_command("warmup", all_enabled_flags()),
+            Some(SlashCommand::Warmup)
+        );
+    }
+
+    #[test]
     fn clear_command_resolves_for_dispatch() {
         assert_eq!(
             find_builtin_command("clear", all_enabled_flags()),

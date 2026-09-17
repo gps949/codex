@@ -1283,6 +1283,13 @@ client_request_definitions! {
         response: v2::AccountPoolUseResponse,
     },
 
+    #[experimental("accountPool/warmupDebug")]
+    AccountPoolWarmupDebug => "accountPool/warmupDebug" {
+        params: v2::AccountPoolWarmupDebugParams,
+        serialization: global("account-auth"),
+        response: v2::AccountPoolWarmupDebugResponse,
+    },
+
     GetAccountRateLimits => "account/rateLimits/read" {
         params: #[ts(optional, as = "Option<GetAccountRateLimitsParamsTypeScript>", inline)] #[serde(default, skip_serializing_if = "Option::is_none")] v2::NullableGetAccountRateLimitsParams,
         serialization: None,
