@@ -124,6 +124,17 @@ impl App {
         });
     }
 
+    pub(super) fn fetch_warmup_debug(&mut self, app_server: &AppServerSession, run_now: bool) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = fetch_warmup_debug(request_handle, run_now)
+                .await
+                .map_err(|err| format!("{err:#}"));
+            app_event_tx.send(AppEvent::WarmupDebugLoaded { result });
+        });
+    }
+
     pub(super) fn refresh_account_pool(&mut self, app_server: &AppServerSession) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
@@ -916,6 +927,20 @@ pub(super) async fn fetch_account_pool(
     }
 
     refresh_account_pool_quotas(request_handle).await
+}
+
+async fn fetch_warmup_debug(
+    request_handle: AppServerRequestHandle,
+    run_now: bool,
+) -> Result<codex_app_server_protocol::AccountPoolWarmupDebugResponse> {
+    let request_id = RequestId::String(format!("account-pool-warmup-debug-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::AccountPoolWarmupDebug {
+            request_id,
+            params: codex_app_server_protocol::AccountPoolWarmupDebugParams { run_now },
+        })
+        .await
+        .wrap_err("accountPool/warmupDebug failed in TUI")
 }
 
 async fn refresh_account_pool_quotas(

@@ -1431,6 +1431,20 @@ impl ChatWidget {
         ));
     }
 
+    pub(crate) fn add_warmup_debug_output(
+        &mut self,
+        result: Result<codex_app_server_protocol::AccountPoolWarmupDebugResponse, String>,
+    ) {
+        match result {
+            Ok(response) => {
+                self.add_to_history(crate::warmup_debug::new_warmup_debug_output(&response));
+            }
+            Err(error) => {
+                self.add_error_message(format!("Failed to read warmup debug details: {error}"));
+            }
+        }
+    }
+
     pub(crate) fn add_ps_output(&mut self) {
         let processes = self
             .unified_exec_processes

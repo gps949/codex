@@ -620,6 +620,16 @@ pub(crate) enum AppEvent {
     /// Fetch the multi-account pool state to open the `/account` picker.
     RefreshAccountPool,
 
+    /// Fetch the process-local standby window-warmup debug dump for `/warmup`.
+    FetchWarmupDebug {
+        run_now: bool,
+    },
+
+    /// Result of fetching the `/warmup` debug dump.
+    WarmupDebugLoaded {
+        result: Result<codex_app_server_protocol::AccountPoolWarmupDebugResponse, String>,
+    },
+
     /// Result of fetching the multi-account pool state.
     AccountPoolLoaded {
         result: Result<codex_app_server_protocol::AccountPoolReadResponse, String>,

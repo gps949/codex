@@ -33,8 +33,10 @@ use codex_login::AccountRateLimits;
 use codex_login::AccountRuntimeStateStore;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::WindowWarmupDebugKind;
 use codex_login::WindowWarmupObservation;
 use codex_login::WindowWarmupOutcome;
+use codex_login::record_window_warmup_debug;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
@@ -66,7 +68,7 @@ const GET_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 const GET_VERIFY_DELAYS_SECS: &[u64] = &[0, 1, 2, 4, 8];
 const URGENT_WARMUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Give quota probes a moment to land, then start warming — do not wait a full interval.
-const INITIAL_WARMUP_SETTLE: Duration = Duration::from_secs(30);
+pub(crate) const INITIAL_WARMUP_SETTLE: Duration = Duration::from_secs(30);
 
 /// Use the process originator (same header as interactive turns). A made-up warmup
 /// originator is not first-party and can be rejected independently of ChatGPT bearer auth.
@@ -76,16 +78,21 @@ fn warmup_originator() -> String {
 
 /// Spawns the periodic standby-window warmup loop. The caller owns the handle and may abort it.
 pub(crate) fn spawn_window_warmup_task(pool: Arc<AccountPool>, config: Config) -> JoinHandle<()> {
+    record_window_warmup_debug(WindowWarmupDebugKind::TaskSpawned);
     tokio::spawn(async move {
         // Settle install/quota probes before the first pass.
         tokio::time::sleep(INITIAL_WARMUP_SETTLE).await;
         loop {
             if !config.account_pool.effective_window_warmup() {
+                record_window_warmup_debug(WindowWarmupDebugKind::WarmupDisabled);
                 tokio::time::sleep(config.account_pool.effective_window_warmup_interval()).await;
                 continue;
             }
             if let Err(error) = run_warmup_pass(&pool, &config).await {
                 debug!(error = %error, "account window warmup pass failed");
+                record_window_warmup_debug(WindowWarmupDebugKind::PassFailed {
+                    error: error.to_string(),
+                });
             }
             let sleep_for = if pool.needs_urgent_window_warmup(
                 config.account_pool.effective_preemptive_switch_percent(),
@@ -99,7 +106,8 @@ pub(crate) fn spawn_window_warmup_task(pool: Arc<AccountPool>, config: Config) -
     })
 }
 
-async fn run_warmup_pass(pool: &AccountPool, config: &Config) -> anyhow::Result<()> {
+pub(crate) async fn run_warmup_pass(pool: &AccountPool, config: &Config) -> anyhow::Result<()> {
+    record_window_warmup_debug(WindowWarmupDebugKind::PassBegin);
     let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
     let lock_store = store.clone();
     let _lock = tokio::task::spawn_blocking(move || lock_store.lock_window_warmup())
@@ -107,6 +115,7 @@ async fn run_warmup_pass(pool: &AccountPool, config: &Config) -> anyhow::Result<
         .map_err(|error| anyhow::anyhow!("window warmup lock join failed: {error}"))??;
     store.apply_window_warmup_to_pool(pool)?;
     let Some(profile_id) = pool.window_warmup_candidates().into_iter().next() else {
+        record_window_warmup_debug(WindowWarmupDebugKind::PassNoCandidate);
         return Ok(());
     };
     let Some((_, auth_manager)) = pool
@@ -134,6 +143,9 @@ async fn warm_profile(
     let _ = auth_manager.reload().await;
     let Some(auth) = auth_manager.auth().await.filter(CodexAuth::is_chatgpt_auth) else {
         debug!(%profile_id, "skipping window warmup without ChatGPT auth");
+        record_window_warmup_debug(WindowWarmupDebugKind::SkipNoAuth {
+            profile_id: profile_id.to_string(),
+        });
         return Ok(());
     };
 
@@ -156,8 +168,15 @@ async fn warm_profile(
     let models = codex_models_manager::select_warmup_models(&catalog, config.model.as_deref());
     if models.is_empty() {
         warn!(%profile_id, "standby window warmup skipped: no catalog-backed ChatGPT model");
+        record_window_warmup_debug(WindowWarmupDebugKind::CatalogEmpty {
+            profile_id: profile_id.to_string(),
+        });
         return Ok(());
     }
+    record_window_warmup_debug(WindowWarmupDebugKind::CatalogResolved {
+        profile_id: profile_id.to_string(),
+        slugs: models.iter().map(|model| model.slug.clone()).collect(),
+    });
     let thread_id = ThreadId::new();
     let client = ModelClient::new(
         Some(Arc::clone(&auth_manager)),
@@ -198,6 +217,15 @@ async fn warm_profile(
             use_responses_lite = model_info.use_responses_lite,
             "starting standby window warmup"
         );
+        record_window_warmup_debug(WindowWarmupDebugKind::RequestStart {
+            profile_id: profile_id.to_string(),
+            model: model_info.slug.clone(),
+            effort: effort
+                .as_ref()
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|| "none".to_string()),
+            use_responses_lite: model_info.use_responses_lite,
+        });
         *observed_limits.lock().await = None;
         let session_telemetry = SessionTelemetry::new(
             thread_id,
@@ -241,9 +269,19 @@ async fn warm_profile(
                         error = %error,
                         "standby window warmup rejected an unusable model; trying the catalog default"
                     );
+                    record_window_warmup_debug(WindowWarmupDebugKind::ModelRejected {
+                        profile_id: profile_id.to_string(),
+                        rejected_model: model_info.slug.clone(),
+                        fallback_model: models[index + 1].slug.clone(),
+                        error: error.to_string(),
+                    });
                     continue;
                 }
                 warn!(%profile_id, error = %error, "standby window warmup request failed");
+                record_window_warmup_debug(WindowWarmupDebugKind::RequestFailed {
+                    profile_id: profile_id.to_string(),
+                    error: error.to_string(),
+                });
                 // The POST already went out. Keep GET-verify — a tool-call
                 // stream can end without Completed and still start the 5h window.
                 break;
@@ -263,6 +301,9 @@ async fn warm_profile(
                     break;
                 }
                 warn!(%profile_id, "standby window warmup timed out");
+                record_window_warmup_debug(WindowWarmupDebugKind::RequestTimeout {
+                    profile_id: profile_id.to_string(),
+                });
                 return Ok(());
             }
         }
@@ -325,6 +366,14 @@ async fn warm_profile(
                 .map(|window| window.used_percent),
             "standby window warmup completed without starting the 5h window"
         );
+        record_window_warmup_debug(WindowWarmupDebugKind::Noop {
+            profile_id: profile_id.to_string(),
+            stream_started,
+            get_primary: best_limits
+                .as_ref()
+                .and_then(|limits| limits.primary.as_ref())
+                .map(|window| window.used_percent.to_string()),
+        });
         return Ok(());
     }
 
@@ -334,6 +383,11 @@ async fn warm_profile(
         let _ = pool.update_rate_limits(profile_id, limits.clone());
     }
 
+    let used_percent = best_limits
+        .as_ref()
+        .and_then(|limits| limits.primary.as_ref())
+        .map(|window| window.used_percent.to_string())
+        .unwrap_or_else(|| "started".to_string());
     let _ = pool.record_window_warmup(
         profile_id,
         WindowWarmupObservation::current(
@@ -343,6 +397,10 @@ async fn warm_profile(
             /*consecutive_failures*/ 0,
         ),
     );
+    record_window_warmup_debug(WindowWarmupDebugKind::Succeeded {
+        profile_id: profile_id.to_string(),
+        used_percent,
+    });
     Ok(())
 }
 

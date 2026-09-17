@@ -56,6 +56,7 @@ pub enum SlashCommand {
     Pwd,
     Usage,
     Account,
+    Warmup,
     DebugConfig,
     Title,
     Statusline,
@@ -90,6 +91,9 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             SlashCommand::Account => "view or switch the active multi-account pool profile",
+            SlashCommand::Warmup => {
+                "dump standby window-warmup debug details; /warmup now requests one pass"
+            }
             SlashCommand::Feedback => "send logs to maintainers",
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
@@ -182,6 +186,7 @@ impl SlashCommand {
                 | SlashCommand::Cd
                 | SlashCommand::Pwd
                 | SlashCommand::Usage
+                | SlashCommand::Warmup
                 | SlashCommand::Pets
                 | SlashCommand::Side
                 | SlashCommand::Btw
@@ -248,6 +253,7 @@ impl SlashCommand {
             | SlashCommand::Pwd
             | SlashCommand::Usage
             | SlashCommand::Account
+            | SlashCommand::Warmup
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop
@@ -324,6 +330,9 @@ mod tests {
         assert!(SlashCommand::Raw.available_in_side_conversation());
         assert!(SlashCommand::Raw.supports_inline_args());
         assert!(SlashCommand::App.available_during_task());
+        assert!(SlashCommand::Warmup.available_during_task());
+        assert!(SlashCommand::Warmup.supports_inline_args());
+        assert_eq!(SlashCommand::Warmup.command(), "warmup");
     }
 
     #[test]

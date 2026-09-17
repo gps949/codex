@@ -109,6 +109,18 @@ impl ExecutionAccountPoolHandle {
         }
     }
 
+    pub fn window_warmup_settle_seconds() -> u64 {
+        crate::account_window_warmup::INITIAL_WARMUP_SETTLE.as_secs()
+    }
+
+    pub fn window_warmup_task_running(&self) -> bool {
+        self.inner.window_warmup_task_running()
+    }
+
+    pub fn request_window_warmup_pass_now(&self, config: &Config) {
+        self.inner.request_window_warmup_pass_now(config.clone());
+    }
+
     pub async fn force_activate_automatic(
         &self,
     ) -> Result<ExecutionAccountIdentity, AccountPoolError> {

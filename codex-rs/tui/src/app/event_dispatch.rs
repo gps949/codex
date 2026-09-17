@@ -1295,6 +1295,12 @@ impl App {
             AppEvent::RefreshAccountPool => {
                 self.refresh_account_pool(app_server);
             }
+            AppEvent::FetchWarmupDebug { run_now } => {
+                self.fetch_warmup_debug(app_server, run_now);
+            }
+            AppEvent::WarmupDebugLoaded { result } => {
+                self.chat_widget.add_warmup_debug_output(result);
+            }
             AppEvent::AccountPoolLoaded { result } => {
                 self.chat_widget.open_account_pool_picker(result);
             }

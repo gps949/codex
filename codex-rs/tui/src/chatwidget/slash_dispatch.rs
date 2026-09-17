@@ -509,6 +509,10 @@ impl ChatWidget {
             SlashCommand::Account => {
                 self.app_event_tx.send(AppEvent::RefreshAccountPool);
             }
+            SlashCommand::Warmup => {
+                self.app_event_tx
+                    .send(AppEvent::FetchWarmupDebug { run_now: false });
+            }
             SlashCommand::Ide => {
                 self.handle_ide_command();
             }
@@ -766,6 +770,12 @@ impl ChatWidget {
             SlashCommand::Mcp => match trimmed.to_ascii_lowercase().as_str() {
                 "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
                 _ => self.add_error_message("Usage: /mcp [verbose]".to_string()),
+            },
+            SlashCommand::Warmup => match trimmed.to_ascii_lowercase().as_str() {
+                "now" => self
+                    .app_event_tx
+                    .send(AppEvent::FetchWarmupDebug { run_now: true }),
+                _ => self.add_error_message("Usage: /warmup [now]".to_string()),
             },
             SlashCommand::Keymap => match trimmed.to_ascii_lowercase().as_str() {
                 "" => self.open_keymap_picker(),
@@ -1172,6 +1182,7 @@ impl ChatWidget {
             | SlashCommand::Pwd
             | SlashCommand::Usage
             | SlashCommand::Account
+            | SlashCommand::Warmup
             | SlashCommand::DebugConfig
             | SlashCommand::Ps
             | SlashCommand::Stop
