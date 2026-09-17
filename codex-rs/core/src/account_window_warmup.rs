@@ -8,14 +8,16 @@
 //!
 //! A pass lists models through the same `ModelsManager` path as the session
 //! picker and `codex debug models` (`GET /models`, cache then network). It then
-//! posts one turn with a ChatGPT-capable slug from that catalog, reads 5h
-//! usage, and updates rate limits when the window started. Unknown or reserved
-//! slugs are never posted. If the API rejects the first slug as unusable, the
-//! same pass tries the catalog default once. `/models` is existence/source of
-//! truth, not a ChatGPT allowlist — gpt-5.2 still appears there. If the window
-//! still did not start, the attempt is logged and otherwise discarded — no
-//! Failed observation, no backoff clock. The next interval retries any profile
-//! still at 0%.
+//! posts one turn with a ChatGPT-capable slug from that catalog, using the
+//! same tool harness a session would advertise (`exec`/`wait` for
+//! `code_mode_only` models). The stream is drained until `Completed` — aborting
+//! on the first tool call cancels billing. Unknown or reserved slugs are never
+//! posted. If the API rejects the first slug as unusable, the same pass tries
+//! the catalog default once. `/models` is existence/source of truth, not a
+//! ChatGPT allowlist — gpt-5.2 still appears there. If the window still did
+//! not start, the attempt is logged and otherwise discarded — no Failed
+//! observation, no backoff clock. The next interval retries any profile still
+//! at 0%.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +46,6 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 use tracing::warn;
 
-use crate::account_window_warmup_request::is_warmup_tool_call;
 use crate::account_window_warmup_request::warmup_prompt;
 use crate::account_window_warmup_request::warmup_responses_metadata;
 use crate::client::ModelClient;
@@ -243,7 +244,9 @@ async fn warm_profile(
                     continue;
                 }
                 warn!(%profile_id, error = %error, "standby window warmup request failed");
-                return Ok(());
+                // The POST already went out. Keep GET-verify — a tool-call
+                // stream can end without Completed and still start the 5h window.
+                break;
             }
             Err(_elapsed) => {
                 let partial = observed_limits.lock().await.clone();
@@ -373,12 +376,12 @@ async fn stream_warmup_turn(
                 observed = Some(preferred.clone());
                 *observed_limits.lock().await = Some(preferred);
             }
+            // Do not abort on the first tool call. Current ChatGPT models are
+            // code_mode_only and often emit `exec` immediately; dropping the
+            // stream there cancels the in-flight Responses turn before
+            // Completed, so the 5h window never starts (ma.7: High sol
+            // finished in ~3s with get_primary=0).
             ResponseEvent::Completed { .. } => break,
-            ResponseEvent::OutputItemDone(item) | ResponseEvent::OutputItemAdded(item)
-                if is_warmup_tool_call(&item) =>
-            {
-                break;
-            }
             _ => {}
         }
     }
