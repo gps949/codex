@@ -141,8 +141,14 @@ impl AccountRequestProcessor {
     }
 
     async fn rate_limit_reset_backend_client(&self) -> Result<BackendClient, JSONRPCErrorError> {
+<<<<<<< HEAD
         let _ = self.get_account_pool_response().await?;
         let Some(auth) = self.auth_manager.auth().await else {
+=======
+        let Some((auth, http_client_factory)) =
+            self.auth_manager.auth_with_http_client_factory().await
+        else {
+>>>>>>> rust-v0.157.1
             return Err(invalid_request(
                 "codex account authentication required for rate limit reset credits",
             ));
@@ -156,7 +162,7 @@ impl AccountRequestProcessor {
         Ok(BackendClient::from_auth(
             self.config.chatgpt_base_url.clone(),
             &auth,
-            self.config.http_client_factory(),
+            http_client_factory,
         ))
     }
 }
