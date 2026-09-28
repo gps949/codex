@@ -4,6 +4,7 @@
 import type { Account } from "./Account";
 import type { AccountPoolReadResponse } from "./AccountPoolReadResponse";
 
+<<<<<<< HEAD
 export type GetAccountResponse = { account: Account | null, requiresOpenaiAuth: boolean,
 /**
  * Native multi-account pool snapshot when `[account_pool]` is configured.
@@ -12,3 +13,6 @@ export type GetAccountResponse = { account: Account | null, requiresOpenaiAuth: 
  * experimental `accountPool/read` RPC to show per-profile availability and cooldowns.
  */
 accountPool: AccountPoolReadResponse | null, };
+=======
+export type GetAccountResponse = {account: Account | null, requiresOpenaiAuth: boolean};
+>>>>>>> rust-v0.157.1
