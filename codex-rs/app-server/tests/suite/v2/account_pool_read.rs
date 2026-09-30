@@ -620,3 +620,5 @@ async fn account_pool_mobile_quota_read_during_switch_rejects_stale_values() -> 
     Ok(())
 }
 
+#[path = "account_pool_identity_tests.rs"]
+mod identity_tests;
