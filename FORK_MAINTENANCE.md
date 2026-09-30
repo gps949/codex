@@ -180,6 +180,37 @@ Remaining edge cases (documented, not auto-fixable):
   the fork. Update checks point at this fork's releases; `codex update` prints
   a pointer to the releases page instead of executing an installer.
 
+## Lessons from the 0.159 sync
+
+- **Application network permits.** Upstream revokes every outstanding
+  network permit when the account owner changes, which fails in-flight config
+  loads and quota reads. The pool rotates accounts on its own, so its
+  `AccountPoolExternalAuth` declares `rotates_within_application_login()`;
+  `AuthManager::set_cached_auth` then keeps outstanding permits for pool
+  rotations while real logins, logouts and account changes still revoke them.
+  `set_cached_auth` must never wait on the external-auth lock:
+  `clear_external_auth` calls it while holding that lock for writing.
+- **Remote control ownership.** Remote control follows the shared
+  `AuthManager` (upstream behavior: logins and logouts retire the relay) unless
+  `account-profiles.json` exists; with a pool it stays pinned to a separate
+  root-only manager so pool rotation never re-pairs it.
+- **Workspace routing owner.** `AuthManager::workspace_routing` rejects a
+  request captured for another account or seat before running discovery, even
+  when discovery would report no route.
+- **Upstream tests that do not apply to the fork.** `codex-cli` daemon
+  packaging tests (`app_server_daemon`, `daemon_startup`, `worktree`), `update`
+  and `queue` assume the official standalone install and updater; the fork
+  binds the daemon to the invoking CLI and disables `codex update`. TUI and
+  core snapshot tests that print the version fail on release-tag baselines,
+  where `Cargo.toml` is stamped instead of `0.0.0`. Network-proxy and skills
+  tests depend on the local network and on the user's own skills directory.
+  None of these gate the release; `fork-ci` runs the account-focused subset.
+- **Tooling pitfalls.** Two worktrees must not share a `CARGO_TARGET_DIR`:
+  Cargo hashes workspace path dependencies relative to the workspace root, so
+  they overwrite each other's artifacts. Never `git add -A` right after a test
+  run; pending `*.snap.new` files are now ignored, but review snapshots with
+  `cargo insta` and accept them deliberately.
+
 ## Reset-credit automation
 
 Automatic redemption is **opt-in and rule-bound** because credits are a

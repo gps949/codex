@@ -1,12 +1,15 @@
 ---
 source: tui/src/app/daemon_menu_tests.rs
+assertion_line: 94
 expression: "render_bottom_popup(&app.chat_widget, 80)"
 ---
   Daemon
   Running daemon: v0.153.0
+  Fork releases: https://github.com/gps949/codex/releases
 
 
-› 1. Install latest public stable
-  2. Use this CLI build
+     Install latest public stable (disabled)  Official updates would replace
+                                              this fork
+› 1. Use this CLI build
 
   enter select · esc back
