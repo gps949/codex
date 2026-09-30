@@ -1,9 +1,10 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
-assertion_line: 4327
+assertion_line: 4462
 expression: "render_bottom_popup(&chat, 80)"
 ---
   Select Codex account
+
 
   1. Rotation: fill-first                Prefer the lowest priority among
                                          eligible profiles.
@@ -14,4 +15,4 @@ expression: "render_bottom_popup(&chat, 80)"
                                          eligible profile using the rotation
                                          strategy above.
 
-  Press enter to confirm or esc to go back
+  enter select · esc back
