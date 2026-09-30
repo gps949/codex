@@ -2771,7 +2771,7 @@ async fn drain_in_flight(
                 .await;
                 if envelope.metadata.is_some() {
                     sess.record_annotated_conversation_items(
-                        &turn_context,
+                        turn_context,
                         &step_context.settings.model_info,
                         vec![envelope],
                     )
