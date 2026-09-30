@@ -169,6 +169,10 @@ impl ExternalAuth for AccountPoolExternalAuth {
         Box::pin(async move { self.refresh_active_auth(context).await })
     }
 
+    fn rotates_within_application_login(&self) -> bool {
+        true
+    }
+
     fn classify_error(&self, error: io::Error) -> RefreshTokenError {
         // Per-profile unauthorized recovery preserves its native permanent/transient error inside
         // `io::Error::other`; recover that exact classification for the outer AuthManager.

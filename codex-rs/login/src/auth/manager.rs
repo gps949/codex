@@ -283,6 +283,16 @@ pub trait ExternalAuth: Send + Sync {
     fn classify_error(&self, error: std::io::Error) -> RefreshTokenError {
         RefreshTokenError::Transient(error)
     }
+
+    /// Whether account changes from this source only rotate credentials within one application
+    /// login, such as a pool selecting another of its own accounts.
+    ///
+    /// The application network policy belongs to that login, so a rotation must not revoke
+    /// requests that are already outstanding. Sources that can change who is logged in keep the
+    /// default and revoke outstanding requests on every owner change.
+    fn rotates_within_application_login(&self) -> bool {
+        false
+    }
 }
 
 pub type ExternalAuthFuture<'a, T> = Pin<Box<dyn Future<Output = std::io::Result<T>> + Send + 'a>>;
@@ -2635,7 +2645,11 @@ impl AuthManager {
                 !Self::auths_equal_for_refresh(previous, new_auth.as_ref());
             let owner_changed =
                 auth_changed_for_refresh && !same_owner(previous, new_auth.as_ref());
-            if owner_changed {
+            let pool_rotation = owner_changed
+                && self
+                    .external_auth_provider()
+                    .is_some_and(|external| external.rotates_within_application_login());
+            if owner_changed && !pool_rotation {
                 self.auth_route_config
                     .http_client_factory()
                     .network_policy()
@@ -3152,3 +3166,7 @@ mod change_state_tests;
 #[cfg(test)]
 #[path = "account_user_id_tests.rs"]
 mod account_user_id_tests;
+
+#[cfg(test)]
+#[path = "pool_rotation_tests.rs"]
+mod pool_rotation_tests;
