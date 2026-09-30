@@ -1,4 +1,7 @@
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use chrono::Utc;
 use thiserror::Error;
@@ -41,12 +44,15 @@ pub struct AccountPoolRuntime {
     runtime_state_issue: Option<String>,
     auth_sync_task: JoinHandle<()>,
     keepalive_task: JoinHandle<()>,
+    suspended: Arc<AtomicBool>,
+    lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// ChatGPT refresh tokens can expire when a profile stays idle for weeks. Touching every
 /// profile's AuthManager on this cadence lets its own 8-day proactive-refresh policy keep
 /// stand-by credentials alive long before they are needed.
 const AUTH_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
+const SUSPENDED_MARKER: &str = ".account-pool-suspended";
 
 impl AccountPoolRuntime {
     /// Installs native account pooling only when the user has already configured the account
@@ -58,7 +64,7 @@ impl AccountPoolRuntime {
         include_existing_root_login: bool,
     ) -> Result<Option<Self>, AccountPoolRuntimeError> {
         let store = AccountProfileStore::new(config.codex_home());
-        if !store.manifest_path().is_file() {
+        if !store.manifest_path().is_file() || Self::is_home_suspended(&config.codex_home()) {
             return Ok(None);
         }
 
@@ -89,6 +95,9 @@ impl AccountPoolRuntime {
         auth_config: AuthConfig,
         include_existing_root_login: bool,
     ) -> Result<Self, AccountPoolRuntimeError> {
+        if Self::is_home_suspended(&auth_config.codex_home) {
+            return Err(AccountPoolRuntimeError::Suspended);
+        }
         if outer_auth_manager.is_workload_identity_selected() {
             return Err(AccountPoolRuntimeError::WorkloadIdentitySelected);
         }
@@ -144,11 +153,17 @@ impl AccountPoolRuntime {
         outer_auth_manager
             .set_external_auth(Arc::new(AccountPoolExternalAuth::new(Arc::clone(&pool))))
             .await?;
+        if Self::is_home_suspended(&auth_config.codex_home) {
+            outer_auth_manager.suspend_pool_auth();
+            return Err(AccountPoolRuntimeError::Suspended);
+        }
 
         let initial_generation = pool
             .lease()
             .map(|lease| lease.generation())
             .unwrap_or_default();
+        let suspended = Arc::new(AtomicBool::new(false));
+        let lifecycle_lock = Arc::new(tokio::sync::Mutex::new(()));
         if let Err(error) = runtime_state_store.synchronize_pool(&pool, &mut runtime_state) {
             tracing::warn!("failed to persist initial account runtime state: {error}");
         }
@@ -158,8 +173,15 @@ impl AccountPoolRuntime {
             runtime_state_store.clone(),
             initial_generation,
             runtime_state,
+            Arc::clone(&suspended),
+            Arc::clone(&lifecycle_lock),
         );
-        let keepalive_task = spawn_auth_keepalive_task(Arc::clone(&pool));
+        let keepalive_task = spawn_auth_keepalive_task(
+            Arc::clone(&pool),
+            auth_config.codex_home.clone(),
+            Arc::clone(&suspended),
+            Arc::clone(&lifecycle_lock),
+        );
 
         Ok(Self {
             pool,
@@ -171,7 +193,96 @@ impl AccountPoolRuntime {
             runtime_state_issue,
             auth_sync_task,
             keepalive_task,
+            suspended,
+            lifecycle_lock,
         })
+    }
+
+    /// Reports a persisted logout without loading any profile credentials.
+    pub fn is_home_suspended(codex_home: &Path) -> bool {
+        codex_home
+            .join(SUSPENDED_MARKER)
+            .try_exists()
+            .unwrap_or(true)
+    }
+
+    /// Persists a pool logout while retaining profile enrollment and managed credentials.
+    pub fn suspend_home(codex_home: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(codex_home)?;
+        std::fs::write(
+            codex_home.join(SUSPENDED_MARKER),
+            b"Account pool suspended after logout.\n",
+        )
+    }
+
+    /// Re-enables account pooling after an explicit successful account selection.
+    pub fn resume_home(codex_home: &Path) -> std::io::Result<()> {
+        match std::fs::remove_file(codex_home.join(SUSPENDED_MARKER)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.load(Ordering::Acquire)
+            || Self::is_home_suspended(&self.auth_config.codex_home)
+    }
+
+    /// Detaches execution auth before the caller clears the ordinary root login.
+    pub async fn suspend_for_logout(&self) -> std::io::Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
+        Self::suspend_home(&self.auth_config.codex_home)?;
+        self.suspended.store(true, Ordering::Release);
+        self.outer_auth_manager.suspend_pool_auth();
+        Ok(())
+    }
+
+    /// Restores the bridge only after validating the selected profile through normal auth policy.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "serialize authentication bridge replacement with logout and profile refresh"
+    )]
+    pub async fn resume(&self) -> Result<(), AccountPoolRuntimeError> {
+        let _guard = self.lifecycle_lock.lock().await;
+        if self.outer_auth_manager.has_external_auth() && self.suspended.load(Ordering::Acquire) {
+            Self::suspend_home(&self.auth_config.codex_home)?;
+            return Err(AccountPoolRuntimeError::ExistingExternalAuth);
+        }
+        Self::resume_home(&self.auth_config.codex_home)?;
+        if self.suspended.load(Ordering::Acquire) {
+            let state = match self.runtime_state_store.load() {
+                Ok(state) => state,
+                Err(error) => {
+                    Self::suspend_home(&self.auth_config.codex_home)?;
+                    return Err(std::io::Error::other(error).into());
+                }
+            };
+            self.pool
+                .merge_runtime_state(&state, &AccountRuntimeState::default(), None);
+            let _ = crate::recover_pool_auth_from_disk(&self.pool).await;
+            self.outer_auth_manager.resume_pool_auth();
+            match self
+                .outer_auth_manager
+                .set_external_auth(Arc::new(AccountPoolExternalAuth::new(Arc::clone(
+                    &self.pool,
+                ))))
+                .await
+            {
+                Ok(()) => self.suspended.store(false, Ordering::Release),
+                Err(error) => {
+                    Self::suspend_home(&self.auth_config.codex_home)?;
+                    self.outer_auth_manager.suspend_pool_auth();
+                    return Err(error.into());
+                }
+            }
+        }
+        if Self::is_home_suspended(&self.auth_config.codex_home) {
+            self.suspended.store(true, Ordering::Release);
+            self.outer_auth_manager.suspend_pool_auth();
+            return Err(AccountPoolRuntimeError::Suspended);
+        }
+        Ok(())
     }
 
     /// Registers Ready profiles that appeared on disk after this process installed the pool.
@@ -181,6 +292,9 @@ impl AccountPoolRuntime {
     pub async fn sync_missing_profiles(
         &self,
     ) -> Result<Vec<AccountProfileId>, AccountPoolRuntimeError> {
+        if self.is_suspended() {
+            return Ok(Vec::new());
+        }
         let known = self
             .pool
             .snapshots()
@@ -346,7 +460,8 @@ fn restore_runtime_state(
         }
     }
 
-    // Restore soft scheduling and confirmed reset epochs independently of hard cooldowns.
+    // Restore soft early-switch preferences after authoritative cooldowns. They retain usable
+    // quota and must remain distinct from exhaustion across restarts and processes.
     pool.merge_runtime_state(runtime_state, &AccountRuntimeState::default(), None);
 
     if let Some(active_profile_id) = runtime_state.active_profile_id.as_ref()
@@ -370,24 +485,125 @@ fn restore_runtime_state(
 #[path = "account_runtime_tests.rs"]
 mod tests;
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "prevent late background credential refresh from restoring authentication after logout"
+)]
 fn spawn_auth_sync_task(
     pool: Arc<AccountPool>,
     auth_manager: Arc<AuthManager>,
     runtime_state_store: AccountRuntimeStateStore,
     mut observed_generation: u64,
     mut runtime_state: AccountRuntimeState,
+    suspended: Arc<AtomicBool>,
+    lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
 ) -> JoinHandle<()> {
     let mut changes = pool.change_receiver();
     tokio::spawn(async move {
+        let mut codex_home = runtime_state_store.path();
+        codex_home.pop();
         let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut credential_versions = std::collections::HashMap::new();
         loop {
             tokio::select! {
                 result = changes.changed() => { if result.is_err() { break; } }
                 _ = poll.tick() => {}
             }
+            {
+                let _guard = lifecycle_lock.lock().await;
+                let marker_present = AccountPoolRuntime::is_home_suspended(&codex_home);
+                if marker_present {
+                    if !suspended.swap(true, Ordering::AcqRel) {
+                        auth_manager.suspend_pool_auth();
+                    }
+                    continue;
+                }
+                if suspended.load(Ordering::Acquire) {
+                    if auth_manager.has_external_auth() {
+                        continue;
+                    }
+                    if let Err(error) =
+                        runtime_state_store.synchronize_pool(&pool, &mut runtime_state)
+                    {
+                        tracing::warn!("failed to load selected account before resuming: {error}");
+                        let _ = AccountPoolRuntime::suspend_home(&codex_home);
+                        continue;
+                    }
+                    let _ = crate::recover_pool_auth_from_disk(&pool).await;
+                    auth_manager.resume_pool_auth();
+                    match auth_manager
+                        .set_external_auth(Arc::new(AccountPoolExternalAuth::new(Arc::clone(
+                            &pool,
+                        ))))
+                        .await
+                    {
+                        Ok(()) => suspended.store(false, Ordering::Release),
+                        Err(error) => {
+                            tracing::warn!("failed to resume account pooling: {error}");
+                            let _ = AccountPoolRuntime::suspend_home(&codex_home);
+                            continue;
+                        }
+                    }
+                    if AccountPoolRuntime::is_home_suspended(&codex_home) {
+                        suspended.store(true, Ordering::Release);
+                        auth_manager.suspend_pool_auth();
+                        continue;
+                    }
+                }
+            }
             if let Err(error) = runtime_state_store.synchronize_pool(&pool, &mut runtime_state) {
                 tracing::warn!("failed to persist account runtime state: {error}");
+            }
+
+            let enabled: std::collections::HashMap<_, _> = pool
+                .snapshots()
+                .into_iter()
+                .filter(|snapshot| !snapshot.profile.disabled)
+                .map(|snapshot| (snapshot.profile.id, snapshot.profile.credential_home))
+                .collect();
+            let mut credentials_changed = false;
+            for (profile_id, manager) in pool.auth_managers() {
+                let _guard = lifecycle_lock.lock().await;
+                if suspended.load(Ordering::Acquire)
+                    || AccountPoolRuntime::is_home_suspended(&codex_home)
+                {
+                    break;
+                }
+                let Some(home) = enabled.get(&profile_id) else {
+                    continue;
+                };
+                let version = crate::account_credentials::credential_version(home);
+                if credential_versions.get(&profile_id) == Some(&version) {
+                    continue;
+                }
+                credential_versions.insert(profile_id.clone(), version.clone());
+                let _ = crate::refresh_profile_auth_from_disk(&pool, &profile_id, &manager).await;
+                // The marker is published only by a completed login, including
+                // keyring-backed logins. A previously loaded new token is still
+                // proof of repair even if this reload itself changes nothing.
+                if version.is_some()
+                    && let Some(auth) = manager.auth_cached().filter(CodexAuth::is_chatgpt_auth)
+                    && manager.refresh_failure_for_auth(&auth).is_none()
+                {
+                    let _ = pool.clear_authentication_unavailable(&profile_id);
+                }
+                credentials_changed = true;
+            }
+            credential_versions.retain(|profile_id, _| enabled.contains_key(profile_id));
+            if credentials_changed {
+                let _guard = lifecycle_lock.lock().await;
+                if !suspended.load(Ordering::Acquire)
+                    && !AccountPoolRuntime::is_home_suspended(&codex_home)
+                {
+                    auth_manager.reload().await;
+                }
+            }
+
+            if suspended.load(Ordering::Acquire)
+                || AccountPoolRuntime::is_home_suspended(&codex_home)
+            {
+                continue;
             }
 
             // A fully exhausted pool has no schedulable identity to sync; skipping the reload
@@ -400,14 +616,28 @@ fn spawn_auth_sync_task(
                 continue;
             }
             observed_generation = current_generation;
-            auth_manager.reload().await;
+            let _guard = lifecycle_lock.lock().await;
+            if !suspended.load(Ordering::Acquire)
+                && !AccountPoolRuntime::is_home_suspended(&codex_home)
+            {
+                auth_manager.reload().await;
+            }
         }
     })
 }
 
 /// Periodically touches every profile's own AuthManager so idle stand-by accounts run their
 /// normal proactive token refresh instead of silently aging out while another account is active.
-fn spawn_auth_keepalive_task(pool: Arc<AccountPool>) -> JoinHandle<()> {
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "keep profile refresh and logout ordered while retaining enrolled credentials"
+)]
+fn spawn_auth_keepalive_task(
+    pool: Arc<AccountPool>,
+    codex_home: std::path::PathBuf,
+    suspended: Arc<AtomicBool>,
+    lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(AUTH_KEEPALIVE_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -416,6 +646,19 @@ fn spawn_auth_keepalive_task(pool: Arc<AccountPool>) -> JoinHandle<()> {
         loop {
             ticker.tick().await;
             for (profile_id, manager) in pool.auth_managers() {
+                let _guard = lifecycle_lock.lock().await;
+                if suspended.load(Ordering::Acquire)
+                    || AccountPoolRuntime::is_home_suspended(&codex_home)
+                {
+                    break;
+                }
+                if pool
+                    .snapshots()
+                    .iter()
+                    .any(|snapshot| snapshot.profile.id == profile_id && snapshot.profile.disabled)
+                {
+                    continue;
+                }
                 // Reload from disk first so CLI re-login is observed and stale cached tokens cannot
                 // overwrite freshly written credentials on a later refresh.
                 crate::keepalive_reload_profile_auth(pool.as_ref(), &profile_id, manager).await;
@@ -426,6 +669,8 @@ fn spawn_auth_keepalive_task(pool: Arc<AccountPool>) -> JoinHandle<()> {
 
 #[derive(Debug, Error)]
 pub enum AccountPoolRuntimeError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error(transparent)]
     Store(#[from] AccountProfileStoreError),
     #[error(transparent)]
@@ -442,4 +687,6 @@ pub enum AccountPoolRuntimeError {
     NoConfiguredProfiles,
     #[error("no usable ChatGPT account profiles are available")]
     NoUsableProfiles(Vec<AccountPoolRuntimeProfileIssue>),
+    #[error("account pooling is suspended after logout; select an account to resume")]
+    Suspended,
 }

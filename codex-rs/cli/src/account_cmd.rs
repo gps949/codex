@@ -282,7 +282,8 @@ pub(crate) async fn run_account_list(
         println!("ACTIVE\tPRIORITY\tSTATE\tPLAN\tEMAIL\tCOOLDOWN\tLABEL");
     }
     for record in records {
-        let active = runtime_state.active_profile_id.as_ref() == Some(&record.profile.id);
+        let active = !codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home)
+            && runtime_state.active_profile_id.as_ref() == Some(&record.profile.id);
         let runtime = runtime_by_id.get(&record.profile.id).copied();
         let cooldown = format_cooldown(runtime);
         let (plan, email) = load_profile_identity(&config, &record.profile).await;
@@ -365,6 +366,10 @@ pub(crate) async fn run_account_use(
         },
     ) {
         eprintln!("Error selecting account: {error}");
+        std::process::exit(1);
+    }
+    if let Err(error) = codex_login::AccountPoolRuntime::resume_home(&config.codex_home) {
+        eprintln!("Selected account {profile_id}, but could not resume account pooling: {error}");
         std::process::exit(1);
     }
     eprintln!(
@@ -714,13 +719,19 @@ async fn load_profile_identity(
     match AuthManager::shared_from_auth_config(auth_config, /*enable_codex_api_key_env*/ false)
         .await
     {
-        Ok(manager) => match manager.auth().await {
-            Some(auth) => (
-                auth.account_plan_type().map(|plan| format!("{plan:?}")),
-                auth.get_account_email(),
-            ),
-            None => (None, None),
-        },
+        Ok(manager) => {
+            match if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
+                manager.auth_cached()
+            } else {
+                manager.auth().await
+            } {
+                Some(auth) => (
+                    auth.account_plan_type().map(|plan| format!("{plan:?}")),
+                    auth.get_account_email(),
+                ),
+                None => (None, None),
+            }
+        }
         Err(_) => (None, None),
     }
 }
