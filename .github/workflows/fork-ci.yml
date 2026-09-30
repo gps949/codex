@@ -48,6 +48,7 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_fork_install.py
           python3 -m unittest discover -s .github/scripts -p test_fork_release_gate.py
+          python3 -m unittest discover -s .github/scripts -p test_latest_upstream_stable_tag.py
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -55,7 +56,7 @@ jobs:
           workspaces: codex-rs
 
       - name: Install system dependencies
-        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config libcap-dev
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
@@ -83,6 +84,7 @@ jobs:
           NEXTEST_PROFILE: default
         run: |
           cargo nextest run --no-fail-fast -p codex-login -p codex-config -p codex-history -p codex-app-server-protocol
-          cargo nextest run --no-fail-fast -p codex-core -E 'test(account_failover) or test(failover) or test(account_transition) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration)'
+          cargo nextest run --no-fail-fast -p codex-core -E 'test(account_failover) or test(failover) or test(account_transition) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration) or test(account_window_warmup) or test(execution_auth_compaction_routing)'
+          cargo nextest run --no-fail-fast -p codex-tui -E 'test(account) or test(warmup) or test(selection_row_layout)'
           cargo nextest run --no-fail-fast -p codex-cli --test account_selection
           cargo nextest run --no-fail-fast -p codex-app-server -E 'test(account_pool) or test(mobile_account) or test(status_overlay)'

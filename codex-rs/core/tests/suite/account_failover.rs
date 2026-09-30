@@ -534,16 +534,13 @@ async fn pool_compaction_manual_uses_local_projection_and_keeps_backup_turn_work
         ],
     )
     .await;
-    let remote_compact = core_test_support::responses::mount_compact_json_once(
-        &server,
-        json!({
-            "output": [{
-                "type": "compaction",
-                "encrypted_content": "REMOTE_COMPACTION_MUST_NOT_RUN",
-            }],
-        }),
-    )
-    .await;
+    // Portable pooled compaction must never call the removed legacy endpoint.
+    Mock::given(method("POST"))
+        .and(path("/responses/compact"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_pre_build_hook(write_account_pool_fixture);
@@ -564,7 +561,6 @@ async fn pool_compaction_manual_uses_local_projection_and_keeps_backup_turn_work
     .await;
     fixture.submit_turn("continue after local compact").await?;
 
-    assert!(remote_compact.requests().is_empty());
     let requests = sampling.requests();
     assert_eq!(requests.len(), 3);
     let compact_request = &requests[1];

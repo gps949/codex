@@ -91,8 +91,10 @@ fn write_pool_only_fixture(codex_home: &Path) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_read_reports_chatgpt_when_only_pool_profile_has_credentials() -> Result<()> {
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), /*chatgpt_base_url*/ None)?;
-    write_models_cache(codex_home.path())?;
+    let routing_server = wiremock::MockServer::start().await;
+    app_test_support::mount_workspace_routing(&routing_server).await;
+    create_config_toml(codex_home.path(), Some(&routing_server.uri()))?;
+    write_models_cache(codex_home.path()).await?;
     write_pool_only_fixture(codex_home.path());
 
     let mut mcp = TestAppServer::builder()
@@ -115,6 +117,15 @@ async fn account_read_reports_chatgpt_when_only_pool_profile_has_credentials() -
         Some(Account::Chatgpt {
             email: Some("selected-acct@example.com".to_string()),
             plan_type: AccountPlanType::Pro,
+        })
+    );
+    assert_eq!(
+        account.workspace_routing,
+        Some(codex_app_server_protocol::WorkspaceRouting {
+            chatgpt_account_id: "account-selected-acct".into(),
+            backend_origin: "https://chatgpt.com".into(),
+            account_routing_override:
+                codex_app_server_protocol::AccountRoutingOverride::NoConstraint,
         })
     );
     let pool = account.account_pool.expect("account pool snapshot");
@@ -149,8 +160,9 @@ async fn rate_limits_use_pool_profile_credentials_without_root_auth() -> Result<
 
     let codex_home = TempDir::new()?;
     let server = MockServer::start().await;
+    app_test_support::mount_workspace_routing(&server).await;
     create_config_toml(codex_home.path(), Some(&server.uri()))?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
     write_pool_only_fixture(codex_home.path());
 
     let reset_at = chrono::Utc::now().timestamp() + 3600;
@@ -215,8 +227,10 @@ async fn rate_limits_use_pool_profile_credentials_without_root_auth() -> Result<
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_pool_external_selection_updates_running_server() -> Result<()> {
     let home = TempDir::new()?;
-    create_config_toml(home.path(), /*chatgpt_base_url*/ None)?;
-    write_models_cache(home.path())?;
+    let routing_server = wiremock::MockServer::start().await;
+    app_test_support::mount_workspace_routing(&routing_server).await;
+    create_config_toml(home.path(), Some(&routing_server.uri()))?;
+    write_models_cache(home.path()).await?;
     write_pool_only_fixture(home.path());
     write_profile_credentials(home.path(), "second", "access-second");
     let path = home.path().join("account-profiles.json");
@@ -280,8 +294,9 @@ async fn account_pool_read_fetches_quota_before_first_model_request() -> Result<
     use wiremock::matchers::path;
     let home = TempDir::new()?;
     let server = MockServer::start().await;
+    app_test_support::mount_workspace_routing(&server).await;
     create_config_toml(home.path(), Some(&server.uri()))?;
-    write_models_cache(home.path())?;
+    write_models_cache(home.path()).await?;
     write_pool_only_fixture(home.path());
     Mock::given(method("GET")).and(path("/api/codex/usage"))
         .and(header("authorization", "Bearer access-selected"))
@@ -346,8 +361,10 @@ async fn account_pool_mobile_query_does_not_add_model_history() -> Result<()> {
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::TurnStartResponse;
     let home = TempDir::new()?;
-    create_config_toml(home.path(), /*chatgpt_base_url*/ None)?;
-    write_models_cache(home.path())?;
+    let routing_server = wiremock::MockServer::start().await;
+    app_test_support::mount_workspace_routing(&routing_server).await;
+    create_config_toml(home.path(), Some(&routing_server.uri()))?;
+    write_models_cache(home.path()).await?;
     write_pool_only_fixture(home.path());
     let mut mcp = TestAppServer::builder()
         .with_codex_home(home.path())
@@ -395,8 +412,10 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::TurnStartResponse;
     let home = TempDir::new()?;
-    create_config_toml(home.path(), Some("http://127.0.0.1:9"))?;
-    write_models_cache(home.path())?;
+    let routing_server = wiremock::MockServer::start().await;
+    app_test_support::mount_workspace_routing(&routing_server).await;
+    create_config_toml(home.path(), Some(&routing_server.uri()))?;
+    write_models_cache(home.path()).await?;
     write_pool_only_fixture(home.path());
     write_profile_credentials(home.path(), "work", "access-work");
     let manifest = home.path().join("account-profiles.json");
@@ -502,8 +521,9 @@ async fn account_pool_mobile_quota_read_during_switch_does_not_mislabel() -> Res
     use wiremock::matchers::path;
     let home = TempDir::new()?;
     let server = MockServer::start().await;
+    app_test_support::mount_workspace_routing(&server).await;
     create_config_toml(home.path(), Some(&server.uri()))?;
-    write_models_cache(home.path())?;
+    write_models_cache(home.path()).await?;
     write_pool_only_fixture(home.path());
     write_profile_credentials(home.path(), "work", "access-work");
     let manifest = home.path().join("account-profiles.json");

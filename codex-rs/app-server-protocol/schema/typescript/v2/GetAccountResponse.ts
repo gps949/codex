@@ -4,11 +4,10 @@
 import type { Account } from "./Account";
 import type { AccountPoolReadResponse } from "./AccountPoolReadResponse";
 
-export type GetAccountResponse = { account: Account | null, requiresOpenaiAuth: boolean,
-/**
+export type GetAccountResponse = {account: Account | null, requiresOpenaiAuth: boolean, /**
  * Native multi-account pool snapshot when `[account_pool]` is configured.
  *
  * Stable clients (including mobile) can use this field from `account/read` instead of the
  * experimental `accountPool/read` RPC to show per-profile availability and cooldowns.
  */
-accountPool: AccountPoolReadResponse | null, };
+accountPool: AccountPoolReadResponse | null};

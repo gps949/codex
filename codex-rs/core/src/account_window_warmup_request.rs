@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::client_common::Prompt;
-use crate::config::Config;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
@@ -23,6 +22,8 @@ use crate::tools::handlers::shell_spec::create_write_stdin_tool;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::handlers::view_image_spec::create_view_image_tool;
 use codex_code_mode::ImageDetailVisibility;
+use codex_prompts::ResolvedModelMessages;
+use codex_prompts::render_model_instructions;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
@@ -35,7 +36,7 @@ use codex_tools::ToolSpec;
 
 const WARMUP_PROMPT: &str = "1+1?";
 
-pub(crate) fn warmup_prompt(model_info: &ModelInfo, config: &Config) -> Prompt {
+pub(crate) fn warmup_prompt(model_info: &ModelInfo) -> Prompt {
     Prompt {
         input: vec![ResponseItem::Message {
             id: None,
@@ -48,7 +49,7 @@ pub(crate) fn warmup_prompt(model_info: &ModelInfo, config: &Config) -> Prompt {
         }],
         tools: warmup_tool_specs(model_info),
         parallel_tool_calls: true,
-        base_instructions: warmup_base_instructions(model_info, config),
+        base_instructions: warmup_base_instructions(model_info),
         ..Default::default()
     }
 }
@@ -72,8 +73,8 @@ pub(crate) fn warmup_responses_metadata(
     }
 }
 
-fn warmup_base_instructions(model_info: &ModelInfo, config: &Config) -> BaseInstructions {
-    let text = model_info.get_model_instructions(config.personality);
+fn warmup_base_instructions(model_info: &ModelInfo) -> BaseInstructions {
+    let text = render_model_instructions(model_info);
     if text.trim().is_empty() {
         return BaseInstructions::default();
     }
@@ -86,6 +87,7 @@ fn warmup_base_instructions(model_info: &ModelInfo, config: &Config) -> BaseInst
 }
 
 fn warmup_tool_specs(model_info: &ModelInfo) -> Arc<[ToolSpec]> {
+    let model_messages = ResolvedModelMessages::from_model(model_info);
     match model_info.tool_mode {
         Some(ToolMode::CodeMode | ToolMode::CodeModeOnly) => Arc::from([
             create_code_mode_tool(
@@ -95,8 +97,12 @@ fn warmup_tool_specs(model_info: &ModelInfo) -> Arc<[ToolSpec]> {
                 codex_code_mode::DEFAULT_EXEC_YIELD_TIME_MS,
                 matches!(model_info.tool_mode, Some(ToolMode::CodeModeOnly)),
                 ImageDetailVisibility::Visible,
+                model_messages.code_mode(),
             ),
-            create_wait_tool(),
+            create_wait_tool(
+                model_messages.code_mode_wait_description_override(),
+                model_messages.code_mode_wait_parameters_override(),
+            ),
         ]),
         Some(ToolMode::Direct) | None => Arc::from([
             create_exec_command_tool_with_environment_id(

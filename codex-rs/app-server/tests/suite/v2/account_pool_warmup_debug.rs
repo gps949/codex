@@ -11,8 +11,11 @@ use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn create_config_toml(codex_home: &Path) -> std::io::Result<()> {
-    std::fs::write(codex_home.join("config.toml"), "")
+fn create_config_toml(codex_home: &Path, chatgpt_base_url: &str) -> std::io::Result<()> {
+    std::fs::write(
+        codex_home.join("config.toml"),
+        format!("chatgpt_base_url = \"{chatgpt_base_url}\"\n"),
+    )
 }
 
 fn write_profile_credentials(codex_home: &Path, id: &str, access_token: &str) {
@@ -91,8 +94,10 @@ fn write_pool_fixture(codex_home: &Path) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_pool_warmup_debug_lists_candidates_and_task() -> Result<()> {
     let home = TempDir::new()?;
-    create_config_toml(home.path())?;
-    write_models_cache(home.path())?;
+    let routing_server = wiremock::MockServer::start().await;
+    app_test_support::mount_workspace_routing(&routing_server).await;
+    create_config_toml(home.path(), &routing_server.uri())?;
+    write_models_cache(home.path()).await?;
     write_pool_fixture(home.path());
 
     let mut mcp = TestAppServer::builder()

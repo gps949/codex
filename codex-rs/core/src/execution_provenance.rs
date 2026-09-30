@@ -47,12 +47,19 @@ pub(crate) fn sampling_execution_provenance(
 pub(crate) async fn record_conversation_items_with_execution_provenance(
     sess: &Session,
     turn_context: &TurnContext,
+    model_info: &codex_protocol::openai_models::ModelInfo,
     items: &[ResponseItem],
 ) {
     if let Some(provenance) = sampling_execution_provenance(turn_context) {
-        sess.record_conversation_items_for_execution(turn_context, items, provenance.lease())
-            .await;
+        sess.record_conversation_items_for_execution(
+            turn_context,
+            model_info,
+            items,
+            provenance.lease(),
+        )
+        .await;
     } else {
-        sess.record_conversation_items(turn_context, items).await;
+        sess.record_conversation_items(turn_context, model_info, items)
+            .await;
     }
 }

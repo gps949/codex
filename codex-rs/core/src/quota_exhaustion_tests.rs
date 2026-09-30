@@ -30,6 +30,7 @@ async fn workspace_member_limit_does_not_match_plus_profile() {
     let limit = UsageLimitReachedError {
         plan_type: Some(AuthPlanType::Known(KnownPlan::Team)),
         resets_at: None,
+        limit_window_minutes: None,
         rate_limits: None,
         promo_message: None,
         rate_limit_reached_type: Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached),
@@ -43,6 +44,7 @@ async fn matching_team_limit_matches_team_profile() {
     let limit = UsageLimitReachedError {
         plan_type: Some(AuthPlanType::Known(KnownPlan::Team)),
         resets_at: None,
+        limit_window_minutes: None,
         rate_limits: None,
         promo_message: None,
         rate_limit_reached_type: Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached),
@@ -56,6 +58,7 @@ async fn mismatched_plan_type_in_rate_limits_snapshot_is_rejected() {
     let limit = UsageLimitReachedError {
         plan_type: None,
         resets_at: None,
+        limit_window_minutes: None,
         rate_limits: Some(Box::new(RateLimitSnapshot {
             limit_id: None,
             limit_name: None,

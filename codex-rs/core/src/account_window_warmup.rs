@@ -187,12 +187,17 @@ async fn warm_profile(
         warmup_originator(),
         /*model_verbosity*/ None,
         /*content_item_kinds_enabled*/ true,
+        config
+            .features
+            .enabled(codex_features::Feature::ReasoningEffortOverride),
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
         config.http_client_factory(),
+        config.workspace_routing_context(),
+        Vec::new(),
     );
     // Interactive turns persist a UUID installation id and reject non-UUID files.
     // The previous literal is not a UUID and is not a real install identity.
@@ -239,7 +244,7 @@ async fn warm_profile(
             "account-window-warmup".to_string(),
             SessionSource::Cli,
         );
-        let prompt = warmup_prompt(model_info, config);
+        let prompt = warmup_prompt(model_info);
         let stream_result = tokio::time::timeout(
             PER_PROFILE_TIMEOUT,
             stream_warmup_turn(

@@ -164,11 +164,18 @@ jobs:
         # sandbox helper on Linux).
         run: |
           set -euo pipefail
+          if [[ "${{ matrix.target }}" == *linux* ]]; then
+            cargo build --release --target ${{ matrix.target }} --bin bwrap
+            bwrap_path="target/${{ matrix.target }}/release/bwrap"
+            strip --strip-debug --strip-unneeded "$bwrap_path"
+            export CODEX_BWRAP_SHA256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+          fi
           cargo build --release --target ${{ matrix.target }} --bin codex -p codex-cli
           cargo build --release --target ${{ matrix.target }} -p codex-code-mode-host
           cargo build --release --target ${{ matrix.target }} -p codex-responses-api-proxy
-          if [[ "${{ matrix.target }}" == *linux* ]]; then
-            cargo build --release --target ${{ matrix.target }} --bin bwrap
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cargo build --release --target ${{ matrix.target }} -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
+            cargo build --release --target ${{ matrix.target }} -p codex-windows-sandbox-service --bin codex-windows-sandbox-service
           fi
 
       # Upstream release builds keep `strip = false` so debug info can be archived
@@ -187,7 +194,7 @@ jobs:
               done
               ;;
             *linux*)
-              for binary in codex codex-code-mode-host codex-responses-api-proxy bwrap; do
+              for binary in codex codex-code-mode-host codex-responses-api-proxy; do
                 strip --strip-debug --strip-unneeded "$release_dir/$binary"
               done
               ;;
@@ -205,7 +212,7 @@ jobs:
           release_dir="codex-rs/target/${{ matrix.target }}/release"
           case "${{ matrix.target }}" in
             *windows*)
-              cp "$release_dir/codex.exe" "$release_dir/codex-code-mode-host.exe" "$release_dir/codex-responses-api-proxy.exe" stage/
+              cp "$release_dir/codex.exe" "$release_dir/codex-code-mode-host.exe" "$release_dir/codex-responses-api-proxy.exe" "$release_dir/codex-windows-sandbox-setup.exe" "$release_dir/codex-windows-sandbox-service.exe" "$release_dir/codex-command-runner.exe" stage/
               (cd stage && 7z a "../dist/codex-${{ matrix.target }}.zip" .)
               ;;
             *linux*)
@@ -224,6 +231,7 @@ jobs:
           name: codex-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 3
 
   release:
     name: Publish GitHub release

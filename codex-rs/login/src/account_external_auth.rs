@@ -137,7 +137,7 @@ impl AccountPoolExternalAuth {
                         Err(_) => Err(io::Error::other(RefreshTokenError::Permanent(error))),
                     };
                 }
-                Err(error @ RefreshTokenError::Transient(_)) => {
+                Err(error @ (RefreshTokenError::Transient(_) | RefreshTokenError::Policy(_))) => {
                     return Err(io::Error::other(error));
                 }
             }
@@ -167,6 +167,10 @@ impl ExternalAuth for AccountPoolExternalAuth {
 
     fn refresh(&self, context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
         Box::pin(async move { self.refresh_active_auth(context).await })
+    }
+
+    fn rotates_within_application_login(&self) -> bool {
+        true
     }
 
     fn classify_error(&self, error: io::Error) -> RefreshTokenError {

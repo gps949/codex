@@ -14,7 +14,6 @@ use codex_features::Feature;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 
@@ -66,28 +65,14 @@ impl SessionTask for CompactTask {
             run_local_compact(Arc::clone(&session), Arc::clone(&ctx)).await
         } else {
             match ctx.provider.capabilities().remote_compaction {
-                RemoteCompactionSupport::V2
-                    if ctx.config.features.enabled(Feature::RemoteCompactionV2) =>
-                {
+                RemoteCompactionSupport::V2 => {
                     emit_compact_metric(
                         &session.services.session_telemetry,
                         "remote_v2",
                         /*manual*/ true,
                     );
                     crate::compact_remote_v2::run_remote_compact_task(
-                        session.clone(),
-                        Arc::clone(&ctx),
-                    )
-                    .await
-                }
-                RemoteCompactionSupport::V2 => {
-                    emit_compact_metric(
-                        &session.services.session_telemetry,
-                        "remote",
-                        /*manual*/ true,
-                    );
-                    crate::compact_remote::run_remote_compact_task(
-                        session.clone(),
+                        Arc::clone(&session),
                         Arc::clone(&ctx),
                     )
                     .await
@@ -102,27 +87,10 @@ impl SessionTask for CompactTask {
                 }
             }
         };
-        match result {
-            Ok(()) => {}
-            Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
-                return Err(err);
-            }
-            Err(err)
-                if portable_policy == PortableCompactionPolicy::Portable
-                    && matches!(
-                        err.details(),
-                        CodexErrorDetails::AccountMigrationRequired(_)
-                    ) =>
-            {
-                session.track_turn_codex_error(ctx.as_ref(), &err);
-                session
-                    .send_event(
-                        ctx.as_ref(),
-                        EventMsg::Error(err.to_error_event(/*message_prefix*/ None)),
-                    )
-                    .await;
-            }
-            Err(_) => {}
+        if let Err(err) = result
+            && matches!(err.details(), CodexErrorDetails::TurnAborted)
+        {
+            return Err(err);
         }
         Ok(None)
     }
