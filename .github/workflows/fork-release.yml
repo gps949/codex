@@ -81,7 +81,7 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -170,13 +170,17 @@ jobs:
             strip --strip-debug --strip-unneeded "$bwrap_path"
             export CODEX_BWRAP_SHA256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
           fi
-          cargo build --release --target ${{ matrix.target }} --bin codex -p codex-cli
-          cargo build --release --target ${{ matrix.target }} -p codex-code-mode-host
-          cargo build --release --target ${{ matrix.target }} -p codex-responses-api-proxy
+          # One invocation resolves features once; separate per-package builds
+          # recompile shared dependencies and exceeded the job timeout on Windows.
+          bins=(codex codex-code-mode-host codex-responses-api-proxy)
           if [[ "${{ matrix.target }}" == *windows* ]]; then
-            cargo build --release --target ${{ matrix.target }} -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
-            cargo build --release --target ${{ matrix.target }} -p codex-windows-sandbox-service --bin codex-windows-sandbox-service
+            bins+=(codex-windows-sandbox-setup codex-command-runner codex-windows-sandbox-service)
           fi
+          build_args=()
+          for bin in "${bins[@]}"; do
+            build_args+=(--bin "$bin")
+          done
+          cargo build --release --target ${{ matrix.target }} "${build_args[@]}"
 
       # Upstream release builds keep `strip = false` so debug info can be archived
       # into separate symbols packages, then strips the shipped binaries. The fork
