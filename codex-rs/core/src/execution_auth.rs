@@ -62,7 +62,13 @@ pub(crate) struct ExecutionAuth {
     runtime: OnceCell<Arc<AccountPoolRuntime>>,
     change_tx: watch::Sender<u64>,
     reset_credit_rescue_attempt: ResetCreditRescueSingleflight,
-    window_warmup_task: StdMutex<Option<JoinHandle<()>>>,
+    window_warmup_task: StdMutex<Option<WindowWarmupTask>>,
+    pool_suspended: AtomicBool,
+}
+
+struct WindowWarmupTask {
+    handle: JoinHandle<()>,
+    config_tx: watch::Sender<Config>,
 }
 
 /// Private outcome of one lazy pool-install attempt. `NotConfigured` keeps the cell empty so a
@@ -82,13 +88,18 @@ impl ExecutionAuthMode {
     pub(crate) fn multi_account_enabled(&self) -> bool {
         match self {
             Self::Stock => false,
-            Self::Pooled(runtime) => runtime.pool().snapshots().len() > 1,
+            Self::Pooled(runtime) => {
+                !runtime.is_suspended() && runtime.pool().snapshots().len() > 1
+            }
         }
     }
 
     pub(crate) fn capture_binding(&self) -> Result<ExecutionAuthBinding, AccountPoolError> {
         match self {
             Self::Stock => Ok(ExecutionAuthBinding::Stock),
+            Self::Pooled(runtime) if runtime.is_suspended() => {
+                Err(AccountPoolError::NoEligibleAccount)
+            }
             Self::Pooled(runtime) => runtime
                 .pool()
                 .lease()
@@ -185,6 +196,7 @@ impl ExecutionAuth {
             change_tx,
             reset_credit_rescue_attempt: ResetCreditRescueSingleflight::default(),
             window_warmup_task: StdMutex::new(None),
+            pool_suspended: AtomicBool::new(false),
         }
     }
 
@@ -207,6 +219,24 @@ impl ExecutionAuth {
         {
             return Ok(ExecutionAuthMode::Stock);
         }
+
+        if AccountPoolRuntime::is_home_suspended(&config.codex_home) {
+            self.pool_suspended.store(true, Ordering::Release);
+            self.legacy_manager.suspend_pool_auth();
+            self.stop_window_warmup_task();
+            if let Some(runtime) = self.runtime.get() {
+                runtime.suspend_for_logout().await?;
+            }
+            return Ok(ExecutionAuthMode::Stock);
+        }
+        if let Some(runtime) = self.runtime.get()
+            && runtime.is_suspended()
+        {
+            // Removing the shared marker is explicit user intent from another process.
+            runtime.resume().await?;
+        }
+        self.pool_suspended.store(false, Ordering::Release);
+        self.legacy_manager.resume_pool_auth();
 
         self.install_runtime_from_config(config).await?;
         Ok(match self.runtime() {
@@ -302,30 +332,58 @@ impl ExecutionAuth {
     }
 
     fn sync_window_warmup_task(&self, pool: Arc<AccountPool>, config: &Config) {
-        let enabled = config.account_pool.effective_window_warmup();
+        let enabled = config.account_pool.effective_window_warmup() && !self.pool_is_suspended();
         let Ok(mut slot) = self.window_warmup_task.lock() else {
             return;
         };
-        let running = slot.as_ref().is_some_and(|handle| !handle.is_finished());
+        let running = slot.as_ref().is_some_and(|task| !task.handle.is_finished());
         match (enabled, running) {
             (true, false) => {
-                *slot = Some(spawn_window_warmup_task(pool, config.clone()));
+                let (config_tx, config_rx) = watch::channel(config.clone());
+                *slot = Some(WindowWarmupTask {
+                    handle: spawn_window_warmup_task(pool, config_rx),
+                    config_tx,
+                });
             }
             (false, true) => {
                 if let Some(previous) = slot.take() {
-                    previous.abort();
+                    previous.handle.abort();
                     record_window_warmup_debug(WindowWarmupDebugKind::TaskStopped);
                 }
             }
-            (true, true) | (false, false) => {}
+            (true, true) => {
+                if let Some(task) = slot.as_ref() {
+                    task.config_tx.send_if_modified(|current| {
+                        let changed = current.model != config.model
+                            || current.model_provider != config.model_provider
+                            || current.model_reasoning_effort != config.model_reasoning_effort
+                            || current.account_pool != config.account_pool
+                            || current.features != config.features
+                            || current.cwd != config.cwd
+                            || current.config_layer_stack != config.config_layer_stack
+                            || current.chatgpt_base_url != config.chatgpt_base_url
+                            || current.application_network_policy
+                                != config.application_network_policy
+                            || current.respect_system_proxy != config.respect_system_proxy;
+                        if changed {
+                            *current = config.clone();
+                        }
+                        changed
+                    });
+                }
+            }
+            (false, false) => {}
         }
     }
 
     pub(crate) fn window_warmup_task_running(&self) -> bool {
+        if self.pool_is_suspended() {
+            return false;
+        }
         self.window_warmup_task
             .lock()
             .ok()
-            .is_some_and(|slot| slot.as_ref().is_some_and(|handle| !handle.is_finished()))
+            .is_some_and(|slot| slot.as_ref().is_some_and(|task| !task.handle.is_finished()))
     }
 
     pub(crate) fn request_window_warmup_pass_now(&self, config: Config) {
@@ -344,7 +402,78 @@ impl ExecutionAuth {
     }
 
     pub(crate) fn runtime(&self) -> Option<Arc<AccountPoolRuntime>> {
+        if self.pool_is_suspended() {
+            return None;
+        }
         self.runtime.get().cloned()
+    }
+
+    fn pool_is_suspended(&self) -> bool {
+        self.pool_suspended.load(Ordering::Acquire)
+            || self
+                .runtime
+                .get()
+                .is_some_and(|runtime| runtime.is_suspended())
+    }
+
+    fn stop_window_warmup_task(&self) {
+        if let Ok(mut slot) = self.window_warmup_task.lock()
+            && let Some(task) = slot.take()
+        {
+            task.handle.abort();
+            record_window_warmup_debug(WindowWarmupDebugKind::TaskStopped);
+        }
+    }
+
+    pub(crate) async fn suspend_for_logout(&self, config: &Config) -> std::io::Result<()> {
+        if self.runtime.get().is_none()
+            && !AccountProfileStore::new(config.codex_home.to_path_buf())
+                .manifest_path()
+                .is_file()
+        {
+            return Ok(());
+        }
+        self.pool_suspended.store(true, Ordering::Release);
+        self.legacy_manager.suspend_pool_auth();
+        self.stop_window_warmup_task();
+        AccountPoolRuntime::suspend_home(&config.codex_home)?;
+        if let Some(runtime) = self.runtime.get() {
+            runtime.suspend_for_logout().await?;
+        }
+        self.notify_change();
+        Ok(())
+    }
+
+    pub(crate) async fn resume_from_config(
+        &self,
+        config: &Config,
+    ) -> Result<bool, AccountPoolRuntimeError> {
+        self.legacy_manager.resume_pool_auth();
+        if pool_eligibility(
+            &config.model_provider_id,
+            &config.model_provider,
+            self.legacy_manager.get_api_auth_mode(),
+            self.legacy_manager.is_workload_identity_selected(),
+        ) == PoolEligibility::Ineligible
+        {
+            return Ok(false);
+        }
+        if let Some(runtime) = self.runtime.get() {
+            runtime.resume().await?;
+        } else {
+            AccountPoolRuntime::resume_home(&config.codex_home)?;
+        }
+        self.pool_suspended.store(false, Ordering::Release);
+        match self.ensure_runtime_from_config(config).await {
+            Ok(enabled) => {
+                self.notify_change();
+                Ok(enabled)
+            }
+            Err(error) => {
+                self.suspend_for_logout(config).await?;
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn account_pool(&self) -> Option<Arc<AccountPool>> {
@@ -366,6 +495,9 @@ impl ExecutionAuth {
     /// than silently falling back to root credentials, because root may itself be the exhausted
     /// profile currently cooling down.
     pub(crate) fn active_lease(&self) -> Option<ExecutionAuthLease> {
+        if self.pool_is_suspended() {
+            return None;
+        }
         match self.account_pool() {
             Some(pool) => pool
                 .lease()
@@ -459,6 +591,13 @@ impl ExecutionAuth {
         lease: &ExecutionAuthLease,
         snapshot: &RateLimitSnapshot,
     ) -> std::io::Result<()> {
+        if snapshot
+            .limit_id
+            .as_deref()
+            .is_some_and(|limit_id| limit_id != "codex")
+        {
+            return Ok(());
+        }
         let (Some(pool), Some(account_lease)) = (self.account_pool(), lease.account.as_ref())
         else {
             return Ok(());
@@ -494,7 +633,12 @@ impl ExecutionAuth {
         else {
             return Ok(AccountAvailabilityMutation::PoolExhausted);
         };
-        match snapshot {
+        match snapshot.filter(|snapshot| {
+            snapshot
+                .limit_id
+                .as_deref()
+                .is_none_or(|limit_id| limit_id == "codex")
+        }) {
             Some(snapshot) => pool.mark_exhausted_with_rate_limits(
                 account_lease,
                 Some(resets_at),

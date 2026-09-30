@@ -235,6 +235,18 @@ async fn warmup_request_fixture_with_sse(
         ),
         Arc::clone(&auth_manager),
     )?;
+    pool.update_rate_limits(
+        &profile_id,
+        AccountRateLimits {
+            primary: Some(AccountRateLimitWindow {
+                used_percent: 0.0,
+                resets_at: None,
+                window_minutes: Some(300),
+            }),
+            secondary: None,
+            observed_at: Some(Utc::now()),
+        },
+    )?;
 
     let mut config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
@@ -714,5 +726,131 @@ async fn warmup_get_verifies_after_tool_call_then_completed() -> anyhow::Result<
         warmup_outcome(&fixture.pool, &fixture.profile_id),
         WindowWarmupOutcome::Succeeded
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_refreshes_expired_quota_before_generating() -> anyhow::Result<()> {
+    let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+    let pool = AccountPool::new();
+    pool.register(
+        fixture.pool.snapshots()[0].profile.clone(),
+        Arc::clone(&fixture.auth_manager),
+    )?;
+    pool.update_rate_limits(
+        &fixture.profile_id,
+        AccountRateLimits {
+            primary: Some(AccountRateLimitWindow {
+                used_percent: 100.0,
+                resets_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+                window_minutes: Some(300),
+            }),
+            secondary: None,
+            observed_at: Some(Utc::now() - chrono::Duration::hours(5)),
+        },
+    )?;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(serde_json::json!({
+                "plan_type": "plus",
+                "rate_limit": {
+                    "allowed": true,
+                    "limit_reached": false,
+                    "primary_window": {
+                        "used_percent": 2,
+                        "limit_window_seconds": 18000,
+                        "reset_after_seconds": 17000,
+                        "reset_at": 2_000_000_000
+                    }
+                }
+            })),
+        )
+        .mount(&fixture.server)
+        .await;
+
+    warm_profile(
+        &pool,
+        &fixture.config,
+        &fixture.profile_id,
+        fixture.auth_manager,
+    )
+    .await?;
+
+    assert_eq!(
+        pool.snapshots()[0].rate_limits.primary,
+        Some(AccountRateLimitWindow {
+            used_percent: 2.0,
+            resets_at: DateTime::<Utc>::from_timestamp(2_000_000_000, 0),
+            window_minutes: Some(300),
+        })
+    );
+    assert!(
+        fixture
+            .server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .all(|request| !request.url.path().ends_with("/responses"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn warmup_pass_shares_failed_attempts_and_reaches_next_standby() -> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await?;
+    let profiles = codex_login::AccountProfileStore::new(codex_home.path().to_path_buf());
+    let pool = AccountPool::new();
+    let mut profile_ids = Vec::new();
+    for (priority, label) in [
+        (0, "active"),
+        (10, "unavailable-first"),
+        (20, "unavailable-second"),
+    ] {
+        let profile = profiles.allocate_profile(Some(label.to_string()), priority)?;
+        profiles.complete_profile(&profile.id)?;
+        profile_ids.push(profile.id.clone());
+        pool.register(
+            profile,
+            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test")),
+        )?;
+    }
+    pool.activate(&profile_ids[0])?;
+    let store = AccountRuntimeStateStore::new(codex_home.path().to_path_buf());
+    store.save_pool(&pool)?;
+    // A selection owned by another process must survive this background pass.
+    store.select(
+        profile_ids[2].clone(),
+        codex_login::AccountSelectionMode::AvailableOnly,
+    )?;
+    let selection_before = store.load()?;
+
+    run_warmup_pass(&pool, &config).await?;
+    run_warmup_pass(&pool, &config).await?;
+
+    let state = store.load()?;
+    let attempted: Vec<AccountProfileId> = state
+        .profiles
+        .into_iter()
+        .filter(|profile| {
+            profile.window_warmup.as_ref().is_some_and(|observation| {
+                observation.outcome == WindowWarmupOutcome::SkippedNoAuth
+                    && observation.retry_after.is_some()
+            })
+        })
+        .map(|profile| profile.profile_id)
+        .collect();
+    assert_eq!(attempted, profile_ids[1..].to_vec());
+    assert_eq!(state.active_profile_id, selection_before.active_profile_id);
+    assert_eq!(
+        state.selection_revision,
+        selection_before.selection_revision
+    );
+    assert_eq!(pool.lease()?.profile().id, profile_ids[0]);
     Ok(())
 }

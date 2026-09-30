@@ -230,5 +230,157 @@ async fn ensure_from_config_registers_profiles_added_after_install() -> anyhow::
         .collect::<Vec<_>>();
     assert_eq!(ids.len(), 2);
     assert!(ids.contains(&added.id));
+
+    let lease = execution_auth.active_lease().expect("execution lease");
+    let mut snapshot = RateLimitSnapshot {
+        limit_id: Some("codex_other".to_string()),
+        limit_name: None,
+        normal_model_slug: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 99.0,
+            window_minutes: Some(300),
+            resets_at: None,
+        }),
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    execution_auth.observe_rate_limits(&lease, &snapshot)?;
+    let quota_for_lease = || {
+        execution_auth
+            .account_pool()
+            .unwrap()
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| Some(&snapshot.profile.id) == lease.profile_id())
+            .expect("leased profile")
+            .rate_limits
+    };
+    assert_eq!(quota_for_lease(), AccountRateLimits::default());
+    snapshot.limit_id = Some("codex".to_string());
+    execution_auth.observe_rate_limits(&lease, &snapshot)?;
+    assert_eq!(
+        quota_for_lease().primary,
+        Some(AccountRateLimitWindow {
+            used_percent: 99.0,
+            resets_at: None,
+            window_minutes: Some(300),
+        })
+    );
+
+    let stored_root = std::fs::read(codex_home.path().join("auth.json"))?;
+    let captured_mode = execution_auth
+        .mode_for_turn(&config, &config.model_provider)
+        .await?;
+    execution_auth.suspend_for_logout(&config).await?;
+    assert!(captured_mode.capture_binding().is_err());
+    execution_auth.compatibility_auth_manager().reload().await;
+    assert!(
+        execution_auth
+            .compatibility_auth_manager()
+            .auth_with_http_client_factory()
+            .await
+            .is_none()
+    );
+    assert!(AccountPoolRuntime::is_home_suspended(codex_home.path()));
+    assert!(execution_auth.active_lease().is_none());
+    assert!(execution_auth.account_pool().is_none());
+    assert!(!execution_auth.window_warmup_task_running());
+    assert!(
+        !execution_auth
+            .compatibility_auth_manager()
+            .has_external_auth()
+    );
+    assert!(!execution_auth.ensure_runtime_from_config(&config).await?);
+    assert!(AccountPoolRuntime::is_home_suspended(codex_home.path()));
+    assert_eq!(
+        std::fs::read(codex_home.path().join("auth.json"))?,
+        stored_root
+    );
+
+    assert!(execution_auth.resume_from_config(&config).await?);
+    assert!(!AccountPoolRuntime::is_home_suspended(codex_home.path()));
+    assert!(
+        execution_auth
+            .compatibility_auth_manager()
+            .has_external_auth()
+    );
+    assert!(execution_auth.active_lease().is_some());
+    assert!(execution_auth.window_warmup_task_running());
+    assert_eq!(
+        std::fs::read(codex_home.path().join("auth.json"))?,
+        stored_root
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn suspended_pool_reads_stay_logged_out_and_failed_resume_stays_suspended()
+-> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("account-profiles.json"),
+        "invalid manifest",
+    )?;
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await?;
+    let execution_auth = ExecutionAuth::legacy(AuthManager::from_auth_for_testing(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    ));
+    execution_auth.suspend_for_logout(&config).await?;
+
+    assert!(!execution_auth.ensure_runtime_from_config(&config).await?);
+    assert!(execution_auth.active_lease().is_none());
+    assert!(execution_auth.resume_from_config(&config).await.is_err());
+    assert!(AccountPoolRuntime::is_home_suspended(codex_home.path()));
+    assert!(execution_auth.account_pool().is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn running_warmup_adopts_new_config_without_canceling_the_task() -> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await?;
+    let execution_auth = ExecutionAuth::legacy(AuthManager::from_auth_for_testing(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    ));
+    let pool = Arc::new(AccountPool::new());
+    execution_auth.sync_window_warmup_task(Arc::clone(&pool), &config);
+    let (task_id, mut changes) = {
+        let guard = execution_auth.window_warmup_task.lock().unwrap();
+        let task = guard.as_ref().expect("warmup task");
+        (task.handle.id(), task.config_tx.subscribe())
+    };
+
+    config.model = Some("new-session-model".to_string());
+    config.account_pool.window_warmup_interval_minutes = Some(20);
+    execution_auth.sync_window_warmup_task(Arc::clone(&pool), &config);
+    assert!(changes.has_changed()?);
+    assert_eq!(*changes.borrow_and_update(), config);
+    assert_eq!(
+        execution_auth
+            .window_warmup_task
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .handle
+            .id(),
+        task_id
+    );
+
+    execution_auth.sync_window_warmup_task(Arc::clone(&pool), &config);
+    assert!(!changes.has_changed()?);
+    config.account_pool.window_warmup = Some(false);
+    execution_auth.sync_window_warmup_task(pool, &config);
+    assert!(!execution_auth.window_warmup_task_running());
     Ok(())
 }

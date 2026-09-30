@@ -40,6 +40,19 @@ impl ExecutionAccountPoolHandle {
         self.inner.ensure_runtime_from_config(config).await
     }
 
+    /// Suspends pooled auth before clearing the ordinary root login.
+    pub async fn suspend_for_logout(&self, config: &Config) -> std::io::Result<()> {
+        self.inner.suspend_for_logout(config).await
+    }
+
+    /// Explicitly re-enables pooling and restores its validated authentication bridge.
+    pub async fn resume_from_config(
+        &self,
+        config: &Config,
+    ) -> Result<bool, AccountPoolRuntimeError> {
+        self.inner.resume_from_config(config).await
+    }
+
     pub fn snapshots(&self) -> Vec<AccountPoolSnapshot> {
         self.inner
             .account_pool()
