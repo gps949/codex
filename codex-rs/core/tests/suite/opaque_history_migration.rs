@@ -292,9 +292,21 @@ async fn opaque_history_failover_records_cooldown_without_sending_target_request
         .expect(/*requests*/ 1)
         .mount(&server)
         .await;
-    let (resumed, _pool) = resume_with_profile(
+    // The resume builder otherwise creates separate managers for ThreadManager
+    // and the resumed session, giving this fixture two competing account pools.
+    let shared_auth = codex_login::AuthManager::shared(
+        home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        codex_config::types::AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        codex_login::AuthKeyringBackendKind::Direct,
+        codex_login::test_support::transport_default_auth_route_config(),
+    )
+    .await;
+    let (resumed, pool) = resume_with_profile(
         &server,
-        test_codex().without_auth(),
+        test_codex().with_auth_manager(shared_auth),
         home,
         rollout_path,
         "primary-acct",
@@ -322,6 +334,44 @@ async fn opaque_history_failover_records_cooldown_without_sending_target_request
                     != Some("Bearer access-backup")
             })
     );
+    // Turn completion does not flush the pool's asynchronous persistence task.
+    // Verify the live scheduler first, then wait for the same durable state.
+    let snapshots = pool.snapshots();
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|snapshot| (
+                snapshot.profile.id.as_str(),
+                snapshot.is_active,
+                matches!(
+                    snapshot.availability,
+                    codex_login::AccountAvailability::Exhausted { resets_at: Some(_) }
+                ),
+            ))
+            .collect::<Vec<_>>(),
+        vec![("primary-acct", false, true), ("backup-acct", true, false)],
+    );
+    core_test_support::fs_wait::wait_for_matching_file(
+        resumed.home.path().to_path_buf(),
+        Duration::from_secs(/*secs*/ 5),
+        |path| {
+            path.file_name()
+                .is_some_and(|name| name == "account-runtime-state.json")
+                && std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .is_some_and(|state| {
+                        state["active_profile_id"] == "backup-acct"
+                            && state["profiles"].as_array().is_some_and(|profiles| {
+                                profiles.iter().any(|profile| {
+                                    profile["profile_id"] == "primary-acct"
+                                        && profile["exhausted_until"].is_string()
+                                })
+                            })
+                    })
+        },
+    )
+    .await?;
     let runtime_state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
         resumed.home.path().join("account-runtime-state.json"),
     )?)?;
