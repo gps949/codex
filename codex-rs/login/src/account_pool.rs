@@ -296,6 +296,10 @@ pub struct AccountPool {
 #[path = "account_pool_sync.rs"]
 mod shared_state;
 
+#[path = "account_pool_quota.rs"]
+mod quota;
+pub(crate) use quota::merge_rate_limits_monotonic;
+
 impl Default for AccountPool {
     fn default() -> Self {
         Self::new()
@@ -1183,33 +1187,6 @@ fn earliest_reset_key(account: &ManagedAccount, now: &DateTime<Utc>) -> Earliest
 
 fn has_due_rate_limit_window(account: &ManagedAccount, now: &DateTime<Utc>) -> bool {
     earliest_reset_key(account, now) == EarliestResetKey::Due
-}
-
-/// Prefer not to un-start a primary window when a lagging probe reports 0% with a newer
-/// `observed_at`. Once `used_percent > 0` for the current window, keep that evidence until reset.
-fn merge_rate_limits_monotonic(
-    existing: &AccountRateLimits,
-    incoming: AccountRateLimits,
-) -> AccountRateLimits {
-    let mut merged = incoming;
-    if let Some(existing_primary) = existing.primary.as_ref()
-        && existing_primary.used_percent > 0.0
-    {
-        let regresses = merged
-            .primary
-            .as_ref()
-            .is_none_or(|window| window.used_percent <= 0.0);
-        let reset_due = existing_primary
-            .resets_at
-            .is_some_and(|resets_at| resets_at <= Utc::now());
-        if regresses && !reset_due {
-            merged.primary = Some(existing_primary.clone());
-        }
-    }
-    if merged.observed_at.is_none() {
-        merged.observed_at = existing.observed_at;
-    }
-    merged
 }
 
 fn clear_started_window_warmup(account: &mut ManagedAccount) {
