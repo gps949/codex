@@ -61,6 +61,10 @@ impl AuthManager {
     }
 
     /// CLI callers without a discovery owner retain their existing routing behavior.
+    ///
+    /// The owner only answers for its own selected account. A request captured for any other
+    /// account is rejected before discovery, even when discovery would report no route: an absent
+    /// route says nothing about the destination another account or workspace requires.
     pub async fn workspace_routing(
         &self,
         auth: &CodexAuth,
@@ -69,6 +73,18 @@ impl AuthManager {
         let Some(resolver) = self.workspace_routing_resolver.get() else {
             return Ok(None);
         };
+        // Seats of one Business workspace share an account id, so the ChatGPT user must match too.
+        let request_matches_owner = self.auth_cached().is_some_and(|owner| {
+            owner.api_auth_mode() == auth.api_auth_mode()
+                && owner.get_account_id().is_some()
+                && owner.get_account_id() == auth.get_account_id()
+                && owner.get_chatgpt_user_id() == auth.get_chatgpt_user_id()
+        });
+        if !request_matches_owner {
+            return Err(io::Error::other(
+                "request account does not match workspace routing owner",
+            ));
+        }
         let auth_changes = self.auth_change_state_receiver();
         let owner_generation = auth_changes.borrow().owner_generation;
         let resolver = resolver
