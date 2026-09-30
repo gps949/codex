@@ -169,6 +169,65 @@ impl AccountRuntimeStateStore {
         crate::account_file::warmup_lock(&self.codex_home)
     }
 
+    /// Serializes automatic credit redemption across processes sharing a pool.
+    pub fn try_lock_reset_credit(&self) -> io::Result<Option<std::fs::File>> {
+        crate::account_file::try_reset_credit_lock(&self.codex_home)
+    }
+
+    /// Publishes a confirmed reset without replacing concurrent selections or
+    /// unrelated account observations.
+    pub fn record_quota_reset(
+        &self,
+        profile_id: &AccountProfileId,
+        reset_at: DateTime<Utc>,
+    ) -> Result<(), AccountRuntimeStateError> {
+        let _lock = crate::account_file::lock(&self.codex_home)?;
+        let records = crate::AccountProfileStore::new(self.codex_home.clone())
+            .load_profile_records_unlocked()?;
+        if !records
+            .iter()
+            .any(|record| &record.profile.id == profile_id)
+        {
+            return Err(AccountRuntimeStateError::UnavailableProfile(
+                profile_id.clone(),
+            ));
+        }
+        let mut state = self.load_unlocked()?;
+        if let Some(profile) = state
+            .profiles
+            .iter_mut()
+            .find(|entry| &entry.profile_id == profile_id)
+        {
+            if profile
+                .quota_reset_at
+                .is_some_and(|current| current > reset_at)
+            {
+                return Ok(());
+            }
+            profile.exhausted_until = None;
+            profile.preemptive_rotation_until = None;
+            profile.quota_reset_at = Some(reset_at);
+            profile.rate_limits = AccountRateLimits {
+                observed_at: Some(reset_at),
+                ..AccountRateLimits::default()
+            };
+            profile.window_warmup = None;
+        } else {
+            state.profiles.push(AccountRuntimeProfileState {
+                profile_id: profile_id.clone(),
+                exhausted_until: None,
+                preemptive_rotation_until: None,
+                quota_reset_at: Some(reset_at),
+                rate_limits: AccountRateLimits {
+                    observed_at: Some(reset_at),
+                    ..AccountRateLimits::default()
+                },
+                window_warmup: None,
+            });
+        }
+        self.save_unlocked(&state)
+    }
+
     /// Imports shared quota and warmup observations without changing execution selection or
     /// treating empty in-memory warmup as an authoritative clear.
     pub fn apply_window_warmup_to_pool(

@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -1608,6 +1609,7 @@ async fn load_auth(
 // Persist refreshed tokens into auth storage and update last_refresh.
 fn persist_tokens(
     storage: &Arc<dyn AuthStorageBackend>,
+    expected_refresh_token: &str,
     id_token: Option<String>,
     access_token: Option<String>,
     refresh_token: Option<String>,
@@ -1615,6 +1617,17 @@ fn persist_tokens(
     let mut auth_dot_json = storage
         .load()?
         .ok_or(std::io::Error::other("Token data is not available."))?;
+
+    // A login or another process may have replaced this credential while the
+    // refresh request was in flight. Never overwrite that newer login.
+    if auth_dot_json
+        .tokens
+        .as_ref()
+        .map(|tokens| tokens.refresh_token.as_str())
+        != Some(expected_refresh_token)
+    {
+        return Ok(auth_dot_json);
+    }
 
     let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
     if let Some(id_token) = id_token {
@@ -2050,6 +2063,7 @@ impl UnauthorizedRecovery {
 /// `reload()` is called explicitly. This matches the design goal of avoiding
 /// different parts of the program seeing inconsistent auth data mid‑run.
 pub struct AuthManager {
+    pool_suspended: AtomicBool,
     codex_home: PathBuf,
     inner: RwLock<CachedAuth>,
     auth_change_tx: watch::Sender<u64>,
@@ -2227,6 +2241,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
+            pool_suspended: AtomicBool::new(false),
             workload_identity_selected: false,
             auth_route_config,
         }
@@ -2263,6 +2278,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
+            pool_suspended: AtomicBool::new(false),
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
@@ -2293,6 +2309,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
+            pool_suspended: AtomicBool::new(false),
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
@@ -2332,6 +2349,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
+            pool_suspended: AtomicBool::new(false),
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
@@ -2360,6 +2378,7 @@ impl AuthManager {
             agent_identity_lock: Semaphore::new(/*permits*/ 1),
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(Some(Arc::new(BearerTokenRefresher::new(config)))),
+            pool_suspended: AtomicBool::new(false),
             workload_identity_selected: false,
             // External bearer auth refreshes by running the provider's command and never makes
             // auth-owned HTTP requests, so this route is intentionally inert.
@@ -2371,6 +2390,9 @@ impl AuthManager {
 
     /// Current cached auth (clone) without attempting a refresh.
     pub fn auth_cached(&self) -> Option<CodexAuth> {
+        if self.pool_suspended.load(Ordering::Acquire) {
+            return None;
+        }
         self.inner
             .read()
             .ok()
@@ -2412,7 +2434,11 @@ impl AuthManager {
             && let Err(err) = self.refresh_token().await
         {
             tracing::error!("Failed to refresh token: {}", err);
-            return Some(auth);
+            return if self.pool_suspended.load(Ordering::Acquire) {
+                None
+            } else {
+                Some(auth)
+            };
         }
         self.auth_cached()
     }
@@ -2422,6 +2448,9 @@ impl AuthManager {
     pub async fn auth_with_http_client_factory(&self) -> Option<(CodexAuth, HttpClientFactory)> {
         self.auth().await;
         let cached = self.inner.read().ok()?;
+        if self.pool_suspended.load(Ordering::Acquire) {
+            return None;
+        }
         Some((cached.auth.clone()?, self.http_client_factory()))
     }
 
@@ -2585,6 +2614,9 @@ impl AuthManager {
     }
 
     async fn load_auth(&self) -> Option<CodexAuth> {
+        if self.pool_suspended.load(Ordering::Acquire) {
+            return None;
+        }
         if let Some(external_auth) = self.external_auth_provider() {
             let cached_auth = self.auth_cached();
             if cached_auth
@@ -2639,6 +2671,11 @@ impl AuthManager {
 
     fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
         if let Ok(mut guard) = self.inner.write() {
+            let new_auth = if self.pool_suspended.load(Ordering::Acquire) {
+                None
+            } else {
+                new_auth
+            };
             let previous = guard.auth.as_ref();
             let changed = !AuthManager::auths_equal(previous, new_auth.as_ref());
             let auth_changed_for_refresh =
@@ -2716,6 +2753,18 @@ impl AuthManager {
         {
             self.set_cached_auth(/*new_auth*/ None);
         }
+    }
+
+    /// Suspends this execution manager without deleting enrolled profile or
+    /// root credentials. Independent enrollment managers are unaffected.
+    pub fn suspend_pool_auth(&self) {
+        self.pool_suspended.store(true, Ordering::Release);
+        self.clear_external_auth();
+        self.set_cached_auth(/*new_auth*/ None);
+    }
+
+    pub fn resume_pool_auth(&self) {
+        self.pool_suspended.store(false, Ordering::Release);
     }
 
     pub fn set_forced_chatgpt_workspace_id(&self, workspace_id: Option<Vec<String>>) {
@@ -2928,6 +2977,24 @@ impl AuthManager {
             ))
         })?;
         let _home_refresh_lock = self.acquire_home_refresh_lock().await?;
+        if _home_refresh_lock.is_some()
+            && let Some(account_id) = self
+                .auth_cached()
+                .as_ref()
+                .filter(|auth| matches!(auth, CodexAuth::Chatgpt(_)))
+                .and_then(CodexAuth::get_account_id)
+        {
+            match self.reload_if_account_id_matches(Some(&account_id)).await {
+                ReloadOutcome::ReloadedChanged => return Ok(()),
+                ReloadOutcome::ReloadedNoChange => {}
+                ReloadOutcome::Skipped => {
+                    return Err(RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+                        RefreshTokenFailedReason::Other,
+                        REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE.to_string(),
+                    )));
+                }
+            }
+        }
         self.refresh_token_from_authority_impl().await
     }
 
@@ -3131,10 +3198,12 @@ impl AuthManager {
         auth: &ChatgptAuth,
         refresh_token: String,
     ) -> Result<(), RefreshTokenError> {
-        let refresh_response = request_chatgpt_token_refresh(refresh_token, auth.client()).await?;
+        let refresh_response =
+            request_chatgpt_token_refresh(refresh_token.clone(), auth.client()).await?;
 
         persist_tokens(
             auth.storage(),
+            &refresh_token,
             refresh_response.id_token,
             refresh_response.access_token,
             refresh_response.refresh_token,

@@ -17,7 +17,9 @@ pub use auth::WorkspaceRoutingRequest;
 pub use auth::WorkspaceRoutingResolver;
 pub use auth::WorkspaceRoutingSession;
 
+mod account_credentials;
 mod account_file;
+mod account_relogin;
 mod callback_params;
 mod device_code_auth;
 mod gateway_auth;

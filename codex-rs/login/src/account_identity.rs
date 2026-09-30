@@ -10,7 +10,6 @@ use crate::AccountProfileStoreError;
 use crate::auth::AuthDotJson;
 use crate::auth::AuthKeyringBackendKind;
 use crate::auth::load_auth_dot_json;
-use crate::auth::save_auth;
 
 /// Stable ChatGPT seat identity used to detect duplicate account-pool logins.
 ///
@@ -107,7 +106,7 @@ pub fn copy_login_credentials(
             "login completed without persisted credentials",
         )
     })?;
-    save_auth(
+    crate::account_credentials::save_login_auth(
         to_home,
         &auth,
         auth_credentials_store_mode,

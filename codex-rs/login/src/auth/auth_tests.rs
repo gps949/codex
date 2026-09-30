@@ -78,6 +78,13 @@ async fn refresh_without_id_token() {
     );
     let updated = super::persist_tokens(
         &storage,
+        &storage
+            .load()
+            .unwrap()
+            .unwrap()
+            .tokens
+            .unwrap()
+            .refresh_token,
         /*id_token*/ None,
         Some("new-access-token".to_string()),
         Some("new-refresh-token".to_string()),
@@ -88,6 +95,38 @@ async fn refresh_without_id_token() {
     assert_eq!(tokens.id_token.raw_jwt, fake_jwt);
     assert_eq!(tokens.access_token, "new-access-token");
     assert_eq!(tokens.refresh_token, "new-refresh-token");
+}
+
+#[test]
+fn stale_refresh_result_preserves_a_newer_login() {
+    let home = tempdir().unwrap();
+    write_auth_file(
+        AuthFileParams {
+            openai_api_key: None,
+            chatgpt_plan_type: Some("pro".into()),
+            chatgpt_account_id: Some("workspace".into()),
+        },
+        home.path(),
+    )
+    .unwrap();
+    let storage = create_auth_storage(
+        home.path().to_path_buf(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    );
+    let mut repaired = storage.load().unwrap().unwrap();
+    repaired.tokens.as_mut().unwrap().refresh_token = "repaired-login".into();
+    storage.save(&repaired).unwrap();
+    let kept = super::persist_tokens(
+        &storage,
+        "obsolete-refresh",
+        /*id_token*/ None,
+        Some("obsolete-access".into()),
+        Some("obsolete-response".into()),
+    )
+    .unwrap();
+    assert_eq!(kept, repaired);
+    assert_eq!(storage.load().unwrap(), Some(repaired));
 }
 
 #[test]
