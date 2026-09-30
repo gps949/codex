@@ -1,4 +1,5 @@
 use codex_config::AutoResetCredits;
+use codex_core::ExecutionAccountPoolHandle;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_login::CodexAuth;
@@ -17,6 +18,7 @@ use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::Mock;
@@ -69,6 +71,59 @@ async fn collect_turn_events(codex: &codex_core::CodexThread) -> anyhow::Result<
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_pool_waits_and_continues_after_external_quota_recovery() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let reset = chrono::Utc::now().timestamp() + 120;
+    let requests = mount_response_sequence(
+        &server,
+        vec![
+        ResponseTemplate::new(/*status*/ 429).set_body_json(json!({"error": {
+            "type": "usage_limit_reached", "message": "temporarily exhausted", "resets_at": reset
+        }})),
+        responses::sse_response(sse(vec![
+            ev_response_created("recovered-response"),
+            ev_assistant_message("recovered-message", "continued automatically"),
+            ev_completed("recovered-response"),
+        ])),
+    ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .without_auth()
+        .with_pre_build_hook(write_backup_only_account_pool_fixture)
+        .with_config(|config| {
+            config.account_pool.resume_after_reset = Some(true);
+            config.account_pool.max_reset_wait_minutes = Some(3);
+            config.account_pool.window_warmup = Some(false);
+        });
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "finish this task without another user message".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::Warning(warning) if warning.message.contains("Waiting for quota recovery"))
+    }).await;
+    let handle = ExecutionAccountPoolHandle::shared(fixture.thread_manager.auth_manager());
+    let profile = codex_login::AccountProfileId::new("backup-acct")?;
+    handle.activate(&profile, /*force*/ true).await?;
+    let events = collect_turn_events(&fixture.codex).await?;
+    assert!(events.iter().any(|event| matches!(event,
+        EventMsg::Warning(warning) if warning.message.contains("continues automatically")
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EventMsg::Error(_)))
+    );
+    assert_eq!(requests.requests().len(), 2);
+    Ok(())
+}
+
 async fn run_reset_credit_case(
     mode: AutoResetCredits,
     reset_after_minutes: i64,
@@ -102,6 +157,7 @@ async fn run_reset_credit_case(
         .with_config(move |config| {
             config.chatgpt_base_url = backend_base_url;
             config.account_pool.auto_reset_credits = Some(mode);
+            config.account_pool.resume_after_reset = Some(false);
             config.account_pool.auto_reset_credit_min_wait_minutes = Some(60);
         });
     let fixture = builder.build_with_auto_env(&server).await?;
@@ -416,7 +472,8 @@ async fn no_eligible_target_rejects_next_turn_without_sampling() -> anyhow::Resu
     .await;
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_pre_build_hook(write_account_pool_fixture);
+        .with_pre_build_hook(write_account_pool_fixture)
+        .with_config(|config| config.account_pool.resume_after_reset = Some(false));
     let fixture = builder.build_with_auto_env(&server).await?;
 
     for (prompt, expected_warning_count) in [
@@ -567,6 +624,7 @@ async fn run_concurrent_reset_credit_case(
         .with_config(move |config| {
             config.chatgpt_base_url = backend_base_url;
             config.account_pool.auto_reset_credits = Some(AutoResetCredits::WhenPoolExhausted);
+            config.account_pool.resume_after_reset = Some(false);
             config.account_pool.auto_reset_credit_min_wait_minutes = Some(60);
         });
     let fixture = builder.build_with_auto_env(&server).await?;

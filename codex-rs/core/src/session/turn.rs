@@ -245,11 +245,9 @@ pub(crate) async fn run_turn(
             .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
     }
     let mut client_session = if execution_auth_mode.is_pooled() {
-        // Cached websockets are bound to the previous turn's account; after pool rotation they
-        // would keep sending as the exhausted identity and poison sibling profiles.
-        sess.services
-            .model_client
-            .new_session_for_execution_identity_change()
+        // Binding the captured execution identity below invalidates a foreign
+        // socket; an unchanged account can retain its authenticated connection.
+        sess.services.model_client.new_session()
     } else {
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session())
     };
@@ -1943,7 +1941,7 @@ async fn run_sampling_request(
                             }
                             return Err(err);
                         }
-                        SamplingFailoverDirective::PoolExhausted => {
+                        SamplingFailoverDirective::PoolExhausted { retry_mode } => {
                             // Opt-in last resort before failing the turn: redeem an earned
                             // rate-limit reset credit and continue on the reactivated account.
                             if let Some(rescue) =
@@ -1955,16 +1953,31 @@ async fn run_sampling_request(
                                 .await
                             {
                                 execution_auth.compatibility_auth_manager().reload().await;
+                                let safe_to_continue =
+                                    crate::account_pool_recovery::can_continue(retry_mode);
                                 sess.send_event(
                                     &turn_context,
                                     EventMsg::Warning(WarningEvent {
                                         message: format!(
-                                            "Redeemed one rate-limit reset credit on Codex account `{}`; the turn continues on that account.",
-                                            rescue.profile_id
+                                            "{} `{}`. {}",
+                                            if rescue.redeemed {
+                                                "Redeemed one rate-limit reset credit on Codex account"
+                                            } else {
+                                                "Codex account recovered:"
+                                            },
+                                            rescue.profile_id,
+                                            if safe_to_continue {
+                                                "The turn continues on that account."
+                                            } else {
+                                                "Partial output or an unfinished tool result requires reconciliation; re-send your message to continue."
+                                            },
                                         ),
                                     }),
                                 )
                                 .await;
+                                if !safe_to_continue {
+                                    return Err(err);
+                                }
                                 sess.services
                                     .model_client
                                     .replace_session_for_execution_identity_change(client_session);
@@ -1981,6 +1994,57 @@ async fn run_sampling_request(
                                     .await?;
                                 turn_context.turn_timing_state.record_sampling_retry();
                                 continue;
+                            }
+                            let max_wait = turn_context.config.account_pool.effective_reset_wait();
+                            if crate::account_pool_recovery::can_continue(retry_mode)
+                                && !max_wait.is_zero()
+                                && let Some(reset) = crate::failover_turn::earliest_exhausted_reset(
+                                    execution_auth.as_ref(),
+                                )
+                                && (reset - chrono::Utc::now())
+                                    .to_std()
+                                    .is_ok_and(|wait| wait <= max_wait)
+                            {
+                                sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+                                    message: format!(
+                                        "All Codex accounts are cooling down. Waiting for quota recovery (earliest reset: {}). Cancel to stop waiting.",
+                                        reset.format("%Y-%m-%d %H:%M UTC"),
+                                    ),
+                                })).await;
+                                let recovered = crate::account_pool_recovery::wait_for_recovery(
+                                    execution_auth.as_ref(),
+                                    max_wait,
+                                    &cancellation_token,
+                                )
+                                .or_cancel(&preempt)
+                                .await?;
+                                if recovered {
+                                    execution_auth.compatibility_auth_manager().reload().await;
+                                    sess.services
+                                        .model_client
+                                        .replace_session_for_execution_identity_change(
+                                            client_session,
+                                        );
+                                    turn_context
+                                        .extension_data
+                                        .remove::<codex_api::ResponseId>();
+                                    retry_state = ResponsesStreamRetryState::default();
+                                    sess.refresh_mcp_if_dirty().await;
+                                    step_context = sess
+                                        .capture_step_context(
+                                            Arc::clone(&turn_context),
+                                            &cancellation_token,
+                                        )
+                                        .await?;
+                                    sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+                                        message: "Codex account quota recovered. The turn continues automatically.".into(),
+                                    })).await;
+                                    turn_context.turn_timing_state.record_sampling_retry();
+                                    continue;
+                                }
+                                if cancellation_token.is_cancelled() {
+                                    return Err(CodexErr::TurnAborted);
+                                }
                             }
                             sess.send_event(
                                 &turn_context,

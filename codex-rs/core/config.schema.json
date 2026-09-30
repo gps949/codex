@@ -23,10 +23,20 @@
           ],
           "description": "When the scheduler may automatically redeem an earned rate-limit reset credit. Defaults to `never`: some users prefer waiting out a nearby natural reset or saving credits for a broader account-wide reset."
         },
+        "max_reset_wait_minutes": {
+          "description": "Maximum natural-reset wait for a single interrupted turn. Defaults to 360 minutes and is capped at 1440; cancellation remains immediate.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "preemptive_switch_percent": {
           "description": "Rotate the active account before a hard usage-limit failure once its observed usage for any rate-limit window reaches this percentage. Defaults to 95. Values outside the exclusive (0, 100) range disable preemptive switching.",
           "format": "double",
           "type": "number"
+        },
+        "resume_after_reset": {
+          "description": "Wait for quota recovery and safely continue an interrupted pooled turn. Defaults to true; unresolved tool results and visible partial output still require reconciliation before continuation.",
+          "type": "boolean"
         },
         "return_to_preferred": {
           "description": "Return to the most preferred (lowest priority value) account when its quota cooldown expires instead of staying on the currently active account. Defaults to true.",

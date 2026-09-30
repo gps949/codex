@@ -26,7 +26,7 @@ pub(crate) enum SamplingFailoverDirective {
         transition: AccountFailoverTransition,
     },
     /// The account pool recognized the failure but every configured account is unavailable.
-    PoolExhausted,
+    PoolExhausted { retry_mode: FailoverRetryMode },
     /// A tool may have caused an external side effect without a durable result, or partial visible
     /// model output must first be reconciled. The pool may already have moved to another account,
     /// but automatic replay is intentionally blocked.
@@ -60,7 +60,9 @@ pub(crate) async fn handle_sampling_failover(
                 ?cause,
                 "every configured Codex execution account is unavailable"
             );
-            Ok(SamplingFailoverDirective::PoolExhausted)
+            Ok(SamplingFailoverDirective::PoolExhausted {
+                retry_mode: checkpoint.retry_mode(),
+            })
         }
         FailoverOutcome::Rebound {
             cause,

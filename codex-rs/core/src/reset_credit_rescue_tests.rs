@@ -11,6 +11,7 @@ use serde_json::json;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
@@ -18,6 +19,57 @@ use super::consume_reset_credit_for_profile;
 use super::reactivate_redeemed_profile;
 use super::should_redeem;
 use crate::config::ConfigBuilder;
+
+#[tokio::test]
+async fn ambiguous_redemption_verifies_the_bound_profile_before_recovery() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200)
+                .set_body_json(json!({"code": "already_redeemed"})),
+        )
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .and(header("chatgpt-account-id", "seat-workspace"))
+        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+            "plan_type": "pro", "rate_limit": {
+                "allowed": true, "limit_reached": false,
+                "primary_window": {"used_percent": 1, "limit_window_seconds": 18000,
+                    "reset_after_seconds": 18000, "reset_at": 2000000000}
+            }
+        })))
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
+        .build()
+        .await?;
+    config.chatgpt_base_url = format!("{}/backend-api", server.uri());
+    let pool = AccountPool::new();
+    let profile_id = AccountProfileId::new("seat")?;
+    pool.register(
+        AccountProfile::new(
+            profile_id.clone(),
+            std::path::PathBuf::from("seat"),
+            /*priority*/ 0,
+            /*label*/ None,
+        ),
+        AuthManager::from_auth_for_testing(CodexAuth::from_external_chatgpt_tokens(
+            "e30.e30.c2VhdA",
+            "seat-workspace",
+            Some("pro"),
+        )?),
+    )?;
+    assert!(matches!(
+        consume_reset_credit_for_profile(&pool, &profile_id, &config, "same-ambiguous-id").await,
+        super::ResetCreditOutcome::AlreadyUsable,
+    ));
+    Ok(())
+}
 
 #[test]
 fn never_mode_never_redeems() {
@@ -145,9 +197,10 @@ async fn redemption_uses_the_failed_profile_auth_on_the_real_backend_route() -> 
         )?),
     )?;
 
-    assert!(
-        consume_reset_credit_for_profile(&pool, &failed_id, &config, "stable-request-id").await
-    );
+    assert!(matches!(
+        consume_reset_credit_for_profile(&pool, &failed_id, &config, "stable-request-id").await,
+        super::ResetCreditOutcome::Reset,
+    ));
     let auth_headers = server
         .received_requests()
         .await

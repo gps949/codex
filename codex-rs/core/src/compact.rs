@@ -326,13 +326,7 @@ async fn run_compact_task_inner_impl(
     preflight_account_transition(&preflight_history, &target_profile)
         .ensure_ready(&target_profile)
         .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
-    let mut client_session = if execution_auth_mode.is_pooled() {
-        sess.services
-            .model_client
-            .new_session_for_execution_identity_change()
-    } else {
-        sess.services.model_client.new_session()
-    };
+    let mut client_session = sess.services.model_client.new_session();
     if let Some(request_auth) = execution_binding.request_auth() {
         client_session.bind_execution_auth(request_auth);
     }

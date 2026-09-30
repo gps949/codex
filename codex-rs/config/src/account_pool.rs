@@ -66,6 +66,13 @@ pub struct AccountPoolConfigToml {
     /// natural reset across the pool is within this many minutes (waiting is free). Defaults
     /// to 60.
     pub auto_reset_credit_min_wait_minutes: Option<i64>,
+    /// Wait for quota recovery and safely continue an interrupted pooled turn.
+    /// Defaults to true; unresolved tool results and visible partial output
+    /// still require reconciliation before continuation.
+    pub resume_after_reset: Option<bool>,
+    /// Maximum natural-reset wait for a single interrupted turn. Defaults to
+    /// 360 minutes and is capped at 1440; cancellation remains immediate.
+    pub max_reset_wait_minutes: Option<u64>,
     /// Start idle primary (5h) rate-limit windows on standby accounts with a tiny generating
     /// request that never switches the active execution identity. This helps `fill_first` pools
     /// keep backup clocks ticking so a later failover waits less than a full 5h. Defaults to
@@ -77,6 +84,13 @@ pub struct AccountPoolConfigToml {
 }
 
 impl AccountPoolConfigToml {
+    pub fn effective_reset_wait(&self) -> std::time::Duration {
+        if !self.resume_after_reset.unwrap_or(true) {
+            return std::time::Duration::ZERO;
+        }
+        std::time::Duration::from_secs(self.max_reset_wait_minutes.unwrap_or(360).min(1440) * 60)
+    }
+
     /// Effective preemptive switch threshold; `None` means the feature is disabled.
     pub fn effective_preemptive_switch_percent(&self) -> Option<f64> {
         let percent = self

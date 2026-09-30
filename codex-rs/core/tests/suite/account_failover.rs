@@ -874,7 +874,8 @@ async fn stock_provider_ignores_an_exhausted_installed_pool() -> anyhow::Result<
         .await;
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_pre_build_hook(write_account_pool_fixture);
+        .with_pre_build_hook(write_account_pool_fixture)
+        .with_config(|config| config.account_pool.resume_after_reset = Some(false));
     let fixture = builder.build_with_auto_env(&server).await?;
     fixture
         .codex
