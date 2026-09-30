@@ -41,6 +41,12 @@ pub struct AccountRuntimeProfileState {
     /// are retried rather than becoming an accidental permanent local ban.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exhausted_until: Option<DateTime<Utc>>,
+    /// Soft scheduling preference after an early switch; remaining quota stays usable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preemptive_rotation_until: Option<DateTime<Utc>>,
+    /// Backend-confirmed reset epoch shared with other processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub rate_limits: AccountRateLimits,
     /// Latest identity-preserving 5h-window warmup observation. Shared across
@@ -108,6 +114,12 @@ impl AccountRuntimeStateStore {
                     {
                         profile.exhausted_until = None;
                     }
+                    if profile
+                        .preemptive_rotation_until
+                        .is_some_and(|reset| reset <= now)
+                    {
+                        profile.preemptive_rotation_until = None;
+                    }
                     profile
                 })
                 .collect(),
@@ -157,20 +169,68 @@ impl AccountRuntimeStateStore {
         crate::account_file::warmup_lock(&self.codex_home)
     }
 
-    /// Copies persisted warmup observations onto a live pool without treating
-    /// empty in-memory warmup as an authoritative clear.
+    /// Imports shared quota and warmup observations without changing execution selection or
+    /// treating empty in-memory warmup as an authoritative clear.
     pub fn apply_window_warmup_to_pool(
         &self,
         pool: &AccountPool,
     ) -> Result<(), AccountRuntimeStateError> {
         let state = self.load()?;
         for profile in state.profiles {
+            let _ = pool.update_rate_limits(&profile.profile_id, profile.rate_limits);
             let Some(observation) = profile.window_warmup else {
                 continue;
             };
             let _ = pool.record_window_warmup(&profile.profile_id, observation);
         }
         Ok(())
+    }
+
+    /// Persists one attempt without overwriting another process's active selection or quota.
+    pub fn record_window_warmup(
+        &self,
+        profile_id: &AccountProfileId,
+        observation: WindowWarmupObservation,
+    ) -> Result<(), AccountRuntimeStateError> {
+        let _lock = crate::account_file::lock(&self.codex_home)?;
+        let profiles = crate::AccountProfileStore::new(self.codex_home.clone());
+        if !profiles
+            .load_profile_records_unlocked()?
+            .iter()
+            .any(|record| &record.profile.id == profile_id)
+        {
+            return Err(AccountRuntimeStateError::UnavailableProfile(
+                profile_id.clone(),
+            ));
+        }
+        let mut state = self.load_unlocked()?;
+        if let Some(profile) = state
+            .profiles
+            .iter_mut()
+            .find(|profile| &profile.profile_id == profile_id)
+        {
+            if profile
+                .window_warmup
+                .as_ref()
+                .is_some_and(|current| current.attempted_at > observation.attempted_at)
+                || profile
+                    .quota_reset_at
+                    .is_some_and(|reset| reset > observation.attempted_at)
+            {
+                return Ok(());
+            }
+            profile.window_warmup = Some(observation);
+        } else {
+            state.profiles.push(AccountRuntimeProfileState {
+                profile_id: profile_id.clone(),
+                exhausted_until: None,
+                preemptive_rotation_until: None,
+                quota_reset_at: None,
+                rate_limits: AccountRateLimits::default(),
+                window_warmup: Some(observation),
+            });
+        }
+        self.save_unlocked(&state)
     }
 
     /// Three-way merge of the live pool against disk. Use this after mutating
@@ -239,6 +299,7 @@ impl AccountRuntimeStateStore {
             if force {
                 profile.exhausted_until = None;
             }
+            profile.preemptive_rotation_until = None;
         }
         state.active_profile_id = Some(profile_id);
         state.selection_revision = state
@@ -271,14 +332,17 @@ impl AccountRuntimeStateStore {
             .iter_mut()
             .find(|profile| &profile.profile_id == profile_id)
         {
-            if profile.rate_limits.observed_at > limits.observed_at {
+            if profile.quota_reset_at.is_some() && limits.observed_at <= profile.quota_reset_at {
                 return Ok(());
             }
-            profile.rate_limits = limits;
+            profile.rate_limits =
+                crate::account_pool::merge_rate_limits_monotonic(&profile.rate_limits, limits);
         } else {
             state.profiles.push(AccountRuntimeProfileState {
                 profile_id: profile_id.clone(),
                 exhausted_until: None,
+                preemptive_rotation_until: None,
+                quota_reset_at: None,
                 rate_limits: limits,
                 window_warmup: None,
             });
@@ -322,6 +386,10 @@ fn runtime_state_from_snapshots(snapshots: &[AccountPoolSnapshot]) -> AccountRun
                     } if reset > &now => Some(*reset),
                     _ => None,
                 },
+                preemptive_rotation_until: snapshot
+                    .preemptive_rotation_until
+                    .filter(|reset| *reset > now),
+                quota_reset_at: snapshot.quota_reset_at,
                 rate_limits: snapshot.rate_limits.clone(),
                 window_warmup: snapshot.window_warmup.clone(),
             })
@@ -388,6 +456,8 @@ mod tests {
                 profiles: vec![AccountRuntimeProfileState {
                     profile_id,
                     exhausted_until: Some(Utc::now() - Duration::minutes(1)),
+                    preemptive_rotation_until: None,
+                    quota_reset_at: None,
                     rate_limits: AccountRateLimits::default(),
                     window_warmup: None,
                 }],
@@ -410,6 +480,8 @@ mod tests {
             profiles: vec![AccountRuntimeProfileState {
                 profile_id,
                 exhausted_until: Some(reset),
+                preemptive_rotation_until: None,
+                quota_reset_at: None,
                 rate_limits: AccountRateLimits::default(),
                 window_warmup: None,
             }],

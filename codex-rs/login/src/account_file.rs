@@ -6,6 +6,7 @@ use std::path::Path;
 const ACCOUNT_POOL_LOCK: &str = ".account-pool.lock";
 const WINDOW_WARMUP_LOCK: &str = ".window-warmup.lock";
 const AUTH_REFRESH_LOCK: &str = ".auth-refresh.lock";
+const RESET_CREDIT_LOCK: &str = ".rate-limit-reset-credit.lock";
 
 /// Serializes account metadata transactions across processes; the handle releases on drop.
 pub(crate) fn lock(home: &Path) -> io::Result<File> {
@@ -21,6 +22,15 @@ pub(crate) fn warmup_lock(home: &Path) -> io::Result<File> {
 /// Serializes OAuth refresh + `auth.json` writes for one credential home.
 pub(crate) fn refresh_lock(home: &Path) -> io::Result<File> {
     lock_named(home, AUTH_REFRESH_LOCK)
+}
+
+pub(crate) fn try_reset_credit_lock(home: &Path) -> io::Result<Option<File>> {
+    let file = open_lock_file(home, RESET_CREDIT_LOCK)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 
 fn lock_named(home: &Path, name: &str) -> io::Result<File> {

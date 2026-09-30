@@ -346,6 +346,9 @@ fn restore_runtime_state(
         }
     }
 
+    // Restore soft scheduling and confirmed reset epochs independently of hard cooldowns.
+    pool.merge_runtime_state(runtime_state, &AccountRuntimeState::default(), None);
+
     if let Some(active_profile_id) = runtime_state.active_profile_id.as_ref()
         && known_profiles.contains(active_profile_id)
         && pool.activate(active_profile_id).is_ok()

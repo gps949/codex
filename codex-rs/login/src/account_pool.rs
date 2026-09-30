@@ -155,6 +155,13 @@ pub struct AccountPoolSnapshot {
     pub is_active: bool,
     /// Latest identity-preserving 5h-window warmup observation for this profile, if any.
     pub window_warmup: Option<WindowWarmupObservation>,
+    /// A near-limit account stays usable as a fallback until this deadline. This is distinct
+    /// from an authoritative backend exhaustion and never discards its remaining quota.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preemptive_rotation_until: Option<DateTime<Utc>>,
+    /// Latest confirmed quota reset, used to reject observations from older windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_at: Option<DateTime<Utc>>,
 }
 
 /// Outcome of an identity-preserving standby 5h-window warmup attempt.
@@ -166,24 +173,23 @@ pub enum WindowWarmupOutcome {
     SkippedNoAuth,
 }
 
-/// Warmup attempt persisted in `account-runtime-state.json`.
-/// Scheduling does not read this: a later pass retries whenever the 5h window is still 0%.
-/// New attempts only persist [`WindowWarmupOutcome::Succeeded`]. Failures stay log-only.
+/// Warmup attempt persisted in `account-runtime-state.json`. Scheduling shares attempt
+/// ordering and bounded retries across processes; user interfaces can hide failed attempts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowWarmupObservation {
     pub outcome: WindowWarmupOutcome,
     pub attempted_at: DateTime<Utc>,
-    /// Leftover field from the old backoff clock. New attempts leave this unset.
+    /// Earliest retry time after a failed or not-yet-confirmed request.
     pub retry_after: Option<DateTime<Utc>>,
-    /// Leftover streak field from the old backoff clock. New attempts leave this at 0.
+    /// Consecutive request failures, used for bounded exponential backoff.
     #[serde(default)]
     pub consecutive_failures: u32,
-    /// Request-contract generation written on new attempts. Scheduling ignores it.
+    /// Request-contract generation; older attempts do not delay the current request shape.
     #[serde(default)]
     pub request_generation: u32,
 }
 
-/// Written onto new warmup observations. Not used for candidate selection.
+/// Written onto new warmup observations so a request-contract change can bypass old backoff.
 ///
 /// 6: Catalog-backed usable models only; same-pass retry if the API rejects a slug.
 pub const CURRENT_WARMUP_REQUEST_GENERATION: u32 = 6;
@@ -214,6 +220,8 @@ pub struct AccountLease {
     profile: AccountProfile,
     auth_manager: Arc<AuthManager>,
     generation: u64,
+    auth_revision: u64,
+    quota_reset_at: Option<DateTime<Utc>>,
 }
 
 /// Result of applying an availability observation from one captured execution lease.
@@ -247,6 +255,11 @@ impl AccountLease {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+
+    /// Confirmed quota epoch captured before this request starts.
+    pub fn quota_reset_at(&self) -> Option<DateTime<Utc>> {
+        self.quota_reset_at
+    }
 }
 
 struct ManagedAccount {
@@ -256,6 +269,8 @@ struct ManagedAccount {
     rate_limits: AccountRateLimits,
     last_active_generation: Option<u64>,
     window_warmup: Option<WindowWarmupObservation>,
+    preemptive_rotation_until: Option<DateTime<Utc>>,
+    quota_reset_at: Option<DateTime<Utc>>,
 }
 
 struct AccountPoolState {
@@ -299,6 +314,11 @@ mod shared_state;
 #[path = "account_pool_quota.rs"]
 mod quota;
 pub(crate) use quota::merge_rate_limits_monotonic;
+
+#[path = "account_pool_warmup.rs"]
+mod window_warmup;
+use window_warmup::clear_started_window_warmup;
+use window_warmup::standby_needs_window_warmup;
 
 impl Default for AccountPool {
     fn default() -> Self {
@@ -348,6 +368,8 @@ impl AccountPool {
                 rate_limits: AccountRateLimits::default(),
                 last_active_generation: None,
                 window_warmup: None,
+                preemptive_rotation_until: None,
+                quota_reset_at: None,
             },
         );
         drop(state);
@@ -487,6 +509,10 @@ impl AccountPool {
             return Err(AccountPoolError::ProfileUnavailable(profile_id.clone()));
         }
 
+        let unparked = state
+            .accounts
+            .get_mut(profile_id)
+            .is_some_and(|account| account.preemptive_rotation_until.take().is_some());
         let active_changed = set_active_profile(&mut state, profile_id);
         let account = state
             .accounts
@@ -494,7 +520,7 @@ impl AccountPool {
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
         let lease = make_lease(account, state.generation);
         drop(state);
-        if refreshed || active_changed {
+        if refreshed || unparked || active_changed {
             self.notify_change();
         }
         Ok(lease)
@@ -572,7 +598,7 @@ impl AccountPool {
             if forced {
                 account.availability = AccountAvailability::Available;
             }
-            forced
+            account.preemptive_rotation_until.take().is_some() || forced
         };
         let active_changed = set_active_profile(&mut state, profile_id);
         let account = state
@@ -590,8 +616,9 @@ impl AccountPool {
     /// Rotates away from a still-working lease whose observed usage is close to its limit.
     ///
     /// Unlike [`Self::mark_exhausted`], this never leaves the pool without an active account: the
-    /// rotation only happens when another eligible profile exists to take over, so a preemptive
-    /// switch can never make things worse than staying on the nearly exhausted account.
+    /// rotation only happens when another eligible, unparked profile exists to take over.
+    /// The previous account remains eligible as a lower-priority fallback, so its remaining
+    /// quota is recovered automatically when the other accounts run out.
     pub fn rotate_preemptively(
         &self,
         lease: &AccountLease,
@@ -608,7 +635,9 @@ impl AccountPool {
                 break 'rotation None;
             }
             let has_alternative = state.accounts.values().any(|account| {
-                account.profile.id != lease.profile.id && account.availability.is_eligible(&now)
+                account.profile.id != lease.profile.id
+                    && account.availability.is_eligible(&now)
+                    && account.preemptive_rotation_until.is_none()
             });
             if !has_alternative {
                 break 'rotation None;
@@ -617,9 +646,7 @@ impl AccountPool {
             let Some(account) = state.accounts.get_mut(&lease.profile.id) else {
                 break 'rotation None;
             };
-            account.availability = AccountAvailability::Exhausted {
-                resets_at: Some(resets_at),
-            };
+            account.preemptive_rotation_until = Some(resets_at);
             state.active_profile = None;
             let Some(selected_id) = select_eligible_account(&state, &now) else {
                 break 'rotation None;
@@ -662,25 +689,27 @@ impl AccountPool {
     /// included so a GET/warmup pass can discover whether they still need a kick. Known idle
     /// primaries only need `used_percent <= 0` (and a 5h/`None` window length when present); do
     /// not require `resets_at ≈ now+5h`, because that check drifts as time passes after the
-    /// quota observation and would skip still-idle standbys.
+    /// quota observation and would skip still-idle standbys. Expired primary observations are
+    /// probed again; the least recently attempted standby wins before profile priority.
     pub fn window_warmup_candidates(&self) -> Vec<AccountProfileId> {
         let state = self.lock_state();
         let now = Utc::now();
-        let mut candidates: Vec<(u8, u32, AccountProfileId)> = state
+        let mut candidates: Vec<(Option<DateTime<Utc>>, u8, u32, AccountProfileId)> = state
             .accounts
             .values()
             .filter(|account| {
                 account.availability.is_eligible(&now)
                     && state.active_profile.as_ref() != Some(&account.profile.id)
-                    && match account.rate_limits.primary.as_ref() {
-                        None => true,
-                        Some(window) => is_idle_primary_five_hour_window(window),
-                    }
+                    && standby_needs_window_warmup(account, now)
             })
             .map(|account| {
                 // Probe unknown quota before known-idle so we learn state sooner.
                 let unknown_first = u8::from(account.rate_limits.primary.is_some());
                 (
+                    account
+                        .window_warmup
+                        .as_ref()
+                        .map(|observation| observation.attempted_at),
                     unknown_first,
                     account.profile.priority,
                     account.profile.id.clone(),
@@ -691,12 +720,13 @@ impl AccountPool {
             left.0
                 .cmp(&right.0)
                 .then_with(|| left.1.cmp(&right.1))
-                .then_with(|| left.2.as_str().cmp(right.2.as_str()))
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| left.3.as_str().cmp(right.3.as_str()))
         });
-        candidates.into_iter().map(|(_, _, id)| id).collect()
+        candidates.into_iter().map(|(_, _, _, id)| id).collect()
     }
 
-    /// Records a warmup attempt. UIs hide failure; only success is written by new attempts.
+    /// Records an attempt for fair shared scheduling; UIs hide failure observations.
     pub fn record_window_warmup(
         &self,
         profile_id: &AccountProfileId,
@@ -707,6 +737,16 @@ impl AccountPool {
             .accounts
             .get_mut(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+        if account
+            .window_warmup
+            .as_ref()
+            .is_some_and(|current| current.attempted_at > observation.attempted_at)
+            || account
+                .quota_reset_at
+                .is_some_and(|reset| reset > observation.attempted_at)
+        {
+            return Ok(());
+        }
         let succeeded = matches!(observation.outcome, WindowWarmupOutcome::Succeeded);
         account.window_warmup = Some(observation);
         // Keep Succeeded when usage later looks started so a lagging 0% GET does not
@@ -743,10 +783,7 @@ impl AccountPool {
         state.accounts.values().any(|account| {
             account.availability.is_eligible(&now)
                 && Some(&account.profile.id) != state.active_profile.as_ref()
-                && match account.rate_limits.primary.as_ref() {
-                    None => true,
-                    Some(window) => is_idle_primary_five_hour_window(window),
-                }
+                && standby_needs_window_warmup(account, now)
         })
     }
 
@@ -835,7 +872,8 @@ impl AccountPool {
             .accounts
             .get_mut(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
-        let availability_changed = account.availability != new_availability;
+        let availability_changed = account.availability != new_availability
+            || account.preemptive_rotation_until.take().is_some();
         account.availability = new_availability;
         if disabled {
             account.last_active_generation = None;
@@ -855,6 +893,52 @@ impl AccountPool {
         Ok(())
     }
 
+    /// Records a backend-confirmed reset, discarding quota from the previous windows and
+    /// invalidating outstanding execution leases so late failures cannot reapply the old ban.
+    pub fn reset_rate_limits(&self, profile_id: &AccountProfileId) -> Result<(), AccountPoolError> {
+        self.apply_quota_reset(profile_id, Utc::now())
+    }
+
+    /// Applies a shared, confirmed reset while retaining its original epoch.
+    pub fn apply_quota_reset(
+        &self,
+        profile_id: &AccountProfileId,
+        reset_at: DateTime<Utc>,
+    ) -> Result<(), AccountPoolError> {
+        let mut state = self.lock_state();
+        let is_active = state.active_profile.as_ref() == Some(profile_id);
+        let generation = if is_active {
+            state.generation.wrapping_add(1)
+        } else {
+            state.generation
+        };
+        let account = state
+            .accounts
+            .get_mut(profile_id)
+            .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+        if account
+            .quota_reset_at
+            .is_some_and(|current| current >= reset_at)
+        {
+            return Ok(());
+        }
+        account.quota_reset_at = Some(reset_at);
+        account.rate_limits = AccountRateLimits {
+            observed_at: Some(reset_at),
+            ..AccountRateLimits::default()
+        };
+        account.window_warmup = None;
+        account.preemptive_rotation_until = None;
+        account.last_active_generation = is_active.then_some(generation);
+        if matches!(account.availability, AccountAvailability::Exhausted { .. }) {
+            account.availability = AccountAvailability::Available;
+        }
+        state.generation = generation;
+        drop(state);
+        self.notify_change();
+        Ok(())
+    }
+
     pub fn update_rate_limits(
         &self,
         profile_id: &AccountProfileId,
@@ -865,10 +949,13 @@ impl AccountPool {
             .accounts
             .get_mut(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
+        if account.quota_reset_at.is_some() && rate_limits.observed_at <= account.quota_reset_at {
+            return Ok(());
+        }
         let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
-        let changed = account.rate_limits != merged;
+        let mut changed = account.rate_limits != merged;
         account.rate_limits = merged;
-        clear_started_window_warmup(account);
+        changed |= clear_started_window_warmup(account);
         drop(state);
         if changed {
             self.notify_change();
@@ -892,10 +979,13 @@ impl AccountPool {
         if account.last_active_generation != Some(lease.generation) {
             return Ok(());
         }
+        if account.quota_reset_at.is_some() && rate_limits.observed_at <= account.quota_reset_at {
+            return Ok(());
+        }
         let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
-        let changed = account.rate_limits != merged;
+        let mut changed = account.rate_limits != merged;
         account.rate_limits = merged;
-        clear_started_window_warmup(account);
+        changed |= clear_started_window_warmup(account);
         drop(state);
         if changed {
             self.notify_change();
@@ -916,6 +1006,8 @@ impl AccountPool {
                 rate_limits: account.rate_limits.clone(),
                 is_active: active_profile.as_ref() == Some(&account.profile.id),
                 window_warmup: account.window_warmup.clone(),
+                preemptive_rotation_until: account.preemptive_rotation_until,
+                quota_reset_at: account.quota_reset_at,
             })
             .collect::<Vec<_>>();
         snapshots.sort_by(|left, right| {
@@ -959,6 +1051,25 @@ impl AccountPool {
             .accounts
             .get_mut(&lease.profile.id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(lease.profile.id.clone()))?;
+        if matches!(
+            availability,
+            AccountAvailability::AuthenticationUnavailable { .. }
+        ) && lease.auth_revision != *account.auth_manager.auth_change_receiver().borrow()
+            && account.auth_manager.auth_cached().is_some_and(|auth| {
+                auth.is_chatgpt_auth()
+                    && account
+                        .auth_manager
+                        .refresh_failure_for_auth(&auth)
+                        .is_none()
+            })
+        {
+            let active = active_lease(&state);
+            drop(state);
+            if refreshed {
+                self.notify_change();
+            }
+            return Ok(AccountAvailabilityMutation::StaleIgnored { active });
+        }
         let merged_availability = match (&account.availability, availability) {
             (
                 AccountAvailability::AuthenticationUnavailable { .. }
@@ -978,7 +1089,8 @@ impl AccountPool {
             },
             (_, observed) => observed,
         };
-        let availability_changed = account.availability != merged_availability;
+        let availability_changed = account.availability != merged_availability
+            || account.preemptive_rotation_until.take().is_some();
         let rate_limits_changed = rate_limits
             .as_ref()
             .is_some_and(|rate_limits| account.rate_limits != *rate_limits);
@@ -1039,6 +1151,8 @@ fn make_lease(account: &ManagedAccount, generation: u64) -> AccountLease {
         profile: account.profile.clone(),
         auth_manager: Arc::clone(&account.auth_manager),
         generation,
+        auth_revision: *account.auth_manager.auth_change_receiver().borrow(),
+        quota_reset_at: account.quota_reset_at,
     }
 }
 
@@ -1055,6 +1169,14 @@ fn refresh_expired_exhaustion(state: &mut AccountPoolState) -> bool {
     let mut changed = false;
     let active_profile = state.active_profile.clone();
     for account in state.accounts.values_mut() {
+        if account
+            .preemptive_rotation_until
+            .is_some_and(|reset| reset <= now)
+        {
+            account.preemptive_rotation_until = None;
+            state.pending_return_to_preferred = true;
+            changed = true;
+        }
         if account.availability.refresh_for_time(&now) {
             if active_profile.as_ref() == Some(&account.profile.id) {
                 // The profile is still the sticky active identity. Keep a generation guard so a
@@ -1106,9 +1228,10 @@ fn select_fill_first(
         .values()
         .filter(|account| account_is_eligible(account, now, eligibility))
         .min_by(|left, right| {
-            left.profile
-                .priority
-                .cmp(&right.profile.priority)
+            left.preemptive_rotation_until
+                .is_some()
+                .cmp(&right.preemptive_rotation_until.is_some())
+                .then_with(|| left.profile.priority.cmp(&right.profile.priority))
                 // Equal-priority: prefer unstarted 5h windows so the first lease starts the clock.
                 .then_with(|| earliest_reset_key(left, now).cmp(&earliest_reset_key(right, now)))
                 .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
@@ -1126,8 +1249,10 @@ fn select_earliest_reset(
         .values()
         .filter(|account| account_is_eligible(account, now, eligibility))
         .min_by(|left, right| {
-            earliest_reset_key(left, now)
-                .cmp(&earliest_reset_key(right, now))
+            left.preemptive_rotation_until
+                .is_some()
+                .cmp(&right.preemptive_rotation_until.is_some())
+                .then_with(|| earliest_reset_key(left, now).cmp(&earliest_reset_key(right, now)))
                 .then_with(|| left.profile.priority.cmp(&right.profile.priority))
                 .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
         })
@@ -1187,42 +1312,6 @@ fn earliest_reset_key(account: &ManagedAccount, now: &DateTime<Utc>) -> Earliest
 
 fn has_due_rate_limit_window(account: &ManagedAccount, now: &DateTime<Utc>) -> bool {
     earliest_reset_key(account, now) == EarliestResetKey::Due
-}
-
-fn clear_started_window_warmup(account: &mut ManagedAccount) {
-    let window_started = account
-        .rate_limits
-        .primary
-        .as_ref()
-        .is_some_and(|window| window.used_percent > 0.0);
-    if !window_started {
-        return;
-    }
-    // Keep Succeeded once usage is known started. Failure/skip are cleared so stale
-    // "warmup failed" text does not linger next to a ticking 5h window.
-    if matches!(
-        account
-            .window_warmup
-            .as_ref()
-            .map(|observation| observation.outcome),
-        Some(WindowWarmupOutcome::Succeeded)
-    ) {
-        return;
-    }
-    account.window_warmup = None;
-}
-
-const FIVE_HOUR_WINDOW_MINUTES: i64 = 300;
-
-/// True when a primary quota snapshot is still idle and looks like the 5h window.
-///
-/// `window_minutes` may be missing on older cached observations; those still count when usage is
-/// `0%` because the pool treats primary as the 5h window. Explicit non-5h lengths are skipped.
-fn is_idle_primary_five_hour_window(window: &AccountRateLimitWindow) -> bool {
-    window.used_percent <= 0.0
-        && window
-            .window_minutes
-            .is_none_or(|minutes| minutes == FIVE_HOUR_WINDOW_MINUTES)
 }
 
 fn set_active_profile(state: &mut AccountPoolState, profile_id: &AccountProfileId) -> bool {
@@ -1331,7 +1420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preemptive_rotation_switches_to_backup_and_cools_down_active() {
+    async fn preemptive_rotation_switches_to_backup_and_preserves_remaining_quota() {
         let pool = AccountPool::new();
         let first = profile("first", 10);
         let second = profile("second", 20);
@@ -1357,10 +1446,95 @@ mod tests {
             .find(|snapshot| snapshot.profile.id == first.id)
             .expect("first profile snapshot");
         assert_eq!(
-            first_snapshot.availability,
-            AccountAvailability::Exhausted {
-                resets_at: Some(resets_at)
+            (
+                first_snapshot.availability,
+                first_snapshot.preemptive_rotation_until
+            ),
+            (AccountAvailability::Available, Some(resets_at))
+        );
+    }
+
+    #[tokio::test]
+    async fn preemptive_rotation_recovers_remaining_quota_after_backups_exhaust() {
+        for strategy in [
+            AccountPoolRotationStrategy::FillFirst,
+            AccountPoolRotationStrategy::EarliestReset,
+        ] {
+            let pool = AccountPool::new();
+            pool.set_rotation_strategy(strategy);
+            let first = profile("first", 10);
+            let second = profile("second", 20);
+            let third = profile("third", 30);
+            for account in [&first, &second, &third] {
+                pool.register(
+                    account.clone(),
+                    test_auth_manager(&account.credential_home).await,
+                )
+                .expect("register account");
             }
+            let first_lease = pool.lease().expect("initial lease");
+            let reset = Utc::now() + chrono::Duration::hours(1);
+            let second_lease = pool
+                .rotate_preemptively(&first_lease, reset)
+                .expect("prefer backup before using the residual");
+            assert_eq!(second_lease.profile().id, second.id);
+            let AccountAvailabilityMutation::Rebound(third_lease) = pool
+                .mark_exhausted(&second_lease, Some(reset))
+                .expect("exhaust second")
+            else {
+                panic!("third account must be selected before the residual");
+            };
+            assert_eq!(third_lease.profile().id, third.id);
+            let AccountAvailabilityMutation::Rebound(residual_lease) = pool
+                .mark_exhausted(&third_lease, Some(reset))
+                .expect("exhaust third")
+            else {
+                panic!("remaining quota must be reclaimed");
+            };
+            assert_eq!(residual_lease.profile().id, first.id);
+            assert!(pool.rotate_preemptively(&residual_lease, reset).is_none());
+            assert!(matches!(
+                pool.mark_exhausted(&residual_lease, Some(reset))
+                    .expect("authoritative exhaustion closes the residual"),
+                AccountAvailabilityMutation::PoolExhausted
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmed_quota_reset_invalidates_usage_and_late_failure_lease() {
+        let pool = AccountPool::new();
+        let first = profile("first", 10);
+        pool.register(
+            first.clone(),
+            test_auth_manager(&first.credential_home).await,
+        )
+        .expect("register first");
+        let lease = pool.lease().expect("initial lease");
+        let reset = Utc::now() + chrono::Duration::hours(1);
+        pool.update_rate_limits_from_lease(
+            &lease,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 100.0,
+                    resets_at: Some(reset),
+                    window_minutes: Some(300),
+                }),
+                observed_at: Some(Utc::now()),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("observe exhaustion");
+        pool.reset_rate_limits(&first.id).expect("confirm reset");
+        assert!(matches!(
+            pool.mark_exhausted(&lease, Some(reset))
+                .expect("reject failure from the previous quota window"),
+            AccountAvailabilityMutation::StaleIgnored { .. }
+        ));
+        let snapshot = pool.snapshots().pop().expect("profile snapshot");
+        assert_eq!(
+            (snapshot.rate_limits.primary, snapshot.availability),
+            (None, AccountAvailability::Available)
         );
     }
 
@@ -1685,7 +1859,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_warmup_candidates_retry_failed_even_with_future_retry_after() {
+    async fn window_warmup_candidates_rotate_fairly_after_an_unconfirmed_attempt() {
+        let pool = AccountPool::new();
+        let active = profile("active", 0);
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&active, &first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        pool.lease().expect("activate foreground");
+        pool.record_window_warmup(
+            &first.id,
+            WindowWarmupObservation::current(
+                WindowWarmupOutcome::Failed,
+                Utc::now() - chrono::Duration::minutes(6),
+                Some(Utc::now() - chrono::Duration::minutes(1)),
+                /*consecutive_failures*/ 1,
+            ),
+        )
+        .expect("record first attempt");
+        assert_eq!(
+            pool.window_warmup_candidates(),
+            vec![second.id, first.id],
+            "an unattempted standby must not starve behind a repeated NOOP"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_primary_window_is_probed_again_after_success() {
+        let pool = AccountPool::new();
+        let active = profile("active", 0);
+        let standby = profile("standby", 10);
+        for account in [&active, &standby] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+        pool.lease().expect("activate foreground");
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &standby.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 10.0,
+                    resets_at: Some(now - chrono::Duration::minutes(1)),
+                    window_minutes: Some(300),
+                }),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("expired cached window");
+        pool.record_window_warmup(
+            &standby.id,
+            WindowWarmupObservation::current(
+                WindowWarmupOutcome::Succeeded,
+                now - chrono::Duration::hours(5),
+                None,
+                /*consecutive_failures*/ 0,
+            ),
+        )
+        .expect("previous window success");
+        assert_eq!(pool.window_warmup_candidates(), vec![standby.id]);
+    }
+
+    #[tokio::test]
+    async fn window_warmup_candidates_back_off_after_failed_request() {
         let pool = AccountPool::new();
         let active = profile("active", 0);
         let idle = profile("idle", 10);
@@ -1722,7 +1966,10 @@ mod tests {
             ),
         )
         .expect("record leftover failure");
-        assert_eq!(pool.window_warmup_candidates(), vec![idle.id]);
+        assert_eq!(
+            pool.window_warmup_candidates(),
+            Vec::<AccountProfileId>::new()
+        );
     }
 
     #[tokio::test]
@@ -1766,7 +2013,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_warmup_candidates_retry_succeeded_when_primary_still_idle() {
+    async fn window_warmup_candidates_allow_quota_visibility_delay_after_success() {
         let pool = AccountPool::new();
         let active = profile("active", 0);
         let idle = profile("idle", 10);
@@ -1805,8 +2052,8 @@ mod tests {
         .expect("record succeeded");
         assert_eq!(
             pool.window_warmup_candidates(),
-            vec![idle.id],
-            "5h still at 0% must be retried even after a Succeeded observation"
+            Vec::<AccountProfileId>::new(),
+            "fresh success must allow the quota endpoint to catch up"
         );
     }
 

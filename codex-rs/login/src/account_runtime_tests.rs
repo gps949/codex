@@ -131,12 +131,16 @@ async fn restoring_a_fully_cooling_down_pool_succeeds() {
             AccountRuntimeProfileState {
                 profile_id: first.id.clone(),
                 exhausted_until: Some(resets_at),
+                preemptive_rotation_until: None,
+                quota_reset_at: None,
                 rate_limits: Default::default(),
                 window_warmup: None,
             },
             AccountRuntimeProfileState {
                 profile_id: second.id.clone(),
                 exhausted_until: Some(resets_at),
+                preemptive_rotation_until: None,
+                quota_reset_at: None,
                 rate_limits: Default::default(),
                 window_warmup: None,
             },
@@ -503,13 +507,13 @@ async fn second_pool_restores_persisted_window_warmup_outcome() {
     );
     assert_eq!(
         reader.window_warmup_candidates(),
-        vec![second.clone()],
-        "a persisted Failed outcome must not block the next interval when 5h is still 0%"
+        Vec::<AccountProfileId>::new(),
+        "persisted backoff prevents another process from duplicating a failed warmup"
     );
 }
 
 #[tokio::test]
-async fn restore_runtime_state_keeps_idle_warmup_candidates() {
+async fn restore_runtime_state_keeps_warmup_retry_deadline() {
     let pool = AccountPool::new();
     let first = profile("first", 0);
     let second = profile("second", 10);
@@ -533,12 +537,16 @@ async fn restore_runtime_state_keeps_idle_warmup_candidates() {
                 AccountRuntimeProfileState {
                     profile_id: first.id.clone(),
                     exhausted_until: None,
+                    preemptive_rotation_until: None,
+                    quota_reset_at: None,
                     rate_limits: Default::default(),
                     window_warmup: None,
                 },
                 AccountRuntimeProfileState {
                     profile_id: second.id.clone(),
                     exhausted_until: None,
+                    preemptive_rotation_until: None,
+                    quota_reset_at: None,
                     rate_limits: idle_primary_limits(),
                     window_warmup: Some(failed_warmup(retry_after)),
                 },
@@ -546,7 +554,10 @@ async fn restore_runtime_state_keeps_idle_warmup_candidates() {
         },
     )
     .unwrap();
-    assert_eq!(pool.window_warmup_candidates(), vec![second.id]);
+    assert_eq!(
+        pool.window_warmup_candidates(),
+        Vec::<AccountProfileId>::new()
+    );
 }
 
 #[tokio::test]

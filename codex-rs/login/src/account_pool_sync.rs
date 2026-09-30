@@ -16,6 +16,8 @@ impl AccountPool {
         let external_selection = remote.selection_revision != previous.selection_revision;
         let mut merged = remote.clone();
         let mut changed = false;
+        let mut active_quota_reset = false;
+        let active_profile = state.active_profile.clone();
         if let Some(profiles) = profiles {
             let before = state.accounts.len();
             state.accounts.retain(|id, _| {
@@ -46,6 +48,7 @@ impl AccountPool {
                 if account.profile.disabled {
                     changed |= account.availability != AccountAvailability::Disabled;
                     account.availability = AccountAvailability::Disabled;
+                    account.preemptive_rotation_until = None;
                     account.last_active_generation = None;
                 } else if was_disabled {
                     account.availability = match incoming
@@ -70,6 +73,8 @@ impl AccountPool {
                     }
                     _ => None,
                 },
+                preemptive_rotation_until: account.preemptive_rotation_until,
+                quota_reset_at: account.quota_reset_at,
                 rate_limits: account.rate_limits.clone(),
                 window_warmup: account.window_warmup.clone(),
             };
@@ -82,12 +87,6 @@ impl AccountPool {
                 if old == Some(&local) {
                     result = incoming.clone();
                 } else {
-                    if incoming.rate_limits.observed_at > local.rate_limits.observed_at {
-                        result.rate_limits = merge_rate_limits_monotonic(
-                            &local.rate_limits,
-                            incoming.rate_limits.clone(),
-                        );
-                    }
                     // Cooldown clears (force / reset-credit) must win over a stale disk exhaustion.
                     // Taking max() previously resurrected exhausted_until after a successful redeem.
                     let old_exhausted = old.and_then(|profile| profile.exhausted_until);
@@ -95,6 +94,12 @@ impl AccountPool {
                         result.exhausted_until = local.exhausted_until;
                     } else if incoming.exhausted_until != old_exhausted {
                         result.exhausted_until = incoming.exhausted_until;
+                    }
+                    let old_preemptive = old.and_then(|profile| profile.preemptive_rotation_until);
+                    if local.preemptive_rotation_until != old_preemptive {
+                        result.preemptive_rotation_until = local.preemptive_rotation_until;
+                    } else if incoming.preemptive_rotation_until != old_preemptive {
+                        result.preemptive_rotation_until = incoming.preemptive_rotation_until;
                     }
                     result.window_warmup = merge_window_warmup(
                         local.window_warmup.clone(),
@@ -107,7 +112,42 @@ impl AccountPool {
                 {
                     // An explicit selection from another process may clear or set cooldown.
                     result.exhausted_until = incoming.exhausted_until;
+                    result.preemptive_rotation_until = incoming.preemptive_rotation_until;
                 }
+            }
+            if let Some(incoming) = incoming {
+                result.quota_reset_at = local.quota_reset_at.max(incoming.quota_reset_at);
+                result.rate_limits = match incoming.quota_reset_at.cmp(&local.quota_reset_at) {
+                    std::cmp::Ordering::Greater => {
+                        result.exhausted_until = incoming.exhausted_until;
+                        result.preemptive_rotation_until = incoming.preemptive_rotation_until;
+                        result.window_warmup = incoming.window_warmup.clone();
+                        incoming.rate_limits.clone()
+                    }
+                    std::cmp::Ordering::Less => {
+                        result.exhausted_until = local.exhausted_until;
+                        result.preemptive_rotation_until = local.preemptive_rotation_until;
+                        result.window_warmup = local.window_warmup.clone();
+                        local.rate_limits.clone()
+                    }
+                    std::cmp::Ordering::Equal => merge_rate_limits_monotonic(
+                        &local.rate_limits,
+                        incoming.rate_limits.clone(),
+                    ),
+                };
+            }
+            if account.quota_reset_at != result.quota_reset_at {
+                account.quota_reset_at = result.quota_reset_at;
+                account.last_active_generation = None;
+                active_quota_reset |= active_profile.as_ref() == Some(&account.profile.id);
+                changed = true;
+            }
+            result.preemptive_rotation_until = result
+                .preemptive_rotation_until
+                .filter(|reset| *reset > now && result.exhausted_until.is_none());
+            if account.preemptive_rotation_until != result.preemptive_rotation_until {
+                account.preemptive_rotation_until = result.preemptive_rotation_until;
+                changed = true;
             }
             if account.rate_limits != result.rate_limits {
                 account.rate_limits = result.rate_limits.clone();
@@ -141,6 +181,13 @@ impl AccountPool {
                 *entry = result;
             } else {
                 merged.profiles.push(result);
+            }
+        }
+        if active_quota_reset {
+            state.generation = state.generation.wrapping_add(1);
+            let generation = state.generation;
+            if let Some(account) = active_profile.and_then(|id| state.accounts.get_mut(&id)) {
+                account.last_active_generation = Some(generation);
             }
         }
         let desired =
