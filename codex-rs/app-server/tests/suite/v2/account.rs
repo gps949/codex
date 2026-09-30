@@ -2394,12 +2394,9 @@ async fn login_survives_same_owner_token_refresh(
         routing_tokens,
         if delayed_path == "/backend-api/wham/accounts/check" {
             vec!["Bearer access-token-123", "Bearer refreshed-access-token"]
-        } else if matches!(refresh_trigger, LoginRefreshTrigger::UnauthorizedConfig) {
-            vec![
-                "Bearer refreshed-access-token",
-                "Bearer refreshed-access-token",
-            ]
         } else {
+            // `account/read` initializes the account pool before it reads requirements, so the
+            // unauthorized-config recovery already refreshed the token and one discovery suffices.
             vec!["Bearer refreshed-access-token"]
         }
     );

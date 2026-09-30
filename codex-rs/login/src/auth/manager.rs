@@ -2645,10 +2645,14 @@ impl AuthManager {
                 !Self::auths_equal_for_refresh(previous, new_auth.as_ref());
             let owner_changed =
                 auth_changed_for_refresh && !same_owner(previous, new_auth.as_ref());
+            // `clear_external_auth` calls in while holding the provider's write lock, so this must
+            // not wait for it. A contended lock means the login itself is changing: revoke.
             let pool_rotation = owner_changed
-                && self
-                    .external_auth_provider()
-                    .is_some_and(|external| external.rotates_within_application_login());
+                && self.external_auth.try_read().is_ok_and(|external| {
+                    external
+                        .as_ref()
+                        .is_some_and(|external| external.rotates_within_application_login())
+                });
             if owner_changed && !pool_rotation {
                 self.auth_route_config
                     .http_client_factory()

@@ -89,6 +89,42 @@ async fn pool_rotation_keeps_outstanding_requests_but_still_changes_the_owner() 
 }
 
 #[tokio::test]
+async fn clearing_a_pool_style_external_source_does_not_deadlock_and_revokes() {
+    let mut manager = AuthManager::from_optional_auth_for_testing(/*auth*/ None);
+    let controller = NetworkPolicyController::default();
+    let policy = controller.policy();
+    Arc::get_mut(&mut manager).unwrap().auth_route_config =
+        AuthRouteConfig::from_http_client_factory(
+            manager
+                .http_client_factory()
+                .with_network_policy(policy.clone()),
+        );
+    let source = Arc::new(SwitchableExternalAuth {
+        current: Mutex::new(chatgpt_auth("user-a")),
+        rotates_within_application_login: true,
+    });
+    manager.set_external_auth(source).await.unwrap();
+    assert!(controller.publish(policy.revision(), DestinationPolicy::Unrestricted));
+    let factory = manager.http_client_factory();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let clearing = Arc::clone(&manager);
+    std::thread::spawn(move || {
+        clearing.clear_external_auth();
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("clear_external_auth must not wait on its own provider lock");
+
+    let endpoint = "https://example.com/".parse().unwrap();
+    assert_eq!(
+        factory.network_policy().acquire(&endpoint).map(|_| ()),
+        Err(NetworkPolicyDenied::Revoked),
+    );
+}
+
+#[tokio::test]
 async fn other_external_owner_changes_revoke_outstanding_requests() {
     assert_eq!(
         switch_external_owner(/*rotates_within_application_login*/ false).await,

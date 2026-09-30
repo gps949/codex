@@ -824,11 +824,20 @@ pub async fn run_main_with_transport_options(
     }
     drop(unix_socket_startup_lock);
 
-    // Keep remote-control enrollment pinned to root credentials while execution rotates.
+    // Keep remote-control enrollment pinned to root credentials while execution rotates. Without
+    // an account pool nothing rotates, so remote control follows the shared manager and sees
+    // logins and logouts like upstream.
     let remote_control_auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
-            .await
-            .map_err(std::io::Error::other)?;
+        if codex_login::AccountProfileStore::new(config.codex_home.to_path_buf())
+            .manifest_path()
+            .is_file()
+        {
+            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
+                .await
+                .map_err(std::io::Error::other)?
+        } else {
+            auth_manager.clone()
+        };
 
     let remote_control_enabled = remote_control_policy == RemoteControlPolicy::Allowed
         && remote_control_explicitly_requested

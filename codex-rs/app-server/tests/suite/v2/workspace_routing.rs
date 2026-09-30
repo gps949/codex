@@ -65,7 +65,12 @@ async fn read(server: &mut TestAppServer) -> Result<Value> {
             refresh_token: false,
         })
         .await?;
-    timeout(READ_TIMEOUT, server.read_response(request)).await?
+    // These tests cover workspace routing; the multi-account pool snapshot is asserted elsewhere.
+    let mut response: Value = timeout(READ_TIMEOUT, server.read_response(request)).await??;
+    if let Some(response) = response.as_object_mut() {
+        response.remove("accountPool");
+    }
+    Ok(response)
 }
 
 async fn login(server: &mut TestAppServer, account: &str) -> Result<()> {
@@ -148,7 +153,7 @@ async fn saved_workspace_is_discovered_once_and_not_the_default_account(
     .await??;
     assert_eq!(
         notification.params,
-        Some(json!({"authMode": "chatgpt", "planType": plan_type}))
+        Some(json!({"authMode": "chatgpt", "planType": plan_type, "accountPool": null}))
     );
     let expected = json!({
         "account": {"type": "chatgpt", "email": "user@example.com", "planType": plan_type},
@@ -268,7 +273,9 @@ async fn login_and_workspace_switch_notify_after_routing_is_ready_then_logout_cl
         .await??;
         assert_eq!(
             notification.params,
-            Some(json!({"authMode": "chatgptAuthTokens", "planType": "enterprise"}))
+            Some(json!({
+                "authMode": "chatgptAuthTokens", "planType": "enterprise", "accountPool": null
+            }))
         );
         assert_eq!(
             read(&mut server).await?["workspaceRouting"],

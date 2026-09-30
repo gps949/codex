@@ -1,0 +1,16 @@
+---
+source: tui/src/update_prompt.rs
+assertion_line: 364
+expression: rendered
+---
+
+  Update available ·
+  0.159.2 → 9.9.9
+  Release notes:
+  https://github.com/gps94
+  9/codex/releases/latest
+↑
+› 3. Skip until next version
+
+  enter continue · esc
+  skip
