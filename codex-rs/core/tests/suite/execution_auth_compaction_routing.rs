@@ -104,28 +104,23 @@ async fn portable_manual_compaction_keeps_captured_auth_when_the_pool_switches()
     .await;
     fixture.codex.flush_rollout().await?;
 
-    let requests = server.received_requests().await.expect("captured requests");
+    let requests = responses::received_responses_requests(&server).await;
     let compact_request = requests.last().expect("captured compaction request");
     assert_eq!(
         (
-            compact_request
-                .headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok()),
-            compact_request
-                .headers
-                .get("ChatGPT-Account-ID")
-                .and_then(|value| value.to_str().ok()),
+            compact_request.header("authorization"),
+            compact_request.header("chatgpt-account-id"),
         ),
-        (Some("Bearer access-primary"), Some("account-primary-acct")),
+        (
+            Some("Bearer access-primary".to_owned()),
+            Some("account-primary-acct".to_owned()),
+        ),
     );
-    let body: serde_json::Value = serde_json::from_slice(&compact_request.body)?;
+    let body = compact_request.body_json();
     let compact_metadata: serde_json::Value = serde_json::from_str(
-        compact_request
-            .headers
-            .get("x-codex-turn-metadata")
-            .unwrap()
-            .to_str()?,
+        &compact_request
+            .header("x-codex-turn-metadata")
+            .expect("turn metadata header"),
     )?;
     assert_eq!(
         (
@@ -139,10 +134,15 @@ async fn portable_manual_compaction_keeps_captured_auth_when_the_pool_switches()
             json!("standalone_turn")
         ),
     );
-    assert!(
-        body.to_string()
-            .contains(codex_core::compact::SUMMARIZATION_PROMPT)
-    );
+    assert!(body["input"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["content"].as_array().is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|part| part["text"] == codex_core::compact::SUMMARIZATION_PROMPT)
+            })
+        })
+    }));
     let rollout = fixture.session_configured.rollout_path.as_ref().unwrap();
     assert_eq!(
         latest_compaction_summary_execution_provenance(rollout)?,

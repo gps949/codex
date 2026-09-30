@@ -606,10 +606,12 @@ async fn warmup_retries_catalog_default_after_unusable_model_error() -> anyhow::
             body["model"].as_str().expect("model").to_string()
         })
         .collect();
-    assert_eq!(
-        models,
-        vec!["gpt-5.6-sol".to_string(), "gpt-6-astra".to_string()]
-    );
+    let bundled = codex_models_manager::bundled_models_response().expect("bundled catalog");
+    let catalog_default = codex_models_manager::select_warmup_models(&bundled, Some("gpt-5.6-sol"))
+        .get(1)
+        .map(|model| model.slug.clone())
+        .expect("catalog default after the session model");
+    assert_eq!(models, vec!["gpt-5.6-sol".to_string(), catalog_default]);
     assert_eq!(
         warmup_outcome(&fixture.pool, &fixture.profile_id),
         WindowWarmupOutcome::Succeeded

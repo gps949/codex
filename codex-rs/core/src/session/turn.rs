@@ -1790,17 +1790,9 @@ async fn run_sampling_request(
 
         // Prefer account-projected history. Consume prepared input on the first attempt so
         // retries always rebuild from the latest history (upstream retry semantic).
-        let prompt_input = if let Some(input) = initial_input.take() {
-            if pooled_execution {
-                project_history_for_execution(
-                    execution_auth.as_ref(),
-                    &execution_binding,
-                    annotated,
-                )
+        let prompt_input = if initial_input.take().is_some() {
+            project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
                 .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
-            } else {
-                input
-            }
         } else {
             let annotated = sess
                 .clone_history()
