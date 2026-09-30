@@ -162,9 +162,9 @@ fn select_default_returns_none_when_only_ineligible_models_exist() {
 fn bundled_catalog_selects_picker_default_chatgpt_capable_model() {
     let catalog = warmup_models_catalog(/*preferred*/ None);
     let selected = select_warmup_model(&catalog, /*preferred_slug*/ None).expect("bundled model");
-    // Picker default is the lowest-priority list-visible capable slug (gpt-6-astra),
+    // Picker default is the lowest-priority list-visible capable slug (gpt-6.1-sol),
     // not the cheapest hidden-upgrade successor (terra) and not gpt-5.2.
-    assert_eq!(selected.slug, "gpt-6-astra");
+    assert_eq!(selected.slug, "gpt-6.1-sol");
     assert_eq!(
         warmup_supported_effort(&selected, /*preferred*/ None),
         Some(ReasoningEffort::Low)
@@ -198,7 +198,7 @@ fn select_warmup_model_ignores_reserve_session_slug() {
     let catalog = warmup_models_catalog(/*preferred*/ None);
     let selected = select_warmup_model(&catalog, Some("gpt-5.6-luna")).expect("fallback");
     assert_ne!(selected.slug, "gpt-5.6-luna");
-    assert_eq!(selected.slug, "gpt-6-astra");
+    assert_eq!(selected.slug, "gpt-6.1-sol");
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn select_warmup_model_ignores_chatgpt_unsupported_session_slug() {
     let selected = select_warmup_model(&catalog, Some("gpt-5.2")).expect("fallback");
     assert_ne!(selected.slug, "gpt-5.2");
     assert_ne!(selected.slug, "gpt-5.5");
-    assert_eq!(selected.slug, "gpt-6-astra");
+    assert_eq!(selected.slug, "gpt-6.1-sol");
 }
 
 #[test]
@@ -248,7 +248,7 @@ fn select_warmup_models_keeps_session_and_catalog_default() {
     let catalog = warmup_models_catalog(/*preferred*/ None);
     let selected = select_warmup_models(&catalog, Some("gpt-5.6-sol"));
     assert_eq!(selected[0].slug, "gpt-5.6-sol");
-    assert_eq!(selected[1].slug, "gpt-6-astra");
+    assert_eq!(selected[1].slug, "gpt-6.1-sol");
     assert!(selected.iter().all(|model| {
         model.slug != "gpt-5.2" && model.slug != "gpt-5.5" && !model.slug.contains("luna")
     }));

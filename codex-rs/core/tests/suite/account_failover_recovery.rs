@@ -552,7 +552,9 @@ async fn run_concurrent_reset_credit_case(
         .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
         .respond_with(
             ResponseTemplate::new(/*status*/ 200)
-                .set_delay(std::time::Duration::from_millis(250))
+                // The second turn must reach its usage-limit response while this consume is still
+                // in flight; leave ample room for slow runners to start it.
+                .set_delay(std::time::Duration::from_secs(2))
                 .set_body_json(json!({"code": consume_code, "windows_reset": 2})),
         )
         .expect(1)
