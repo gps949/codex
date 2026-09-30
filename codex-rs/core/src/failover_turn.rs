@@ -193,6 +193,7 @@ pub(crate) fn pool_unavailable_error(execution_auth: &ExecutionAuth) -> CodexErr
     CodexErr::UsageLimitReached(UsageLimitReachedError {
         plan_type: None,
         resets_at: earliest_exhausted_reset(execution_auth),
+        limit_window_minutes: None,
         rate_limits: None,
         promo_message: None,
         rate_limit_reached_type: None,

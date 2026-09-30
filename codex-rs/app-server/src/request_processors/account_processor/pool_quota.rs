@@ -59,7 +59,6 @@ pub(super) async fn refresh(config: &Config, response: &mut AccountPoolReadRespo
             let mut auth_config = config.auth_config();
             auth_config.codex_home = record.profile.credential_home.clone();
             let base_url = config.chatgpt_base_url.clone();
-            let factory = config.http_client_factory();
             async move {
                 let observed_at = Utc::now();
                 let request = async {
@@ -69,10 +68,10 @@ pub(super) async fn refresh(config: &Config, response: &mut AccountPoolReadRespo
                     )
                     .await
                     .ok()?;
-                    let auth = manager
-                        .auth()
-                        .await
-                        .filter(codex_login::CodexAuth::is_chatgpt_auth)?;
+                    let (auth, factory) = manager.auth_with_http_client_factory().await?;
+                    if !auth.is_chatgpt_auth() {
+                        return None;
+                    }
                     let client = BackendClient::from_auth(base_url, &auth, factory);
                     let snapshots = client.get_rate_limits_many().await.ok()?;
                     let snapshot = snapshots

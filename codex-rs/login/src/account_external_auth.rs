@@ -137,7 +137,7 @@ impl AccountPoolExternalAuth {
                         Err(_) => Err(io::Error::other(RefreshTokenError::Permanent(error))),
                     };
                 }
-                Err(error @ RefreshTokenError::Transient(_)) => {
+                Err(error @ (RefreshTokenError::Transient(_) | RefreshTokenError::Policy(_))) => {
                     return Err(io::Error::other(error));
                 }
             }

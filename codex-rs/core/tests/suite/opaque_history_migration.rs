@@ -114,6 +114,7 @@ fn append_opaque_compaction(
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            resume_metadata: None,
         }),
     };
     let mut rollout = std::fs::read_to_string(rollout_path)?;

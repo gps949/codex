@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           baseline="$(cat .github/upstream-baseline.txt)"
-          latest="$(git tag -l 'rust-v*' | grep -vE 'alpha|beta|rc' | sort -V | tail -1)"
+          latest="$(git tag -l 'rust-v*' | python3 .github/scripts/latest_upstream_stable_tag.py)"
           echo "baseline=$baseline latest=$latest"
           if [ "$latest" = "$baseline" ]; then
             echo "No new upstream stable release."
@@ -55,6 +55,9 @@ jobs:
           # Files this fork modifies on top of upstream. Upstream changes to any
           # of them mean the sync rebase needs real attention.
           contact_paths=(
+            "codex-rs/core/src/client.rs"
+            "codex-rs/core/src/compact.rs"
+            "codex-rs/core/src/compact_remote_v2_attempt.rs"
             "codex-rs/core/src/session/turn.rs"
             "codex-rs/core/src/session/mod.rs"
             "codex-rs/core/src/stream_events_utils.rs"
@@ -69,6 +72,7 @@ jobs:
             "codex-rs/app-server-protocol/src/protocol/v2/mod.rs"
             "codex-rs/app-server/src/message_processor.rs"
             "codex-rs/app-server/src/request_processors/account_processor.rs"
+            "codex-rs/app-server-daemon/src"
             "codex-rs/cli/src/main.rs"
             "codex-rs/cli/src/doctor/updates.rs"
             "codex-rs/tui/src/updates.rs"
@@ -100,4 +104,7 @@ jobs:
             echo "Follow the sync procedure in \`FORK_MAINTENANCE.md\`. After the sync branch is merged, update \`.github/upstream-baseline.txt\` to \`$latest\`."
           } > /tmp/issue-body.md
 
-          gh issue create --title "$title" --body-file /tmp/issue-body.md
+          cat /tmp/issue-body.md >> "$GITHUB_STEP_SUMMARY"
+          if ! gh issue create --title "$title" --body-file /tmp/issue-body.md; then
+            echo "::warning::Could not create the upstream sync issue; findings are available in the job summary."
+          fi
