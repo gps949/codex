@@ -1,6 +1,7 @@
 """Exercise the fork installer with local archives and isolated homes."""
 
 import io
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -12,7 +13,7 @@ INSTALLER = Path(__file__).resolve().parents[1] / "install.sh"
 
 
 class InstallerTests(unittest.TestCase):
-    def run_installer(self, *, damaged=False, executable=True):
+    def run_installer(self, *, damaged=False, executable=True, bad_checksum=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install = root / "bin"
@@ -40,11 +41,18 @@ class InstallerTests(unittest.TestCase):
                     bundle.addfile(entry, io.BytesIO(data))
             if damaged:
                 archive.write_bytes(archive.read_bytes()[:-4096])
+            checksum = root / "SHA256SUMS"
+            digest = (
+                "0" * 64
+                if bad_checksum
+                else hashlib.sha256(archive.read_bytes()).hexdigest()
+            )
+            checksum.write_text(f"{digest}  codex-aarch64-apple-darwin.tar.gz\n")
             (mock / "uname").write_text(
                 '#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo arm64;; esac\n'
             )
             (mock / "curl").write_text(
-                '#!/bin/sh\nwhile [ "$1" != "-o" ]; do shift; done\ncp "$TEST_ARCHIVE" "$2"\n'
+                '#!/bin/sh\nsource="$TEST_ARCHIVE"\nfor arg in "$@"; do case "$arg" in */SHA256SUMS) source="$TEST_CHECKSUM";; esac; done\nwhile [ "$1" != "-o" ]; do shift; done\ncp "$source" "$2"\n'
             )
             for path in mock.iterdir():
                 path.chmod(0o755)
@@ -55,6 +63,7 @@ class InstallerTests(unittest.TestCase):
                 "CODEX_INSTALL_DIR": str(install),
                 "CODEX_INSTALL_NO_PATH": "1",
                 "TEST_ARCHIVE": str(archive),
+                "TEST_CHECKSUM": str(checksum),
                 "PATH": f"{mock}:{install}:/usr/bin:/bin",
             }
             result = subprocess.run(
@@ -63,7 +72,7 @@ class InstallerTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            if damaged or not executable:
+            if damaged or not executable or bad_checksum:
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual((install / "codex").read_bytes(), old)
                 self.assertEqual(sorted(p.name for p in install.iterdir()), ["codex"])
@@ -80,6 +89,9 @@ class InstallerTests(unittest.TestCase):
 
     def test_complete_bundle_installs(self):
         self.run_installer()
+
+    def test_checksum_mismatch_preserves_installation(self):
+        self.run_installer(bad_checksum=True)
 
 
 if __name__ == "__main__":

@@ -52,32 +52,12 @@ jobs:
             exit 0
           fi
 
-          # Files this fork modifies on top of upstream. Upstream changes to any
-          # of them mean the sync rebase needs real attention.
-          contact_paths=(
-            "codex-rs/core/src/client.rs"
-            "codex-rs/core/src/compact.rs"
-            "codex-rs/core/src/compact_remote_v2_attempt.rs"
-            "codex-rs/core/src/session/turn.rs"
-            "codex-rs/core/src/session/mod.rs"
-            "codex-rs/core/src/stream_events_utils.rs"
-            "codex-rs/core/src/lib.rs"
-            "codex-rs/core/src/compact_remote_v2.rs"
-            "codex-rs/core/src/config/mod.rs"
-            "codex-rs/config/src/config_toml.rs"
-            "codex-rs/config/src/lib.rs"
-            "codex-rs/history/src/lib.rs"
-            "codex-rs/login/src"
-            "codex-rs/app-server-protocol/src/protocol/common.rs"
-            "codex-rs/app-server-protocol/src/protocol/v2/mod.rs"
-            "codex-rs/app-server/src/message_processor.rs"
-            "codex-rs/app-server/src/request_processors/account_processor.rs"
-            "codex-rs/app-server-daemon/src"
-            "codex-rs/cli/src/main.rs"
-            "codex-rs/cli/src/doctor/updates.rs"
-            "codex-rs/tui/src/updates.rs"
-            "codex-rs/tui/src/update_prompt.rs"
-          )
+          # Derive the contact surface from the current fork instead of maintaining
+          # a stale list as upstream modules move or new fork integration points appear.
+          contact_paths=()
+          while IFS= read -r changed_path; do
+            contact_paths+=("$changed_path")
+          done < <(git diff --name-only "$baseline" HEAD -- 'codex-rs/**/*.rs' 'codex-rs/**/Cargo.toml' codex-rs/Cargo.toml codex-rs/Cargo.lock)
           touched="$(git diff --name-only "$baseline".."$latest" -- "${contact_paths[@]}" || true)"
           commit_count="$(git rev-list --count "$baseline".."$latest")"
 
@@ -94,7 +74,7 @@ jobs:
               echo "$touched"
               echo '```'
             else
-              echo "### No contact-surface files changed — sync should be a clean rebase"
+              echo "### No contact-surface files changed — no changed integration point was detected; still review the merge"
             fi
             echo
             if [ -n "$auth_touched" ]; then

@@ -1,6 +1,9 @@
 #[cfg(any(not(debug_assertions), test))]
 pub(crate) fn is_newer(latest: &str, current: &str) -> Option<bool> {
     match (parse_version(latest), parse_version(current)) {
+        (Some(l), Some(c)) if l == c => {
+            Some(fork_iteration(latest).unwrap_or(0) > fork_iteration(current).unwrap_or(0))
+        }
         (Some(l), Some(c)) => Some(l > c),
         _ => None,
     }
@@ -55,7 +58,18 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let maj = iter.next()?.parse::<u64>().ok()?;
     let min = iter.next()?.parse::<u64>().ok()?;
     let pat = iter.next()?.parse::<u64>().ok()?;
-    Some((maj, min, pat))
+    iter.next().is_none().then_some((maj, min, pat))
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn fork_iteration(version: &str) -> Option<u64> {
+    let version = version.trim();
+    version
+        .split_once("+ma.")
+        .or_else(|| version.split_once("-ma."))?
+        .1
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -81,7 +95,9 @@ mod tests {
         // Fork builds are stamped `X.Y.Z+ma.N` and tagged `rust-vX.Y.Z-ma.N`;
         // both must compare by the upstream base version.
         assert_eq!(is_newer("0.150.0-ma.1", "0.149.1+ma.2"), Some(true));
-        assert_eq!(is_newer("0.149.1-ma.2", "0.149.1+ma.1"), Some(false));
+        assert_eq!(is_newer("0.149.1-ma.2", "0.149.1+ma.1"), Some(true));
+        assert_eq!(is_newer("0.149.1-ma.10", "0.149.1+ma.9"), Some(true));
+        assert_eq!(is_newer("0.149.1-ma.2", "0.149.1+ma.2"), Some(false));
         assert_eq!(is_newer("0.11.0-beta.1", "0.11.0"), Some(false));
         assert_eq!(is_newer("1.0.0-rc.1", "1.0.0"), Some(false));
     }

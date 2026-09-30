@@ -29,6 +29,10 @@ permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: fork-release-${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   prepare:
     name: Resolve release tag
@@ -67,10 +71,15 @@ jobs:
             done
             tag="${baseline}-ma.${next}"
           fi
-          case "$tag" in
-            rust-v*-ma.*) ;;
-            *) echo "invalid tag: $tag (expected rust-vX.Y.Z-ma.N)" >&2; exit 1 ;;
-          esac
+          if [[ ! "$tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-ma\.[1-9][0-9]*$ ]]; then
+            echo "invalid tag: $tag (expected rust-vX.Y.Z-ma.N)" >&2
+            exit 1
+          fi
+          baseline="$(cat .github/upstream-baseline.txt)"
+          if [ "${tag%-ma.*}" != "$baseline" ]; then
+            echo "tag baseline does not match $baseline" >&2
+            exit 1
+          fi
           if [ "$GITHUB_EVENT_NAME" != "push" ]; then
             gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA"
             echo "created tag $tag at $GITHUB_SHA"
@@ -255,6 +264,14 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
+          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            if [[ "$target" == *windows* ]]; then
+              test -s "dist/codex-$target.zip"
+            else
+              test -s "dist/codex-$target.tar.gz"
+            fi
+          done
+          (cd dist && sha256sum codex-* > SHA256SUMS)
           gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "${RELEASE_TAG#rust-v} (multi-account fork)" \

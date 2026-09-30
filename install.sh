@@ -46,6 +46,23 @@ trap 'rm -rf "$tmp"; if [ -n "$stage" ]; then rm -rf "$stage"; fi' EXIT
 
 say "Downloading $tag ($asset)..."
 curl -fsSL "$url" -o "$tmp/$asset"
+# New fork releases carry checksums; older releases remain installable.
+if curl -fsSL "https://github.com/$REPO/releases/download/$tag/SHA256SUMS" -o "$tmp/SHA256SUMS" 2>/dev/null; then
+  expected="$(awk -v asset="$asset" '$2 == asset { print $1 }' "$tmp/SHA256SUMS")"
+  if [ -z "$expected" ]; then
+    warn "Release checksum is missing for $asset"
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
+  fi
+  if [ "$actual" != "$expected" ]; then
+    warn "Release checksum verification failed; your installation was kept."
+    exit 1
+  fi
+fi
 # Validate the whole archive before touching an existing installation.
 tar tzf "$tmp/$asset" > "$tmp/members"
 while IFS= read -r member; do

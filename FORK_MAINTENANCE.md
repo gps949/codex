@@ -125,11 +125,13 @@ Actions UI when they first appear.
 
 - **Tag format**: `rust-vX.Y.Z-ma.N` — upstream baseline plus a fork
   iteration. The binary is stamped `X.Y.Z+ma.N`, and the in-app update check
-  compares on the upstream base, so users get an upgrade prompt whenever a
-  release moves to a newer baseline.
+  compares both the upstream base and the numeric fork iteration, so users
+  also get upgrade prompts for fixes on the same baseline.
 - **Releasing**: `git tag rust-v0.149.1-ma.1 && git push origin rust-v0.149.1-ma.1`
   from a green integration branch. The workflow builds all three platforms and
-  publishes a GitHub release with the archives.
+  publishes a GitHub release with all platform archives and `SHA256SUMS`.
+  The installer verifies checksums when available and leaves the existing
+  installation intact if verification fails.
 - **Order of operations**: sync + verify first, tag only from a green
   integration branch. Never tag a release from an unsynced/untested state.
 - **Install (users)**: download the asset for the platform, extract, put
