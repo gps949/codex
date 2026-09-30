@@ -85,10 +85,13 @@ impl AccountRequestProcessor {
                     value.parse::<usize>().ok().filter(|page| *page > 0)
                         .ok_or_else(|| invalid_request("Usage: /account list <page>"))?
                 } else { 1 };
-                if verb == "show" { view::resolve(&pool, value).map_err(invalid_request)?; }
+                let scope = if verb == "show" {
+                    let profile_id = view::resolve(&pool, value).map_err(invalid_request)?.profile_id.clone();
+                    pool_quota::RefreshScope::Profile(profile_id)
+                } else { pool_quota::RefreshScope::All };
                 // Reject invalid page numbers before performing any network probes.
                 view::list(&pool, page).map_err(invalid_request)?;
-                pool_quota::refresh(&self.load_latest_config().await, &mut pool).await;
+                pool_quota::refresh(&self.load_latest_config().await, &mut pool, scope).await;
                 if verb == "show" {
                     view::detail(&pool, value).map_err(invalid_request)
                 } else {
@@ -137,7 +140,7 @@ impl AccountRequestProcessor {
                 };
                 Ok(format!("Strategy: {name}\nUsed at the next automatic selection. Select now: /account auto"))
             }
-            (_, "help") if value.is_empty() => Ok("/account list [page]\n/account show <label>\n/account use <label>\n/account auto\n/account strategy [fill-first|earliest-reset]\nQuote names containing spaces. Selection does not permanently pin an account.".into()),
+            (_, "help") if value.is_empty() => Ok("/account list [page]\n/account show <label|@selector>\n/account use <label|@selector>\n/account auto\n/account strategy [fill-first|earliest-reset]\nQuote names containing spaces. Use the @selector when accounts share a name or email. Selection does not permanently pin an account.".into()),
             _ => Err(invalid_request("Unknown /account command. Use /account help.")),
         }
     }

@@ -6,6 +6,14 @@ const RATE_LIMIT_RESET_DETAILS_REQUEST_TIMEOUT: Duration = Duration::from_secs(/
 const RATE_LIMIT_RESET_REQUEST_TIMEOUT_ENV_VAR: &str =
     "CODEX_TEST_RATE_LIMIT_RESET_REQUEST_TIMEOUT_MS";
 
+struct ResetProfileIdentity {
+    profile_id: codex_login::AccountProfileId,
+    manager: Arc<AuthManager>,
+    owner_generation: u64,
+    account_id: Option<String>,
+    user_id: Option<String>,
+}
+
 impl AccountRequestProcessor {
     pub(super) async fn detailed_rate_limit_reset_credits(
         client: &BackendClient,
@@ -53,7 +61,7 @@ impl AccountRequestProcessor {
             return Err(invalid_request("creditId must not be empty"));
         }
 
-        let client = self.rate_limit_reset_backend_client().await?;
+        let (client, profile) = self.rate_limit_reset_backend_client().await?;
         let request_timeout = RATE_LIMIT_RESET_REQUEST_TIMEOUT;
         #[cfg(debug_assertions)]
         let request_timeout = std::env::var(RATE_LIMIT_RESET_REQUEST_TIMEOUT_ENV_VAR)
@@ -96,52 +104,48 @@ impl AccountRequestProcessor {
             outcome,
             ConsumeAccountRateLimitResetCreditOutcome::Reset
                 | ConsumeAccountRateLimitResetCreditOutcome::NothingToReset
-                | ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed
-        ) {
-            // Backend windows are usable again; drop the local cooldown that otherwise keeps the
-            // profile parked for the old reset timestamp (and can make restart look logged-out).
-            self.clear_pool_exhaustion_for_current_auth().await;
+        ) && let Some(profile) = profile
+        {
+            // Redemption belongs to the request's seat, even if another account was selected
+            // while the backend call was in flight. A re-login may also replace this owner.
+            profile.manager.reload().await;
+            let auth = profile.manager.auth().await;
+            let owner_generation = profile
+                .manager
+                .auth_change_state_receiver()
+                .borrow()
+                .owner_generation;
+            if owner_generation == profile.owner_generation
+                && auth.as_ref().is_some_and(|auth| {
+                    auth.get_account_id() == profile.account_id
+                        && auth.get_chatgpt_user_id() == profile.user_id
+                })
+            {
+                let reset_at = chrono::Utc::now();
+                if let Err(error) =
+                    codex_login::AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf())
+                        .record_quota_reset(&profile.profile_id, reset_at)
+                {
+                    tracing::warn!(%error, "failed to persist redeemed account quota reset");
+                } else if let Some(pool) = self.execution_account_pool.account_pool()
+                    && pool.auth_managers().iter().any(|(id, manager)| {
+                        id == &profile.profile_id && Arc::ptr_eq(manager, &profile.manager)
+                    })
+                    && let Err(error) = pool.apply_quota_reset(&profile.profile_id, reset_at)
+                {
+                    tracing::warn!(%error, "failed to apply redeemed account quota reset");
+                }
+            }
         }
         Ok(Some(
             ConsumeAccountRateLimitResetCreditResponse { outcome }.into(),
         ))
     }
 
-    async fn clear_pool_exhaustion_for_current_auth(&self) {
-        let _ = self
-            .execution_account_pool
-            .ensure_from_config(self.config.as_ref())
-            .await;
-        let Some(auth) = self.auth_manager.auth().await else {
-            return;
-        };
-        let Some(account_id) = auth.get_account_id() else {
-            return;
-        };
-        for (profile_id, manager) in self.execution_account_pool.auth_managers() {
-            let Some(profile_auth) = manager.auth().await else {
-                continue;
-            };
-            if profile_auth.get_account_id().as_deref() != Some(account_id.as_str()) {
-                continue;
-            }
-            if let Err(error) = self
-                .execution_account_pool
-                .activate(&profile_id, /*force*/ true)
-                .await
-            {
-                tracing::warn!(
-                    %profile_id,
-                    %error,
-                    "failed to clear local cooldown after rate-limit reset credit"
-                );
-            }
-            break;
-        }
-    }
-
-    async fn rate_limit_reset_backend_client(&self) -> Result<BackendClient, JSONRPCErrorError> {
-        let _ = self.get_account_pool_response().await?;
+    async fn rate_limit_reset_backend_client(
+        &self,
+    ) -> Result<(BackendClient, Option<ResetProfileIdentity>), JSONRPCErrorError> {
+        let pool = self.get_account_pool_response().await?;
         let Some((auth, http_client_factory)) =
             self.auth_manager.auth_with_http_client_factory().await
         else {
@@ -155,10 +159,48 @@ impl AccountRequestProcessor {
             ));
         }
 
-        Ok(BackendClient::from_auth(
-            self.config.chatgpt_base_url.clone(),
-            &auth,
-            http_client_factory,
+        let profile = if pool.enabled {
+            let token = auth.get_token().ok();
+            let account_id = auth.get_account_id();
+            let user_id = auth.get_chatgpt_user_id();
+            let mut managers = self.execution_account_pool.auth_managers();
+            managers.sort_by_key(|(id, _)| Some(id.as_str()) != pool.active_profile_id.as_deref());
+            let (profile_id, manager) = managers
+                .into_iter()
+                .find(|(_, manager)| {
+                    manager.auth_cached().is_some_and(|candidate| {
+                        token.is_some()
+                            && candidate.get_token().ok() == token
+                            && candidate.get_account_id() == account_id
+                            && candidate.get_chatgpt_user_id() == user_id
+                    })
+                })
+                .ok_or_else(|| {
+                    internal_error(
+                        "account changed while preparing rate limit reset; retry the request",
+                    )
+                })?;
+            let owner_generation = manager
+                .auth_change_state_receiver()
+                .borrow()
+                .owner_generation;
+            Some(ResetProfileIdentity {
+                profile_id,
+                manager,
+                owner_generation,
+                account_id,
+                user_id,
+            })
+        } else {
+            None
+        };
+        Ok((
+            BackendClient::from_auth(
+                self.config.chatgpt_base_url.clone(),
+                &auth,
+                http_client_factory,
+            ),
+            profile,
         ))
     }
 }

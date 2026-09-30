@@ -18,8 +18,17 @@ use futures::StreamExt;
 use super::BackendClient;
 use super::account_pool_rate_limits;
 
-pub(super) async fn refresh(config: &Config, response: &mut AccountPoolReadResponse) {
-    if !response.enabled {
+pub(super) enum RefreshScope {
+    All,
+    Profile(String),
+}
+
+pub(super) async fn refresh(
+    config: &Config,
+    response: &mut AccountPoolReadResponse,
+    scope: RefreshScope,
+) {
+    if !response.enabled || codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
         return;
     }
     let Ok(records) =
@@ -28,32 +37,22 @@ pub(super) async fn refresh(config: &Config, response: &mut AccountPoolReadRespo
         return;
     };
     let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
-    // A previous panel probe may have reached disk before the runtime's next poll.
-    if let Ok(saved) = store.load() {
-        for account in &mut response.accounts {
-            if let Some(profile) = saved
-                .profiles
-                .iter()
-                .find(|profile| profile.profile_id.as_str() == account.profile_id)
-            {
-                let cached = account_pool_rate_limits(profile.rate_limits.clone());
-                if cached.observed_at > account.rate_limits.observed_at {
-                    account.rate_limits = cached;
-                }
-            }
-        }
-    }
     let jobs: Vec<_> = records
         .into_iter()
         .filter(|record| {
-            response.accounts.iter().any(|account| {
-                account.profile_id == record.profile.id.as_str()
-                    && !matches!(
-                        account.availability,
-                        AccountPoolAvailability::Disabled
-                            | AccountPoolAvailability::AuthenticationUnavailable { .. }
-                    )
-            })
+            let selected = match &scope {
+                RefreshScope::All => true,
+                RefreshScope::Profile(id) => record.profile.id.as_str() == id,
+            };
+            selected
+                && response.accounts.iter().any(|account| {
+                    account.profile_id == record.profile.id.as_str()
+                        && !matches!(
+                            account.availability,
+                            AccountPoolAvailability::Disabled
+                                | AccountPoolAvailability::AuthenticationUnavailable { .. }
+                        )
+                })
         })
         .map(|record| {
             let mut auth_config = config.auth_config();
@@ -62,6 +61,9 @@ pub(super) async fn refresh(config: &Config, response: &mut AccountPoolReadRespo
             async move {
                 let observed_at = Utc::now();
                 let request = async {
+                    if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
+                        return None;
+                    }
                     let manager = AuthManager::shared_from_auth_config(
                         auth_config,
                         /*enable_codex_api_key_env*/ false,
@@ -72,12 +74,14 @@ pub(super) async fn refresh(config: &Config, response: &mut AccountPoolReadRespo
                     if !auth.is_chatgpt_auth() {
                         return None;
                     }
+                    if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
+                        return None;
+                    }
                     let client = BackendClient::from_auth(base_url, &auth, factory);
                     let snapshots = client.get_rate_limits_many().await.ok()?;
-                    let snapshot = snapshots
-                        .iter()
-                        .find(|snapshot| snapshot.limit_id.as_deref() == Some("codex"))
-                        .or_else(|| snapshots.first())?;
+                    let snapshot = snapshots.iter().find(|snapshot| {
+                        snapshot.limit_id.as_deref().is_none_or(|id| id == "codex")
+                    })?;
                     let window = |window: &codex_protocol::protocol::RateLimitWindow| {
                         AccountRateLimitWindow {
                             used_percent: window.used_percent,
@@ -121,6 +125,22 @@ pub(super) async fn refresh(config: &Config, response: &mut AccountPoolReadRespo
             .find(|account| account.profile_id == id.as_str())
         {
             account.rate_limits = account_pool_rate_limits(limits);
+        }
+    }
+    // Show the persisted merge, including observations from overlapping panel probes,
+    // instead of reintroducing a stale or partial network snapshot into the UI.
+    if let Ok(saved) = store.load() {
+        for account in &mut response.accounts {
+            if let Some(profile) = saved
+                .profiles
+                .iter()
+                .find(|profile| profile.profile_id.as_str() == account.profile_id)
+            {
+                let cached = account_pool_rate_limits(profile.rate_limits.clone());
+                if cached.observed_at >= account.rate_limits.observed_at {
+                    account.rate_limits = cached;
+                }
+            }
         }
     }
 }

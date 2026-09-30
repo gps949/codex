@@ -29,6 +29,7 @@ mod bedrock_setup;
 mod gateway_oauth;
 mod mobile_commands;
 mod pool_quota;
+mod pool_updates;
 mod rate_limit_resets;
 mod warmup_debug;
 mod workspace_routing;
@@ -139,7 +140,7 @@ impl AccountRequestProcessor {
         remote_client_registry: Arc<RemoteClientRegistry>,
     ) -> Arc<Self> {
         let execution_account_pool = ExecutionAccountPoolHandle::shared(Arc::clone(&auth_manager));
-        let pool_updates_task = spawn_account_pool_updates_task(
+        let pool_updates_task = pool_updates::spawn(
             execution_account_pool.clone(),
             Arc::clone(&auth_manager),
             Arc::clone(&config),
@@ -245,7 +246,12 @@ impl AccountRequestProcessor {
         &self,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let mut response = self.get_account_pool_response().await?;
-        pool_quota::refresh(&self.load_latest_config().await, &mut response).await;
+        pool_quota::refresh(
+            &self.load_latest_config().await,
+            &mut response,
+            pool_quota::RefreshScope::All,
+        )
+        .await;
         Ok(Some(response.into()))
     }
 
@@ -1057,11 +1063,16 @@ impl AccountRequestProcessor {
 
         self.cancel_active_login().await;
 
-        match self.auth_manager.logout_with_revoke().await {
-            Ok(_) => {}
-            Err(err) => {
-                return Err(internal_error(format!("logout failed: {err}")));
-            }
+        let pooled = self.execution_account_pool.account_pool().is_some()
+            || codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home);
+        if pooled {
+            self.execution_account_pool
+                .suspend_for_logout(&config)
+                .await
+                .map_err(|err| internal_error(format!("failed to suspend account pool: {err}")))?;
+            self.auth_manager.clear_external_auth();
+        } else if let Err(err) = self.auth_manager.logout_with_revoke().await {
+            return Err(internal_error(format!("logout failed: {err}")));
         }
 
         self.config_manager.clear_cloud_config_bundle_loader();
@@ -1215,6 +1226,49 @@ impl AccountRequestProcessor {
             .await
             .map_err(|err| internal_error(format!("failed to initialize account pool: {err}")))?;
         if !enabled {
+            if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
+                let store = codex_login::AccountProfileStore::new(config.codex_home.to_path_buf());
+                let records = store
+                    .load_profile_records()
+                    .map_err(|error| internal_error(error.to_string()))?;
+                let saved =
+                    codex_login::AccountRuntimeStateStore::new(config.codex_home.to_path_buf())
+                        .load()
+                        .unwrap_or_default();
+                let accounts = records
+                    .into_iter()
+                    .filter(|record| record.state == codex_login::AccountProfileState::Ready)
+                    .map(|record| {
+                        let limits = saved
+                            .profiles
+                            .iter()
+                            .find(|entry| entry.profile_id == record.profile.id)
+                            .map(|entry| entry.rate_limits.clone())
+                            .unwrap_or_default();
+                        codex_app_server_protocol::AccountPoolAccount {
+                            profile_id: record.profile.id.to_string(),
+                            label: record.profile.label,
+                            priority: record.profile.priority,
+                            is_active: false,
+                            availability: if record.profile.disabled {
+                                codex_app_server_protocol::AccountPoolAvailability::Disabled
+                            } else {
+                                codex_app_server_protocol::AccountPoolAvailability::Available
+                            },
+                            plan_type: None,
+                            email: None,
+                            rate_limits: account_pool_rate_limits(limits),
+                            window_warmup: None,
+                        }
+                    })
+                    .collect();
+                return Ok(codex_app_server_protocol::AccountPoolReadResponse {
+                    enabled: true,
+                    active_profile_id: None,
+                    active_generation: None,
+                    accounts,
+                });
+            }
             *self.remote_client_registry.caption.lock().await = None;
             return Ok(codex_app_server_protocol::AccountPoolReadResponse {
                 enabled: false,
@@ -1264,18 +1318,22 @@ impl AccountRequestProcessor {
         params: codex_app_server_protocol::AccountPoolUseParams,
     ) -> Result<codex_app_server_protocol::AccountPoolUseResponse, JSONRPCErrorError> {
         let config = self.load_latest_config().await;
+        let profile_id = params
+            .profile_id
+            .map(codex_login::AccountProfileId::new)
+            .transpose()
+            .map_err(|err| invalid_request(err.to_string()))?;
+        let was_suspended = codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home);
         let enabled = self
             .execution_account_pool
-            .ensure_from_config(&config)
+            .resume_from_config(&config)
             .await
             .map_err(|err| internal_error(format!("failed to initialize account pool: {err}")))?;
         if !enabled {
             return Err(invalid_request("native account pool is not configured"));
         }
 
-        let identity = if let Some(profile_id) = params.profile_id {
-            let profile_id = codex_login::AccountProfileId::new(profile_id)
-                .map_err(|err| invalid_request(err.to_string()))?;
+        let identity = if let Some(profile_id) = profile_id {
             self.execution_account_pool
                 .activate(&profile_id, params.force)
                 .await
@@ -1283,8 +1341,19 @@ impl AccountRequestProcessor {
             self.execution_account_pool.force_activate_automatic().await
         } else {
             self.execution_account_pool.activate_fill_first().await
-        }
-        .map_err(|err| invalid_request(err.to_string()))?;
+        };
+        let identity = match identity {
+            Ok(identity) => identity,
+            Err(error) => {
+                if was_suspended {
+                    let _ = self
+                        .execution_account_pool
+                        .suspend_for_logout(&config)
+                        .await;
+                }
+                return Err(invalid_request(error.to_string()));
+            }
+        };
 
         Ok(codex_app_server_protocol::AccountPoolUseResponse {
             active_profile_id: identity.profile_id.to_string(),
@@ -1306,7 +1375,7 @@ impl AccountRequestProcessor {
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
         // Same ordering requirement as account/read: pool ExternalAuth must be installed before
         // resolving ChatGPT credentials from per-profile credential homes.
-        let mut account_pool = self.get_account_pool_response().await?;
+        let account_pool = self.get_account_pool_response().await?;
 
         let Some((auth, http_client_factory)) =
             self.auth_manager.auth_with_http_client_factory().await
@@ -1317,6 +1386,10 @@ impl AccountRequestProcessor {
         };
 
         let requested_token = auth.get_token().ok();
+        let requested_account_id = auth.get_account_id();
+        let requested_user_id = auth.get_chatgpt_user_id();
+        let owner_changes = self.auth_manager.auth_change_state_receiver();
+        let requested_owner_generation = owner_changes.borrow().owner_generation;
         let snapshot_auth_matches = requested_token.as_ref().is_some_and(|token| {
             self.execution_account_pool
                 .auth_managers()
@@ -1400,7 +1473,39 @@ impl AccountRequestProcessor {
         // Normal rate limits remain available when older backends omit identity or banner data.
         // Login can change while the backend read is in flight.
         let active_auth = self.auth_manager.auth().await;
-        let matches_active_account = active_auth.is_some_and(|auth| {
+        let active = self.execution_account_pool.active_identity();
+        let matches_request_owner = active_auth.as_ref().is_some_and(|current| {
+            current.api_auth_mode() == auth.api_auth_mode()
+                && current.get_account_id() == requested_account_id
+                && current.get_chatgpt_user_id() == requested_user_id
+                && (requested_account_id.is_some() && requested_user_id.is_some()
+                    || current.get_token().ok() == requested_token)
+        });
+        let backend_matches_request = response
+            .account_id
+            .as_ref()
+            .zip(requested_account_id.as_ref())
+            .is_none_or(|(actual, expected)| actual == expected)
+            && response
+                .user_id
+                .as_ref()
+                .zip(requested_user_id.as_ref())
+                .is_none_or(|(actual, expected)| actual == expected);
+        if !matches_request_owner
+            || !backend_matches_request
+            || owner_changes.borrow().owner_generation != requested_owner_generation
+            || account_pool.enabled
+                && (!snapshot_auth_matches
+                    || active.as_ref().map(|identity| identity.profile_id.as_str())
+                        != account_pool.active_profile_id.as_deref()
+                    || active.as_ref().map(|identity| identity.generation)
+                        != account_pool.active_generation)
+        {
+            return Err(internal_error(
+                "account changed while reading rate limits; retry the request",
+            ));
+        }
+        let matches_active_account = active_auth.as_ref().is_some_and(|auth| {
             !auth.is_fedramp_account()
                 && response.account_id.is_some()
                 && response.account_id == auth.get_account_id()
@@ -1427,20 +1532,6 @@ impl AccountRequestProcessor {
             rate_limit_upsell,
         };
         if is_chatgpt_remote_client(client_name) {
-            // A selection can change while authentication or the network request is awaiting.
-            // Never apply the earlier account's name to an unproven quota identity.
-            let active = self.execution_account_pool.active_identity();
-            if !snapshot_auth_matches
-                || active.as_ref().map(|identity| identity.profile_id.as_str())
-                    != account_pool.active_profile_id.as_deref()
-                || active.as_ref().map(|identity| identity.generation)
-                    != account_pool.active_generation
-            {
-                for account in &mut account_pool.accounts {
-                    account.is_active = false;
-                }
-                account_pool.active_profile_id = None;
-            }
             overlay_get_account_rate_limits_for_remote_client(&mut response, &account_pool);
         }
         Ok(response)
@@ -1703,52 +1794,8 @@ impl AccountRequestProcessor {
     }
 }
 
-/// Pushes `accountPool/updated` to this connection whenever the pool's scheduling state changes
-/// (activation, exhaustion, recovery, rate-limit observations), so clients never need to poll.
-/// `account/updated` also carries a full `accountPool` snapshot for stable mobile clients.
-fn spawn_account_pool_updates_task(
-    pool: ExecutionAccountPoolHandle,
-    auth_manager: Arc<AuthManager>,
-    config: Arc<Config>,
-    outgoing: Arc<OutgoingMessageSender>,
-    remote_client_registry: Arc<RemoteClientRegistry>,
-) -> tokio::task::JoinHandle<()> {
-    let mut changes = pool.change_receiver();
-    tokio::spawn(async move {
-        while changes.changed().await.is_ok() {
-            let account_pool = build_account_pool_read_response(&config, &pool).await;
-            if !account_pool.enabled && account_pool.accounts.is_empty() {
-                continue;
-            }
-            let auth = auth_manager.auth().await;
-            outgoing
-                .send_server_notification(ServerNotification::AccountUpdated(
-                    AccountUpdatedNotification {
-                        auth_mode: auth
-                            .as_ref()
-                            .map(CodexAuth::api_auth_mode)
-                            .map(auth_mode_to_api),
-                        plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
-                        account_pool: Some(account_pool.clone()),
-                    },
-                ))
-                .await;
-            *remote_client_registry.caption.lock().await =
-                crate::mobile_account_status::pool_caption(&account_pool);
-            let notification = codex_app_server_protocol::AccountPoolUpdatedNotification {
-                active_profile_id: account_pool.active_profile_id.clone(),
-                active_generation: account_pool.active_generation,
-                accounts: account_pool.accounts,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::AccountPoolUpdated(notification))
-                .await;
-        }
-    })
-}
-
 async fn build_account_pool_read_response(
-    config: &Config,
+    _config: &Config,
     pool: &ExecutionAccountPoolHandle,
 ) -> codex_app_server_protocol::AccountPoolReadResponse {
     // This watcher must not reapply its startup config over live strategy changes.
@@ -1763,9 +1810,14 @@ async fn build_account_pool_read_response(
     }
 
     let active = pool.active_identity();
+    let managers: HashMap<_, _> = pool.auth_managers().into_iter().collect();
     let mut accounts = Vec::new();
     for snapshot in snapshots {
-        let (plan_type, email) = load_pool_profile_identity(config, &snapshot).await;
+        let auth = managers
+            .get(&snapshot.profile.id)
+            .and_then(|manager| manager.auth_cached());
+        let plan_type = auth.as_ref().and_then(CodexAuth::account_plan_type);
+        let email = auth.as_ref().and_then(CodexAuth::get_account_email);
         accounts.push(codex_app_server_protocol::AccountPoolAccount {
             profile_id: snapshot.profile.id.to_string(),
             label: snapshot.profile.label.clone(),

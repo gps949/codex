@@ -33,6 +33,7 @@ fn write_profile_credentials(codex_home: &Path, id: &str, access_token: &str) {
         "https://api.openai.com/auth": {
             "chatgpt_plan_type": "pro",
             "chatgpt_account_id": format!("account-{id}"),
+            "chatgpt_user_id": format!("user-{id}"),
         }
     }))
     .expect("payload"));
@@ -428,6 +429,38 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
             "credential_location": "managed_profile", "state": "ready", "disabled": false
         }));
     std::fs::write(manifest, serde_json::to_vec(&profiles)?)?;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/codex/usage"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer access-work",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {
+                    "used_percent": 23,
+                    "limit_window_seconds": 18000,
+                    "reset_after_seconds": 3600,
+                    "reset_at": chrono::Utc::now().timestamp() + 3600
+                }
+            }
+        })))
+        .expect(1)
+        .mount(&routing_server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/codex/usage"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer access-selected",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&routing_server)
+        .await;
     let mut builder = TestAppServer::builder().with_codex_home(home.path());
     if overridden {
         builder = builder.with_args(&["-c", "account_pool.rotation_strategy=\"fill_first\""]);
@@ -445,7 +478,7 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
     let thread: ThreadStartResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
     for (command, expected) in [
-        ("/account use \"Work Pro\"", "Selected: work@example.com"),
+        ("/account use @work", "Selected: Work Pro"),
         (
             "/account strategy earliest-reset",
             if overridden {
@@ -462,7 +495,7 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
                 "Strategy: earliest-reset"
             },
         ),
-        ("/account show \"Work Pro\"", "work@example.com"),
+        ("/account show \"Work Pro\"", "Email: work@example.com"),
         ("/account nonsense", "Unknown /account command"),
         ("/account list 0", "Usage: /account list"),
         ("/account list 999", "Page out of range"),
@@ -484,6 +517,9 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
         let text = serde_json::to_string(&reply.turn.items)?;
         assert!(text.contains(expected), "{command}: {text}");
+        if command.starts_with("/account show") {
+            assert!(text.contains("Primary: 23% used"), "{text}");
+        }
     }
     let id = mcp
         .send_raw_request("account/workspaceMessages/read", None)
@@ -495,7 +531,7 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
         messages
             .messages
             .iter()
-            .any(|message| message.message_body.contains("work@example.com"))
+            .any(|message| message.message_body.contains("Work Pro"))
     );
     let runtime: serde_json::Value = serde_json::from_slice(&std::fs::read(
         home.path().join("account-runtime-state.json"),
@@ -511,9 +547,8 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn account_pool_mobile_quota_read_during_switch_does_not_mislabel() -> Result<()> {
+async fn account_pool_mobile_quota_read_during_switch_rejects_stale_values() -> Result<()> {
     use codex_app_server_protocol::ClientInfo;
-    use codex_app_server_protocol::GetAccountRateLimitsResponse;
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
@@ -573,19 +608,15 @@ async fn account_pool_mobile_quota_read_during_switch_does_not_mislabel() -> Res
     let selected: codex_app_server_protocol::AccountPoolUseResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(use_id)).await??;
     assert_eq!(selected.active_profile_id, "work");
-    let response: GetAccountRateLimitsResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(codex_app_server_protocol::RequestId::Integer(read_id)),
+    )
+    .await??;
     assert_eq!(
-        response.rate_limits.limit_name.as_deref(),
-        Some("Codex · 2/2 ready")
-    );
-    assert_eq!(
-        response
-            .rate_limits
-            .primary
-            .expect("primary quota")
-            .used_percent,
-        77
+        error.error.message,
+        "account changed while reading rate limits; retry the request",
     );
     Ok(())
 }
+
