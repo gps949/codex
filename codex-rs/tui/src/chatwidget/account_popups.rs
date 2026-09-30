@@ -11,6 +11,7 @@ use codex_app_server_protocol::AccountPoolAccount;
 use codex_app_server_protocol::AccountPoolAvailability;
 use codex_app_server_protocol::AccountPoolRateLimitWindow;
 use codex_app_server_protocol::AccountPoolReadResponse;
+use codex_app_server_protocol::AccountPoolUpdatedNotification;
 use codex_app_server_protocol::AccountPoolUseResponse;
 use codex_app_server_protocol::AccountPoolWindowWarmup;
 use codex_app_server_protocol::AccountPoolWindowWarmupOutcome;
@@ -124,6 +125,24 @@ impl ChatWidget {
         }
     }
 
+    /// Refresh identity-bound account data once per activation, while quota observations
+    /// continue updating the visible label without restarting network reads.
+    pub(crate) fn on_account_pool_updated(
+        &mut self,
+        pool: &AccountPoolUpdatedNotification,
+    ) -> bool {
+        let identity = (pool.active_profile_id.clone(), pool.active_generation);
+        let changed = self.account_pool_identity.as_ref() != Some(&identity);
+        self.account_pool_identity = Some(identity);
+        let active_profile = pool
+            .accounts
+            .iter()
+            .find(|account| account.is_active)
+            .map(account_display_name);
+        self.update_account_pool_identity(active_profile);
+        changed
+    }
+
     pub(crate) fn on_account_pool_activated(
         &mut self,
         result: Result<AccountPoolUseResponse, String>,
@@ -146,19 +165,19 @@ impl ChatWidget {
 }
 
 pub(crate) fn account_display_name(account: &AccountPoolAccount) -> String {
-    // Email is the most recognizable, usually unique identity for ChatGPT accounts.
+    // Labels distinguish personal and workspace profiles that share the same email.
     account
-        .email
+        .label
         .as_deref()
         .map(str::trim)
-        .filter(|email| !email.is_empty())
+        .filter(|label| !label.is_empty())
         .map(str::to_string)
         .or_else(|| {
             account
-                .label
+                .email
                 .as_deref()
                 .map(str::trim)
-                .filter(|label| !label.is_empty())
+                .filter(|email| !email.is_empty())
                 .map(str::to_string)
         })
         .unwrap_or_else(|| account.profile_id.clone())
@@ -167,6 +186,14 @@ pub(crate) fn account_display_name(account: &AccountPoolAccount) -> String {
 fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<Span<'static>> {
     let mut parts: Vec<Vec<Span<'static>>> =
         vec![vec![format!("priority {}", account.priority).dim()]];
+    if let Some(email) = account
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty() && *email != account_display_name(account))
+    {
+        parts.push(vec![email.to_string().dim()]);
+    }
     if let Some(plan) = &account.plan_type {
         parts.push(vec![format!("{plan:?}").to_lowercase().dim()]);
     }

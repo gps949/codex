@@ -301,24 +301,16 @@ impl App {
                 return;
             }
             ServerNotification::AccountPoolUpdated(notification) => {
-                // Overlay the active pool profile onto the /status account line and refresh
-                // rate limits so automatic failover updates the visible account state too.
-                // Prefer email (same as the /account picker) — notifications include identity
-                // fields via build_account_pool_read_response.
-                let active_profile = notification
-                    .accounts
-                    .iter()
-                    .find(|account| account.is_active)
-                    .map(crate::chatwidget::account_popups::account_display_name);
-                self.chat_widget
-                    .update_account_pool_identity(active_profile);
-                let reset_hint_request_id = self.chat_widget.start_rate_limit_reset_startup_check();
-                self.refresh_rate_limits(
-                    app_server_client,
-                    crate::app_event::RateLimitRefreshOrigin::StartupPrefetch {
-                        reset_hint_request_id,
-                    },
-                );
+                if self.chat_widget.on_account_pool_updated(notification) {
+                    let reset_hint_request_id =
+                        self.chat_widget.start_rate_limit_reset_startup_check();
+                    self.refresh_rate_limits(
+                        app_server_client,
+                        crate::app_event::RateLimitRefreshOrigin::StartupPrefetch {
+                            reset_hint_request_id,
+                        },
+                    );
+                }
                 return;
             }
             ServerNotification::AccountUpdated(notification) => {
@@ -340,9 +332,6 @@ impl App {
                 // the newly authenticated identity, even when both accounts share one thread.
                 self.last_thread_usage_status_cell = None;
                 self.pending_thread_usage_history_refresh = false;
-                if let Some(pool) = notification.account_pool.as_ref() {
-                    self.chat_widget.apply_account_pool_read_response(pool);
-                }
                 let has_codex_backend_auth = matches!(
                     notification.auth_mode,
                     Some(
@@ -363,6 +352,9 @@ impl App {
                         .is_some_and(AuthMode::has_chatgpt_account),
                     has_codex_backend_auth,
                 );
+                if let Some(pool) = notification.account_pool.as_ref() {
+                    self.chat_widget.apply_account_pool_read_response(pool);
+                }
                 if self.chat_widget.has_chatgpt_account() {
                     crate::daybreak::prefetch_notice(
                         &self.config,

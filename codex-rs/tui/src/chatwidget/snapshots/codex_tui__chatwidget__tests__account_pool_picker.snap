@@ -13,8 +13,10 @@ expression: popup
                                      reset.
   3. Automatic                       Let the scheduler pick the next eligible
                                      profile using the rotation strategy above.
-  4. primary@example.com (current)   priority 0 · available · 38% 5h used, reset
-                                     in 3:46 · 40% weekly used, reset in 3:21:02
-  5. backup@example.com              priority 10 · cooling down · quota unknown
+  4. Team plan (current)             priority 0 · primary@example.com ·
+                                     available · 38% 5h used, reset in 3:46 ·
+                                     40% weekly used, reset in 3:21:02
+  5. Backup label                    priority 10 · backup@example.com · cooling
+                                     down · quota unknown
 
   enter select · esc back

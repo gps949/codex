@@ -35,13 +35,15 @@ pub(crate) fn account_caption(pool: &AccountPoolReadResponse) -> String {
 pub(crate) fn label(account: &AccountPoolAccount) -> String {
     compact_label(
         account
-            .email
+            .label
             .as_deref()
-            .filter(|name| !name.trim().is_empty())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
             .or(account
-                .label
+                .email
                 .as_deref()
-                .filter(|name| !name.trim().is_empty()))
+                .map(str::trim)
+                .filter(|name| !name.is_empty()))
             .unwrap_or("Account"),
         32,
     )
@@ -94,6 +96,32 @@ pub(crate) fn resolve<'a>(
     {
         return Ok(account);
     }
+    if let Some(prefix) = selector.strip_prefix('@') {
+        if prefix.is_empty() {
+            return Err("Specify an account selector from /account list.".into());
+        }
+        if let Some(account) = pool
+            .accounts
+            .iter()
+            .find(|account| account.profile_id == prefix)
+        {
+            return Ok(account);
+        }
+        let mut matches = pool
+            .accounts
+            .iter()
+            .filter(|account| account.profile_id.starts_with(prefix));
+        return match (matches.next(), matches.next()) {
+            (Some(account), None) => Ok(account),
+            (None, _) => {
+                Err("Account not found. Use /account list to see account selectors.".into())
+            }
+            (Some(_), Some(_)) => Err(
+                "Ambiguous account selector. Use a longer profile ID prefix from /account list."
+                    .into(),
+            ),
+        };
+    }
     let mut matches = pool.accounts.iter().filter(|account| {
         account.label.as_deref() == Some(selector)
             || account.email.as_deref() == Some(selector)
@@ -102,7 +130,9 @@ pub(crate) fn resolve<'a>(
     match (matches.next(), matches.next()) {
         (Some(account), None) => Ok(account),
         (None, _) => Err("Account not found. Use /account to see available names.".into()),
-        (Some(_), Some(_)) => Err("Ambiguous account name. Use its exact profile ID from `codex account list` on the host.".into()),
+        (Some(_), Some(_)) => {
+            Err("Ambiguous account name. Use an @account selector from /account list.".into())
+        }
     }
 }
 
@@ -126,6 +156,10 @@ pub(crate) fn list(pool: &AccountPoolReadResponse, page: usize) -> Result<String
         let state = availability(account);
         let current = if account.is_active { " · Current" } else { "" };
         lines.push(format!("\n{name}{current}{state}"));
+        lines.push(format!(
+            "Select: /account use {}",
+            account_selector(pool, account)
+        ));
         let primary = usage(account.rate_limits.primary.as_ref());
         let secondary = usage(account.rate_limits.secondary.as_ref());
         let cached = if account
@@ -144,7 +178,7 @@ pub(crate) fn list(pool: &AccountPoolReadResponse, page: usize) -> Result<String
     if page < pages {
         lines.push(format!("\nNext: /account list {}", page + 1));
     }
-    lines.push("\nDetails: /account show <name>\nControls: /account help".into());
+    lines.push("\nDetails: /account show <label|@selector>\nControls: /account help".into());
     Ok(lines.join("\n"))
 }
 
@@ -154,6 +188,19 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
     let state = availability(account);
     let current = if account.is_active { " · Current" } else { "" };
     let mut lines = vec![format!("{name}{current}{state}")];
+    if let Some(email) = account.email.as_deref() {
+        lines.push(format!("Email: {}", compact_label(email, 80)));
+    }
+    if let Some(plan) = account.plan_type {
+        lines.push(format!(
+            "Plan: {}",
+            format!("{plan:?}").to_ascii_lowercase()
+        ));
+    }
+    lines.push(format!(
+        "Select: /account use {}",
+        account_selector(pool, account)
+    ));
     let now = Utc::now();
     for (name, window, primary) in [
         ("Primary", account.rate_limits.primary.as_ref(), true),
@@ -203,6 +250,23 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
     }
     lines.push("Cached values remain if refresh fails.".into());
     Ok(lines.join("\n"))
+}
+
+fn account_selector(pool: &AccountPoolReadResponse, account: &AccountPoolAccount) -> String {
+    let id = &account.profile_id;
+    for (end, _) in id.char_indices().filter(|(end, _)| *end >= 8) {
+        let prefix = &id[..end];
+        if pool
+            .accounts
+            .iter()
+            .filter(|other| other.profile_id.starts_with(prefix))
+            .count()
+            == 1
+        {
+            return format!("@{prefix}");
+        }
+    }
+    format!("@{id}")
 }
 
 fn usage(window: Option<&AccountPoolRateLimitWindow>) -> String {

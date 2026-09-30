@@ -13,15 +13,16 @@ fn pool() -> AccountPoolReadResponse {
 }
 
 #[test]
-fn mobile_account_compact_views_hide_ids_and_show_unknown_quota() {
+fn mobile_account_compact_views_show_selectors_and_unknown_quota() {
     let pool = pool();
     insta::assert_snapshot!(list(&pool, 1).unwrap(), @"
     Accounts · 1/1
 
     Work · Current
+    Select: /account use @secret-w
     Used: primary 37% · secondary unknown · cached
 
-    Details: /account show <name>
+    Details: /account show <label|@selector>
     Controls: /account help
     ");
     assert_eq!(pool_caption(&pool).as_deref(), Some("Work · 1/1 ready"));
@@ -29,18 +30,41 @@ fn mobile_account_compact_views_hide_ids_and_show_unknown_quota() {
 }
 
 #[test]
-fn mobile_account_label_prefers_email_over_custom_label() {
+fn mobile_account_label_prefers_custom_label_over_email() {
     let mut pool = pool();
     pool.accounts[0].email = Some("work@example.com".into());
     pool.accounts[0].label = Some("Work".into());
-    assert_eq!(label(&pool.accounts[0]), "work@example.com");
-    assert_eq!(
-        pool_caption(&pool).as_deref(),
-        Some("work@example.com · 1/1 ready")
-    );
+    assert_eq!(label(&pool.accounts[0]), "Work");
+    assert_eq!(pool_caption(&pool).as_deref(), Some("Work · 1/1 ready"));
     assert_eq!(
         resolve(&pool, "work@example.com").unwrap(),
         &pool.accounts[0]
+    );
+}
+
+#[test]
+fn mobile_account_same_email_profiles_have_stable_selectors() {
+    let mut pool = pool();
+    pool.accounts[0].email = Some("member@example.com".into());
+    let mut personal = pool.accounts[0].clone();
+    personal.profile_id = "personal-profile".into();
+    personal.label = Some("Personal".into());
+    personal.is_active = false;
+    pool.accounts.push(personal);
+    assert_eq!(resolve(&pool, "@personal").unwrap(), &pool.accounts[1]);
+    assert_eq!(resolve(&pool, "Personal").unwrap(), &pool.accounts[1]);
+    assert!(resolve(&pool, "member@example.com").is_err());
+    let text = list(&pool, 1).unwrap();
+    assert!(text.contains("Personal"));
+    assert!(text.contains("/account use @personal"));
+    let text = detail(&pool, "@personal").unwrap();
+    assert!(text.contains("Email: member@example.com"));
+    assert!(text.contains("Select: /account use @personal"));
+    pool.accounts[0].profile_id = "personal-work-profile".into();
+    assert!(
+        resolve(&pool, "@personal")
+            .unwrap_err()
+            .contains("Ambiguous")
     );
 }
 
@@ -54,7 +78,7 @@ fn mobile_account_pages_are_bounded_and_names_cannot_inject_markup() {
     let text = list(&pool, 1).unwrap();
     assert_eq!(text.matches("Used:").count(), 4);
     assert!(text.contains("Next: /account list 2"));
-    assert!(!text.contains("secret-work-id"));
+    assert_eq!(text.matches("Select: /account use @").count(), 4);
     assert!(!text.contains("[bad]"));
     assert!(text.len() < 1200);
     assert!(list(&pool, usize::MAX).is_err());

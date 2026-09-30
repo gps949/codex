@@ -136,6 +136,7 @@ impl ChatWidget {
             initial_user_message,
             status_account_display,
             remote_connection: None,
+            account_pool_identity: None,
             snapshot_local_images: false,
             pending_image_submission: None,
             local_worktree_operations: true,

@@ -3,6 +3,37 @@ use codex_app_server_protocol::AccountPoolRateLimits;
 use codex_login::format_reset_countdown;
 use pretty_assertions::assert_eq;
 
+#[tokio::test]
+async fn pool_quota_observations_keep_identity_and_only_activation_requires_refresh() {
+    let (mut chat, _tx, _rx, _op_rx) =
+        crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+    let mut update = AccountPoolUpdatedNotification {
+        active_profile_id: Some("work".into()),
+        active_generation: Some(1),
+        accounts: vec![AccountPoolAccount {
+            profile_id: "work".into(),
+            label: Some("Work".into()),
+            priority: 0,
+            is_active: true,
+            availability: AccountPoolAvailability::Available,
+            plan_type: None,
+            email: Some("member@example.com".into()),
+            rate_limits: AccountPoolRateLimits::default(),
+            window_warmup: None,
+        }],
+    };
+    assert!(chat.on_account_pool_updated(&update));
+    update.accounts[0].rate_limits.primary = Some(AccountPoolRateLimitWindow {
+        used_percent: 60.0,
+        resets_at: Some(1_900_000_000),
+    });
+    assert!(!chat.on_account_pool_updated(&update));
+    update.accounts[0].label = Some("Work seat".into());
+    assert!(!chat.on_account_pool_updated(&update));
+    update.active_generation = Some(2);
+    assert!(chat.on_account_pool_updated(&update));
+}
+
 #[test]
 fn reset_countdown_uses_compact_colon_units() {
     assert_eq!(format_reset_countdown(/*remaining_seconds*/ 1), "0:01");
@@ -104,7 +135,7 @@ fn elapsed_and_unknown_resets_have_compact_output() {
 }
 
 #[test]
-fn account_display_name_prefers_email_over_label_and_profile_id() {
+fn account_display_name_prefers_label_over_email_and_profile_id() {
     let with_email = AccountPoolAccount {
         profile_id: "primary-acct".to_string(),
         label: Some("Team plan".to_string()),
@@ -116,16 +147,19 @@ fn account_display_name_prefers_email_over_label_and_profile_id() {
         rate_limits: AccountPoolRateLimits::default(),
         window_warmup: None,
     };
-    assert_eq!(
-        account_display_name(&with_email),
-        "primary@example.com".to_string()
-    );
+    assert_eq!(account_display_name(&with_email), "Team plan".to_string());
 
     let label_only = AccountPoolAccount {
         email: None,
         ..with_email.clone()
     };
     assert_eq!(account_display_name(&label_only), "Team plan".to_string());
+
+    let email_only = AccountPoolAccount {
+        label: Some(" ".to_string()),
+        ..with_email.clone()
+    };
+    assert_eq!(account_display_name(&email_only), "primary@example.com");
 
     let id_only = AccountPoolAccount {
         label: None,
