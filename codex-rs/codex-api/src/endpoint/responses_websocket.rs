@@ -672,6 +672,7 @@ async fn run_websocket_response_stream(
     interrupt: oneshot::Receiver<()>,
 ) -> Result<(), ApiError> {
     let mut last_server_model: Option<String> = None;
+    let mut response_headers = http::HeaderMap::new();
     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
     send_websocket_request(
         ws_stream,
@@ -728,9 +729,14 @@ async fn run_websocket_response_stream(
         match message {
             Message::Text(text) => {
                 if let Some(wrapped_error) = parse_wrapped_websocket_error_event(&text)
-                    && let Some(error) =
+                    && let Some(mut error) =
                         map_wrapped_websocket_error_event(wrapped_error, text.to_string())
                 {
+                    if let ApiError::Transport(TransportError::Http { headers, .. }) = &mut error {
+                        let mut combined = response_headers.clone();
+                        combined.extend(headers.take().unwrap_or_default());
+                        *headers = Some(combined);
+                    }
                     return Err(error);
                 }
 
@@ -746,6 +752,9 @@ async fn run_websocket_response_stream(
                     text.as_str(),
                     timing_log_context,
                 );
+                if let Some(headers) = event.headers.as_ref().and_then(Value::as_object) {
+                    response_headers.extend(json_headers_to_http_headers(headers));
+                }
                 if event.kind() == "codex.response.metadata"
                     && let Some(etag) =
                         event
@@ -827,7 +836,15 @@ async fn run_websocket_response_stream(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        return Err(error.into_api_error());
+                        let mut error = error.into_api_error();
+                        if let ApiError::Transport(TransportError::Http { headers, .. }) =
+                            &mut error
+                        {
+                            let mut combined = response_headers.clone();
+                            combined.extend(headers.take().unwrap_or_default());
+                            *headers = Some(combined);
+                        }
+                        return Err(error);
                     }
                 }
             }

@@ -735,21 +735,59 @@ async fn malformed_account_pool_fails_closed_before_sampling() -> anyhow::Result
 
 /// End-to-end: a usage-limit rejection on the preferred account rotates the pool to the backup
 /// account, warns the user, and completes the same turn on the backup account's credentials.
+#[derive(Clone, Copy)]
+enum FailoverAccountScope {
+    SeparateWorkspaces,
+    SharedBusinessWorkspace,
+    SharedBusinessEntitlement,
+    SharedBusinessStreamQuota,
+    SharedBusinessStreamQuotaCode,
+    SharedBusinessStreamEntitlement,
+}
+
+#[test_case::test_case(FailoverAccountScope::SeparateWorkspaces; "separate_accounts")]
+#[test_case::test_case(FailoverAccountScope::SharedBusinessWorkspace; "distinct_business_seats")]
+#[test_case::test_case(FailoverAccountScope::SharedBusinessEntitlement; "business_entitlement_switches_seats")]
+#[test_case::test_case(FailoverAccountScope::SharedBusinessStreamQuota; "business_stream_quota_switches_seats")]
+#[test_case::test_case(FailoverAccountScope::SharedBusinessStreamQuotaCode; "business_stream_quota_code_switches_seats")]
+#[test_case::test_case(FailoverAccountScope::SharedBusinessStreamEntitlement; "business_stream_entitlement_switches_seats")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::Result<()> {
+async fn usage_limit_rotates_to_backup_account_and_completes_turn(
+    scope: FailoverAccountScope,
+) -> anyhow::Result<()> {
     let server = MockServer::start().await;
 
+    let (error_type, streaming, quota_code) = match scope {
+        FailoverAccountScope::SharedBusinessEntitlement => ("usage_not_included", false, false),
+        FailoverAccountScope::SharedBusinessStreamEntitlement => {
+            ("usage_not_included", true, false)
+        }
+        FailoverAccountScope::SharedBusinessStreamQuota => ("usage_limit_reached", true, false),
+        FailoverAccountScope::SharedBusinessStreamQuotaCode => ("usage_limit_reached", true, true),
+        FailoverAccountScope::SeparateWorkspaces
+        | FailoverAccountScope::SharedBusinessWorkspace => ("usage_limit_reached", false, false),
+    };
+    let mut error = json!({
+        "type": error_type, "message": "limit reached",
+        "resets_at": chrono::Utc::now().timestamp() + 3600, "plan_type": "team",
+    });
+    if quota_code {
+        error["code"] = error["type"].take();
+    }
+    let rejected = if streaming {
+        ResponseTemplate::new(200).set_body_raw(
+            sse(vec![json!({
+                "type": "response.failed", "response": {"error": error},
+            })]),
+            "text/event-stream",
+        )
+    } else {
+        ResponseTemplate::new(429).set_body_json(json!({"error": error}))
+    };
     // The request-bound token is authoritative even when advisory plan metadata disagrees.
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
-        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
-            "error": {
-                "type": "usage_limit_reached",
-                "message": "limit reached",
-                "resets_at": chrono::Utc::now().timestamp() + 3600,
-                "plan_type": "team"
-            }
-        })))
+        .respond_with(rejected)
         .up_to_n_times(1)
         .mount(&server)
         .await;
@@ -765,9 +803,44 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::R
     )
     .await;
 
+    let shared_workspace = !matches!(scope, FailoverAccountScope::SeparateWorkspaces);
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_pre_build_hook(write_account_pool_fixture);
+        .with_pre_build_hook(move |home| {
+            use base64::Engine as _;
+            write_account_pool_fixture(home);
+            if shared_workspace {
+                for id in ["primary-acct", "backup-acct"] {
+                    let path = home.join("auth-profiles").join(id).join("auth.json");
+                    let mut auth: serde_json::Value = serde_json::from_str(
+                        &std::fs::read_to_string(&path).expect("fixture auth"),
+                    )
+                    .expect("fixture JSON");
+                    let b64 = |value: &[u8]| {
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value)
+                    };
+                    let header = b64(br#"{"alg":"none","typ":"JWT"}"#);
+                    let payload = b64(&serde_json::to_vec(&json!({
+                        "email": format!("{id}@example.com"),
+                        "https://api.openai.com/auth": {
+                            "chatgpt_plan_type": "team",
+                            "chatgpt_account_id": "shared-business-workspace",
+                            "chatgpt_user_id": format!("user-{id}"),
+                        }
+                    }))
+                    .expect("fixture token"));
+                    auth["tokens"]["id_token"] =
+                        json!(format!("{header}.{payload}.{}", b64(b"sig")));
+                    auth["tokens"]["account_id"] = json!("shared-business-workspace");
+                    std::fs::write(
+                        path,
+                        serde_json::to_vec_pretty(&auth).expect("fixture auth"),
+                    )
+                    .expect("fixture write");
+                }
+            }
+        })
+        .with_config(|config| config.account_pool.window_warmup = Some(false));
     let fixture = builder.build_with_auto_env(&server).await?;
     let codex = fixture.codex.clone();
 
@@ -812,6 +885,26 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn() -> anyhow::R
         ],
         "each request must use the token from its captured execution lease"
     );
+
+    if shared_workspace {
+        let workspace_headers = server
+            .received_requests()
+            .await
+            .expect("captured requests")
+            .into_iter()
+            .filter(|request| request.url.path() == "/v1/responses")
+            .map(|request| {
+                request
+                    .headers
+                    .get("chatgpt-account-id")
+                    .map(|value| value.to_str().expect("workspace header").to_string())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            workspace_headers,
+            vec![Some("shared-business-workspace".to_string()); 2]
+        );
+    }
 
     // The replayed request must run on the backup account's credentials.
     let request = success.single_request();
@@ -1043,6 +1136,86 @@ async fn bound_401_permanent_refresh_failure_fails_over_in_the_turn_loop() -> an
             Some(active_identity.profile_id.to_string()),
             Some(active_identity.generation),
         ),
+    );
+    Ok(())
+}
+
+#[test_case::test_case(false; "http_model_limit")]
+#[test_case::test_case(true; "stream_model_limit")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_specific_limit_keeps_accounts_available_for_the_next_request(
+    streaming: bool,
+) -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let error = json!({"type": "usage_limit_reached", "message": "model allocation reached",
+        "resets_at": chrono::Utc::now().timestamp() + 3600});
+    let rejection = if streaming {
+        ResponseTemplate::new(200).set_body_raw(
+            sse(vec![json!({
+                "type": "response.failed", "response": {"error": error},
+            })]),
+            "text/event-stream",
+        )
+    } else {
+        ResponseTemplate::new(429).set_body_json(json!({"error": error}))
+    };
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            rejection
+                .insert_header("x-codex-active-limit", "fast-model")
+                .insert_header("x-fast-model-limit-name", "gpt-fast")
+                .insert_header("x-fast-model-primary-used-percent", "100"),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let success = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("different-model"),
+            ev_completed("different-model"),
+        ]),
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(write_account_pool_fixture)
+        .with_config(|config| config.account_pool.window_warmup = Some(false));
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "first".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let state =
+        codex_login::AccountRuntimeStateStore::new(fixture.home.path().to_path_buf()).load()?;
+    assert!(
+        state
+            .profiles
+            .iter()
+            .all(|profile| profile.exhausted_until.is_none())
+    );
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "next".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(
+        success.single_request().header("authorization"),
+        Some("Bearer access-primary".into())
     );
     Ok(())
 }

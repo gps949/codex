@@ -92,6 +92,7 @@ pub fn spawn_response_stream(
             idle_timeout,
             telemetry,
             safety_buffering_treatment,
+            Some(stream_response.headers),
         )
         .await;
     });
@@ -514,6 +515,7 @@ pub async fn process_sse(
         idle_timeout,
         telemetry,
         SafetyBufferingTreatment::default(),
+        /*response_headers*/ None,
     )
     .await;
 }
@@ -524,6 +526,7 @@ async fn process_sse_with_treatment(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     safety_buffering_treatment: SafetyBufferingTreatment,
+    response_headers: Option<http::HeaderMap>,
 ) {
     let mut stream = stream.eventsource();
     let mut response_error: Option<ApiError> = None;
@@ -635,7 +638,11 @@ async fn process_sse_with_treatment(
             }
             Ok(None) => {}
             Err(error) => {
-                let error = error.into_api_error();
+                let mut error = error.into_api_error();
+                if let ApiError::Transport(crate::TransportError::Http { headers, .. }) = &mut error
+                {
+                    *headers = headers.take().or_else(|| response_headers.clone());
+                }
                 if matches!(error, ApiError::FlexUnavailable) {
                     let _ = tx_event.send(Err(error)).await;
                     return;

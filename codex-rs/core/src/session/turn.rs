@@ -1856,6 +1856,7 @@ async fn run_sampling_request(
                     err.details(),
                     CodexErrorDetails::UsageLimitReached(_)
                         | CodexErrorDetails::QuotaExceeded
+                        | CodexErrorDetails::UsageNotIncluded
                         | CodexErrorDetails::RefreshTokenFailed(_)
                 );
                 if account_failure && let Some(execution_lease) = execution_lease.as_ref() {
@@ -1941,7 +1942,13 @@ async fn run_sampling_request(
                             }
                             return Err(err);
                         }
-                        SamplingFailoverDirective::PoolExhausted { retry_mode } => {
+                        SamplingFailoverDirective::PoolExhausted { retry_mode, cause } => {
+                            if cause == crate::failover::FailoverCause::UsageNotIncluded {
+                                sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+                                    message: "No available pool account includes this use. Choose another model or check the accounts' plan and workspace access. Reset credits are not redeemed for entitlement errors.".into(),
+                                })).await;
+                                return Err(err);
+                            }
                             // Opt-in last resort before failing the turn: redeem an earned
                             // rate-limit reset credit and continue on the reactivated account.
                             if let Some(rescue) =

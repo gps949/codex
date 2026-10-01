@@ -6,6 +6,7 @@ use codex_protocol::error::UsageLimitReachedError;
 
 use crate::execution_auth::ExecutionAuth;
 use crate::execution_auth::ExecutionAuthLease;
+use crate::failover::FailoverCause;
 use crate::failover::FailoverCoordinator;
 use crate::failover::FailoverOutcome;
 use crate::failover_checkpoint::FailoverRetryMode;
@@ -26,7 +27,10 @@ pub(crate) enum SamplingFailoverDirective {
         transition: AccountFailoverTransition,
     },
     /// The account pool recognized the failure but every configured account is unavailable.
-    PoolExhausted { retry_mode: FailoverRetryMode },
+    PoolExhausted {
+        retry_mode: FailoverRetryMode,
+        cause: FailoverCause,
+    },
     /// A tool may have caused an external side effect without a durable result, or partial visible
     /// model output must first be reconciled. The pool may already have moved to another account,
     /// but automatic replay is intentionally blocked.
@@ -62,6 +66,7 @@ pub(crate) async fn handle_sampling_failover(
             );
             Ok(SamplingFailoverDirective::PoolExhausted {
                 retry_mode: checkpoint.retry_mode(),
+                cause,
             })
         }
         FailoverOutcome::Rebound {
@@ -180,7 +185,7 @@ pub(crate) fn earliest_exhausted_reset(execution_auth: &ExecutionAuth) -> Option
 pub(crate) fn pool_exhausted_message(execution_auth: &ExecutionAuth) -> String {
     match earliest_exhausted_reset(execution_auth) {
         Some(resets_at) => format!(
-            "All configured Codex accounts have hit their usage limits. The earliest cooldown ends at {}. If a plan has earned rate-limit reset credits, redeeming one (for example from /status in the TUI or the app) unblocks that account immediately.",
+            "No configured Codex account is currently available. The earliest quota cooldown ends at {}. If a plan has earned rate-limit reset credits, redeeming one (for example from /status in the TUI or the app) unblocks that account immediately.",
             resets_at.format("%Y-%m-%d %H:%M UTC")
         ),
         None => "All configured Codex accounts are currently unavailable. Run `codex account list` for details.".to_string(),

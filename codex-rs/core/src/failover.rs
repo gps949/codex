@@ -8,6 +8,7 @@ use codex_protocol::error::CodexErrorDetails;
 
 use crate::execution_auth::ExecutionAuth;
 use crate::execution_auth::ExecutionAuthLease;
+use crate::quota_exhaustion::is_model_specific_usage_limit;
 use crate::quota_exhaustion::usage_limit_metadata_matches_profile;
 
 /// Backend credit-depletion responses do not always include a reset timestamp. Such an account
@@ -26,6 +27,8 @@ const MINIMUM_QUOTA_COOLDOWN: Duration = Duration::seconds(60);
 pub(crate) enum FailoverCause {
     /// The backend authoritatively rejected this ChatGPT subscription for its usage window.
     UsageLimitReached,
+    /// This account's entitlement does not include the requested use.
+    UsageNotIncluded,
     /// The profile's own AuthManager exhausted its normal refresh/recovery path.
     AuthenticationUnavailable,
 }
@@ -72,6 +75,10 @@ impl FailoverCoordinator {
     ) -> std::io::Result<FailoverOutcome> {
         match error.details() {
             CodexErrorDetails::UsageLimitReached(limit) => {
+                if is_model_specific_usage_limit(limit) {
+                    // Preserve the backend's switch-model guidance and ordinary account quota.
+                    return Ok(FailoverOutcome::NotApplicable);
+                }
                 if let Some(account_lease) = failed_lease.account_lease()
                     && !usage_limit_metadata_matches_profile(account_lease, limit).await
                 {
@@ -104,6 +111,31 @@ impl FailoverCoordinator {
                     failed_lease,
                     mutation,
                     FailoverCause::UsageLimitReached,
+                ))
+            }
+            CodexErrorDetails::UsageNotIncluded => {
+                let reset_at = quota_reset_or_reprobe(/*resets_at*/ None);
+                let mutation =
+                    execution_auth.failover_after_quota_exhausted(failed_lease, Some(reset_at))?;
+                if !matches!(
+                    mutation,
+                    AccountAvailabilityMutation::StaleIgnored { .. }
+                        | AccountAvailabilityMutation::AlreadyUnavailable { .. }
+                ) && let Some(profile_id) = failed_lease.profile_id()
+                {
+                    codex_login::AccountRuntimeStateStore::new(
+                        execution_auth
+                            .compatibility_auth_manager()
+                            .runtime_config()
+                            .codex_home,
+                    )
+                    .exclude_reset_credit_until(profile_id, reset_at)
+                    .map_err(std::io::Error::other)?;
+                }
+                Ok(Self::finish_mutation(
+                    failed_lease,
+                    mutation,
+                    FailoverCause::UsageNotIncluded,
                 ))
             }
             CodexErrorDetails::RefreshTokenFailed(refresh_error) => {

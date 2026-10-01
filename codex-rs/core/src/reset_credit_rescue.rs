@@ -147,12 +147,33 @@ pub(crate) async fn try_reset_credit_rescue(
             .then_with(|| left.profile.priority.cmp(&right.profile.priority))
             .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
     });
-    for candidate in snapshots
+    let excluded = store
+        .load()
+        .ok()?
+        .profiles
         .into_iter()
-        .filter(|snapshot| matches!(snapshot.availability, AccountAvailability::Exhausted { .. }))
-    {
+        .filter(|profile| {
+            profile
+                .reset_credit_excluded_until
+                .is_some_and(|until| until > Utc::now())
+        })
+        .map(|profile| profile.profile_id)
+        .collect::<std::collections::HashSet<_>>();
+    for candidate in snapshots.into_iter().filter(|snapshot| {
+        matches!(snapshot.availability, AccountAvailability::Exhausted { .. })
+            && !excluded.contains(&snapshot.profile.id)
+    }) {
         if tokio::time::Instant::now() >= deadline {
             return None;
+        }
+        // Another request may discover an entitlement refusal during this rescue pass.
+        if store.load().ok()?.profiles.iter().any(|profile| {
+            profile.profile_id == candidate.profile.id
+                && profile
+                    .reset_credit_excluded_until
+                    .is_some_and(|until| until > Utc::now())
+        }) {
+            continue;
         }
         // Prefer any free recovery that happened while the previous profile was checked.
         if let Ok(lease) = pool.lease() {

@@ -56,6 +56,27 @@ fn is_workspace_rate_limit(reached_type: RateLimitReachedType) -> bool {
     )
 }
 
+/// A named model bucket does not exhaust the account's ordinary Codex allowance.
+/// Workspace credit limits and reserve fallbacks still belong to account recovery.
+pub(crate) fn is_model_specific_usage_limit(limit: &UsageLimitReachedError) -> bool {
+    if limit
+        .rate_limit_reached_type
+        .is_some_and(is_workspace_rate_limit)
+    {
+        return false;
+    }
+    limit
+        .rate_limits
+        .as_ref()
+        .and_then(|snapshot| snapshot.limit_name.as_deref())
+        .map(str::trim)
+        .is_some_and(|name| {
+            !name.is_empty()
+                && !name.eq_ignore_ascii_case("codex")
+                && !name.eq_ignore_ascii_case("gpt-reserve")
+        })
+}
+
 pub(crate) fn plans_share_quota_bucket(left: PlanType, right: PlanType) -> bool {
     if left == right {
         return true;

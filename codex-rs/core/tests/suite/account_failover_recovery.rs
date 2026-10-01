@@ -870,3 +870,90 @@ async fn reset_credit_rescue_uses_another_exhausted_seat_when_last_has_no_credit
     assert_ne!(ids[0], ids[1]);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_credit_rescue_skips_entitlement_seat_after_another_seat_exhausts()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let responses = mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
+                "error": {
+                    "type": "usage_not_included",
+                    "message": "primary lacks entitlement",
+                }
+            })),
+            ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "backup exhausted",
+                    "resets_at": (chrono::Utc::now() + chrono::Duration::hours(5)).timestamp(),
+                }
+            })),
+        ],
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
+        .and(header("authorization", "Bearer access-backup"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(json!({"code": "no_credit"})),
+        )
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
+        .and(header("authorization", "Bearer access-primary"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200)
+                .set_body_json(json!({"code": "reset", "windows_reset": 2})),
+        )
+        .expect(/*requests*/ 0)
+        .mount(&server)
+        .await;
+    let backend_base_url = format!("{}/backend-api", server.uri());
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(write_account_pool_fixture)
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend_base_url;
+            config.account_pool.auto_reset_credits = Some(AutoResetCredits::WhenPoolExhausted);
+            config.account_pool.auto_reset_credit_min_wait_minutes = Some(0);
+            config.account_pool.max_reset_wait_minutes = Some(0);
+            config.account_pool.window_warmup = Some(false);
+        });
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "preserve credits on accounts without entitlement".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let events = collect_turn_events(&fixture.codex).await?;
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                EventMsg::Error(error) => Some(error.codex_error_info.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![Some(CodexErrorInfo::UsageLimitExceeded)],
+    );
+    assert_eq!(
+        responses
+            .requests()
+            .iter()
+            .map(|request| request.header("authorization"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some("Bearer access-primary".to_string()),
+            Some("Bearer access-backup".to_string()),
+        ],
+    );
+    server.verify().await;
+    Ok(())
+}

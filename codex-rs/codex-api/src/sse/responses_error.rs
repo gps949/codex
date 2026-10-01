@@ -38,7 +38,20 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
         return ApiError::Stream("response.failed event received".into());
     };
 
-    match error.code.as_deref() {
+    match error.code.as_deref().or(error.r#type.as_deref()) {
+        Some("usage_limit_reached") => {
+            // Share the existing typed HTTP quota bridge so SSE/WS failures can switch accounts
+            // with the same plan and reset metadata instead of retrying an exhausted identity.
+            let mut body = response.unwrap_or_default();
+            body["error"]["type"] = Value::String("usage_limit_reached".into());
+            ApiError::Transport(crate::TransportError::Http {
+                status: http::StatusCode::TOO_MANY_REQUESTS,
+                url: None,
+                headers: None,
+                body: Some(body.to_string()),
+                retry_after: None,
+            })
+        }
         Some("context_length_exceeded") => ApiError::ContextWindowExceeded,
         Some(
             "insufficient_quota"

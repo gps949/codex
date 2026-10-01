@@ -271,6 +271,29 @@ async fn ensure_from_config_registers_profiles_added_after_install() -> anyhow::
         })
     );
 
+    // A late entitlement refusal from an old lease cannot block rescue after A -> B -> A.
+    let pool = execution_auth.account_pool().expect("installed pool");
+    let previous = execution_auth.active_lease().expect("captured request");
+    let original = previous.profile_id().expect("pooled request").clone();
+    let alternate = pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.profile.id != original)
+        .expect("another profile")
+        .profile
+        .id;
+    pool.activate(&alternate)?;
+    pool.activate(&original)?;
+    let store = codex_login::AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
+    let before = store.load()?;
+    let _ = crate::failover::FailoverCoordinator::handle_inference_error(
+        &execution_auth,
+        &previous,
+        &codex_protocol::error::CodexErr::UsageNotIncluded,
+    )
+    .await?;
+    assert_eq!(store.load()?, before);
+
     let stored_root = std::fs::read(codex_home.path().join("auth.json"))?;
     let captured_mode = execution_auth
         .mode_for_turn(&config, &config.model_provider)
