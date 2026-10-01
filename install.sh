@@ -42,7 +42,46 @@ asset="codex-$target.tar.gz"
 url="https://github.com/$REPO/releases/download/$tag/$asset"
 tmp="$(mktemp -d)"
 stage=""
-trap 'rm -rf "$tmp"; if [ -n "$stage" ]; then rm -rf "$stage"; fi' EXIT
+lock="$INSTALL_DIR/.codex-install.lock"
+lock_owned=0
+commit_pending=0
+keep_stage=0
+cleanup_install() {
+  install_status=$?
+  trap - EXIT
+  trap '' HUP INT TERM
+  if [ "$commit_pending" = 1 ]; then
+    rollback_failed=0
+    for binary in $required; do
+      if [ -f "$stage/backup/$binary" ] || [ -L "$stage/backup/$binary" ]; then
+        # Keep the backup intact in case another restore fails.
+        if ! cp -Pp "$stage/backup/$binary" "$stage/.restore-$binary" ||
+           ! mv -f "$stage/.restore-$binary" "$INSTALL_DIR/$binary"; then
+          rollback_failed=1
+        fi
+      elif ! rm -f "$INSTALL_DIR/$binary"; then
+        rollback_failed=1
+      fi
+    done
+    if [ "$rollback_failed" = 1 ]; then
+      keep_stage=1
+      warn "Installation rollback failed. Backups were kept at $stage/backup."
+      warn "Restore those backups into $INSTALL_DIR; remove these bundle files if they have no backup: $required."
+    fi
+  fi
+  rm -rf "$tmp"
+  if [ -n "$stage" ] && [ "$keep_stage" = 0 ]; then
+    rm -rf "$stage"
+  fi
+  if [ "$lock_owned" = 1 ]; then
+    rmdir "$lock" || warn "Could not remove the installation lock: $lock"
+  fi
+  exit "$install_status"
+}
+trap cleanup_install EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 say "Downloading $tag ($asset)..."
 curl -fsSL "$url" -o "$tmp/$asset"
@@ -82,17 +121,40 @@ for binary in $required; do
     exit 1
   fi
   chmod +x "$stage/$binary"
+done
+"$stage/codex" --version
+
+# Serialize only the commit stage; never remove another installer's lock.
+if ! mkdir "$lock" 2>/dev/null; then
+  warn "Another installation is active or needs recovery: $lock. Retry after it finishes or is recovered."
+  exit 1
+fi
+lock_owned=1
+mkdir "$stage/backup"
+for binary in $required; do
   if [ -d "$INSTALL_DIR/$binary" ]; then
     warn "Installation target is a directory: $INSTALL_DIR/$binary"
     exit 1
   fi
+  if [ -e "$INSTALL_DIR/$binary" ] || [ -L "$INSTALL_DIR/$binary" ]; then
+    if [ ! -f "$INSTALL_DIR/$binary" ] && [ ! -L "$INSTALL_DIR/$binary" ]; then
+      warn "Installation target is not a regular file or symlink: $INSTALL_DIR/$binary"
+      exit 1
+    fi
+    cp -Pp "$INSTALL_DIR/$binary" "$stage/backup/$binary"
+  fi
 done
-"$stage/codex" --version
+commit_pending=1
 # Rename on the same filesystem, with the CLI last so helpers are present first.
 for binary in $required; do
   [ "$binary" = codex ] || mv -f "$stage/$binary" "$INSTALL_DIR/$binary"
 done
 mv -f "$stage/codex" "$INSTALL_DIR/codex"
+commit_pending=0
+rmdir "$lock"
+lock_owned=0
+rm -rf "$stage"
+stage=""
 say "Installed into $INSTALL_DIR."
 
 # --- PATH precedence: the fork must win over any previously installed codex.
