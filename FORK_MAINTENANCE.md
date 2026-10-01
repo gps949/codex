@@ -9,14 +9,13 @@ describes how to keep the fork in sync with upstream and how to cut releases.
 - `main` — pristine mirror of `upstream/main`. Never commit fork code here.
   Update with `git fetch upstream && git merge --ff-only upstream/main`.
 - `feature/native-multi-account` — the fork's integration branch. All fork
-  functionality lives here as a rebased patch series on top of an upstream
-  stable tag.
+  functionality lives here, merged with an upstream stable tag.
 - `sync/rust-vX.Y.Z` — short-lived branches produced by a sync (rebase of the
   integration branch onto a new upstream stable tag), merged back after tests.
 
 The fork's diff is intentionally mostly _additive_ (new modules such as
 `login/src/account_pool.rs`, `core/src/failover*.rs`). The files that modify
-upstream code — the "contact surface" — are listed in
+upstream code — the "contact surface" — are derived from the baseline diff by
 `.github/workflows/upstream-sync-check.yml`; conflicts concentrate in
 `core/src/session/turn.rs`.
 
@@ -62,10 +61,8 @@ Disable list (Actions → select workflow → “···” → “Disable workfl
 - `Issue Deduplicator`, `Issue Labeler`, `Issue Translator` — need upstream
   bot secrets; fail on every issue event
 
-Keep enabled: `fork-ci`, `upstream-sync-check` (appears after it exists on
-the default branch), and the tag-triggered `rust-release*` workflows (they
-only run when you push a release tag; trim their target matrix before the
-first release). The stale `.github/workflows/native-multi-account-live.yml`
+Keep enabled: `fork-ci`, `fork-release`, and `upstream-sync-check` (appears after it exists on
+the default branch). Disable inherited `rust-release*` workflows; the fork release workflow owns its matrix. The stale `.github/workflows/native-multi-account-live.yml`
 entry is a deleted temporary workflow that can never run again; ignore it.
 
 The `upstream-sync-check` workflow (weekly, metadata-only, ~1 minute) opens an
@@ -91,7 +88,7 @@ branch; a merge resolves conflicts once and keeps history append-only):
    - Regenerate if protocol/config shapes moved: `just write-config-schema`,
      `python3 codex-rs/app-server-protocol/scripts/write_schema_fixtures.py` (plus `--experimental`)
 5. **Auth-format check**: if upstream touched `codex-rs/login/`, confirm the
-   per-profile credential homes (`CODEX_HOME/accounts/<id>/auth.json`) still
+   per-profile credential homes (`CODEX_HOME/auth-profiles/<id>/auth.json`) still
    load. Upstream migrations only run against the root `CODEX_HOME`; a
    credential format change may need a fork-side migration for profile homes.
 6. Update `.github/upstream-baseline.txt` to the new tag, push the sync
@@ -118,7 +115,7 @@ This keeps the cheap agent on mechanical work and escalates judgment calls.
 ## Releases
 
 Releases are built by the fork-owned `fork-release` workflow (free standard
-runners: Apple Silicon macOS, x64 Linux, x64 Windows). The inherited
+runners: Apple Silicon macOS, x64/arm64 Linux, x64/arm64 Windows). The inherited
 `rust-release*` workflows need Apple signing, R2 buckets, and self-hosted
 runners — they will fail if they fire on a release tag; disable them in the
 Actions UI when they first appear.
@@ -127,15 +124,17 @@ Actions UI when they first appear.
   iteration. The binary is stamped `X.Y.Z+ma.N`, and the in-app update check
   compares both the upstream base and the numeric fork iteration, so users
   also get upgrade prompts for fixes on the same baseline.
-- **Releasing**: `git tag rust-v0.149.1-ma.1 && git push origin rust-v0.149.1-ma.1`
-  from a green integration branch. The workflow builds all three platforms and
-  publishes a GitHub release with all platform archives and `SHA256SUMS`.
+- **Releasing**: run `gh workflow run fork-release.yml -R gps949/codex --ref feature/native-multi-account`
+  after pushing the integration branch. Omit the tag to choose the next free fork iteration,
+  or pass `-f tag=rust-vX.Y.Z-ma.N` for an explicit version. The workflow requires successful
+  `fork-ci` for the exact source SHA before creating a tag, builds all five bundles, and
+  publishes a GitHub release with the archives and `SHA256SUMS`. A direct fork-tag push is also supported.
   The installer verifies checksums when available and leaves the existing
   installation intact if verification fails.
 - **Order of operations**: sync + verify first, tag only from a green
   integration branch. Never tag a release from an unsynced/untested state.
 - **Install (users)**: download the asset for the platform, extract, put
-  `codex` on PATH. No compilation needed. Linux builds link against system
+  `codex` and every sibling helper together on PATH. No compilation needed. Linux builds link against system
   OpenSSL 3 (any 2022+ distro).
 
 ### Coexistence with the official binary (audited)

@@ -42,7 +42,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Prettier on fork-owned files
-        run: npx --yes prettier@3.5.3 --check FORK_MAINTENANCE.md .github/workflows/fork-ci.yml .github/workflows/fork-release.yml .github/workflows/upstream-sync-check.yml
+        run: npx --yes prettier@3.5.3 --check FORK_MAINTENANCE.md fork/README.md fork/README.zh-CN.md .github/workflows/fork-ci.yml .github/workflows/fork-release.yml .github/workflows/upstream-sync-check.yml
 
       - name: Fork installer and release gate regressions
         run: |
@@ -69,7 +69,7 @@ jobs:
 
       - name: Clippy on fork-touched crates
         working-directory: codex-rs
-        run: cargo clippy --tests -p codex-login -p codex-config -p codex-history -p codex-core -p codex-cli -p codex-tui -p codex-app-server -p codex-app-server-protocol -- -D warnings
+        run: cargo clippy --tests -p codex-login -p codex-config -p codex-history -p codex-models-manager -p codex-core -p codex-cli -p codex-tui -p codex-app-server -p codex-app-server-protocol -- -D warnings
 
       - name: Build test helper binaries
         working-directory: codex-rs
@@ -84,6 +84,7 @@ jobs:
           NEXTEST_PROFILE: default
         run: |
           cargo nextest run --no-fail-fast -p codex-login -p codex-config -p codex-history -p codex-app-server-protocol
+          cargo nextest run --no-fail-fast -p codex-models-manager -E 'test(warmup)'
           cargo nextest run --no-fail-fast -p codex-core -E 'test(account_failover) or test(failover) or test(account_transition) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration) or test(account_window_warmup) or test(execution_auth) or test(account_pool_strategy) or test(reset_credit)'
           cargo nextest run --no-fail-fast -p codex-tui -E 'test(account) or test(warmup) or test(selection_row_layout)'
           cargo nextest run --no-fail-fast -p codex-cli --test account_selection

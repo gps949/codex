@@ -1,3 +1,5 @@
+> **Multi-account fork:** Manage Personal and Business seats in one native account pool. Start with the [English guide](fork/README.md) or [简体中文使用指南](fork/README.zh-CN.md). Install this fork from its [GitHub Releases](https://github.com/gps949/codex/releases), using the fork installer in the guide.
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />

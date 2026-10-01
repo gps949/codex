@@ -137,6 +137,13 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
+      - name: Cache release dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          shared-key: fork-release-${{ matrix.target }}
+          cache-workspace-crates: false
+
       - name: Stamp version from tag
         shell: bash
         env:
