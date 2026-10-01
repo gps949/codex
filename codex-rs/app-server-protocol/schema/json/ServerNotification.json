@@ -266,8 +266,29 @@
           "format": "int64",
           "type": "integer"
         },
+        "consecutiveFailures": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "outcome": {
           "$ref": "#/definitions/AccountPoolWindowWarmupOutcome"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountPoolWindowWarmupPhase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Additive attempt phase; legacy clients can continue reading `outcome`."
         },
         "retryAfter": {
           "format": "int64",
@@ -288,6 +309,14 @@
         "succeeded",
         "failed",
         "skippedNoAuth"
+      ],
+      "type": "string"
+    },
+    "AccountPoolWindowWarmupPhase": {
+      "description": "Distinguishes an ongoing or completed-but-unconfirmed attempt from a request failure.",
+      "enum": [
+        "inProgress",
+        "unconfirmed"
       ],
       "type": "string"
     },

@@ -68,10 +68,24 @@ pub struct AccountPoolAccount {
 #[ts(export_to = "v2/")]
 pub struct AccountPoolWindowWarmup {
     pub outcome: AccountPoolWindowWarmupOutcome,
+    /// Additive attempt phase; legacy clients can continue reading `outcome`.
+    #[serde(default)]
+    pub phase: Option<AccountPoolWindowWarmupPhase>,
+    #[serde(default)]
+    pub consecutive_failures: Option<u32>,
     #[ts(type = "number")]
     pub attempted_at: i64,
     #[ts(type = "number | null")]
     pub retry_after: Option<i64>,
+}
+
+/// Distinguishes an ongoing or completed-but-unconfirmed attempt from a request failure.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum AccountPoolWindowWarmupPhase {
+    InProgress,
+    Unconfirmed,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -133,7 +147,11 @@ pub struct AccountPoolWarmupDebugParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct AccountPoolWarmupDebugResponse {
+    /// Effective automatic warmup setting, including pool availability.
     pub enabled: bool,
+    /// Whether an execution pool exists; omitted by older servers.
+    #[serde(default)]
+    pub pool_enabled: Option<bool>,
     pub task_running: bool,
     pub pass_requested: bool,
     #[ts(type = "number")]
@@ -160,6 +178,16 @@ pub struct AccountPoolWarmupDebugAccount {
     pub availability: String,
     pub primary_used_percent: Option<f64>,
     pub persisted_warmup_outcome: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub candidate_reason: Option<String>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub attempted_at: Option<i64>,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub retry_after: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

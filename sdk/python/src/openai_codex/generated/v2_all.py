@@ -116,7 +116,9 @@ class AccountPoolWarmupDebugAccount(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    attempted_at: Annotated[int | None, Field(alias="attemptedAt")] = None
     availability: str
+    candidate_reason: Annotated[str | None, Field(alias="candidateReason")] = None
     email: str | None = None
     is_active: Annotated[bool, Field(alias="isActive")]
     is_candidate: Annotated[bool, Field(alias="isCandidate")]
@@ -125,6 +127,8 @@ class AccountPoolWarmupDebugAccount(BaseModel):
     primary_used_percent: Annotated[float | None, Field(alias="primaryUsedPercent")] = None
     priority: Annotated[int, Field(ge=0)]
     profile_id: Annotated[str, Field(alias="profileId")]
+    retry_after: Annotated[int | None, Field(alias="retryAfter")] = None
+    status: str | None = None
 
 
 class AccountPoolWarmupDebugEvent(BaseModel):
@@ -139,6 +143,11 @@ class AccountPoolWindowWarmupOutcome(Enum):
     succeeded = "succeeded"
     failed = "failed"
     skipped_no_auth = "skippedNoAuth"
+
+
+class AccountPoolWindowWarmupPhase(Enum):
+    in_progress = "inProgress"
+    unconfirmed = "unconfirmed"
 
 
 class AccountRoutingOverride(Enum):
@@ -6724,7 +6733,12 @@ class AccountPoolWindowWarmup(BaseModel):
         populate_by_name=True,
     )
     attempted_at: Annotated[int, Field(alias="attemptedAt")]
+    consecutive_failures: Annotated[int | None, Field(alias="consecutiveFailures", ge=0)] = None
     outcome: AccountPoolWindowWarmupOutcome
+    phase: Annotated[
+        AccountPoolWindowWarmupPhase | None,
+        Field(description="Additive attempt phase; legacy clients can continue reading `outcome`."),
+    ] = None
     retry_after: Annotated[int | None, Field(alias="retryAfter")] = None
 
 

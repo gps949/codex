@@ -12,6 +12,7 @@ export type { AccountPoolWarmupDebugAccount } from "./AccountPoolWarmupDebugAcco
 export type { AccountPoolWarmupDebugEvent } from "./AccountPoolWarmupDebugEvent";
 export type { AccountPoolWindowWarmup } from "./AccountPoolWindowWarmup";
 export type { AccountPoolWindowWarmupOutcome } from "./AccountPoolWindowWarmupOutcome";
+export type { AccountPoolWindowWarmupPhase } from "./AccountPoolWindowWarmupPhase";
 export type { AccountRateLimitsUpdatedNotification } from "./AccountRateLimitsUpdatedNotification";
 export type { AccountRoutingOverride } from "./AccountRoutingOverride";
 export type { AccountTokenUsageDailyBucket } from "./AccountTokenUsageDailyBucket";

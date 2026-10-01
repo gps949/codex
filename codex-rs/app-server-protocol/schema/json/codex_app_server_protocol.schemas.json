@@ -7064,8 +7064,23 @@
       },
       "AccountPoolWarmupDebugAccount": {
         "properties": {
+          "attemptedAt": {
+            "default": null,
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "availability": {
             "type": "string"
+          },
+          "candidateReason": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "email": {
             "type": [
@@ -7105,6 +7120,21 @@
           },
           "profileId": {
             "type": "string"
+          },
+          "retryAfter": {
+            "default": null,
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -7138,8 +7168,29 @@
             "format": "int64",
             "type": "integer"
           },
+          "consecutiveFailures": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "outcome": {
             "$ref": "#/definitions/v2/AccountPoolWindowWarmupOutcome"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AccountPoolWindowWarmupPhase"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Additive attempt phase; legacy clients can continue reading `outcome`."
           },
           "retryAfter": {
             "format": "int64",
@@ -7160,6 +7211,14 @@
           "succeeded",
           "failed",
           "skippedNoAuth"
+        ],
+        "type": "string"
+      },
+      "AccountPoolWindowWarmupPhase": {
+        "description": "Distinguishes an ongoing or completed-but-unconfirmed attempt from a request failure.",
+        "enum": [
+          "inProgress",
+          "unconfirmed"
         ],
         "type": "string"
       },
