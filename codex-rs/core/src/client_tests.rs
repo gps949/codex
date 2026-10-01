@@ -2605,3 +2605,98 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
     assert_eq!(recorded["output_items"], serde_json::to_value(&delivered)?);
     Ok(())
 }
+
+struct SwitchingMaintenanceAuth {
+    initial: CodexAuth,
+    refreshed: CodexAuth,
+    did_refresh: std::sync::atomic::AtomicBool,
+}
+
+impl ExternalAuth for SwitchingMaintenanceAuth {
+    fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async move {
+            Ok(
+                if self.did_refresh.load(std::sync::atomic::Ordering::SeqCst) {
+                    self.refreshed.clone()
+                } else {
+                    self.initial.clone()
+                },
+            )
+        })
+    }
+
+    fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async move {
+            self.did_refresh
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.refreshed.clone())
+        })
+    }
+}
+
+#[tokio::test]
+async fn captured_maintenance_auth_recovery_cannot_switch_to_another_workspace()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 401)
+                .set_body_json(json!({"error":{"message":"expired fixture"}})),
+        )
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    let initial = CodexAuth::from_external_chatgpt_tokens(
+        TEST_CHATGPT_ID_TOKEN,
+        "initial-workspace",
+        Some("pro"),
+    )?;
+    let refreshed = CodexAuth::from_external_chatgpt_tokens(
+        TEST_CHATGPT_ID_TOKEN,
+        "different-workspace",
+        Some("pro"),
+    )?;
+    let manager = AuthManager::from_auth_for_testing(initial.clone());
+    manager
+        .set_external_auth(Arc::new(SwitchingMaintenanceAuth {
+            initial: initial.clone(),
+            refreshed,
+            did_refresh: std::sync::atomic::AtomicBool::new(false),
+        }))
+        .await?;
+    let client = test_openai_model_client(
+        manager,
+        Some(format!("{}/v1", server.uri())),
+        SessionSource::Cli,
+    )
+    .with_captured_chatgpt_identity(&initial)?;
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let result = client
+        .new_session()
+        .stream(
+            &test_user_prompt(),
+            &test_model_info(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummaryConfig::None,
+            /*service_tier*/ None,
+            &metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("changed workspace must stop auth recovery");
+    };
+    assert!(
+        error.to_string().contains("captured maintenance"),
+        "{error}"
+    );
+    Ok(())
+}

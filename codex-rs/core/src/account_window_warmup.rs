@@ -53,6 +53,9 @@ use crate::client::agent_identity_auth_policy;
 use crate::config::Config;
 use crate::resolve_installation_id;
 
+#[path = "account_window_warmup_guard.rs"]
+pub(crate) mod guard;
+
 #[path = "account_window_warmup_execution.rs"]
 mod execution;
 #[path = "account_window_warmup_quota.rs"]

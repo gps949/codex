@@ -83,6 +83,7 @@ use codex_protocol::auth::RefreshTokenFailedError;
 use codex_protocol::auth::RefreshTokenFailedReason;
 use codex_protocol::protocol::SessionSource;
 use thiserror::Error;
+pub use workspace_routing::WorkspaceMaintenanceClients;
 pub use workspace_routing::WorkspaceRouting;
 pub use workspace_routing::WorkspaceRoutingRequest;
 pub use workspace_routing::WorkspaceRoutingResolver;

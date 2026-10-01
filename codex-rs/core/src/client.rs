@@ -276,6 +276,9 @@ pub struct ModelClient {
     restored_history: bool,
     request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
     executed_tool_calls: Option<ExecutedToolCalls>,
+    /// Maintenance requests retain the user and workspace captured before auth recovery.
+    captured_chatgpt_identity: Option<(String, String)>,
+    warmup_request_guard: Option<Arc<crate::account_window_warmup::guard::WarmupRequestGuard>>,
 }
 
 /// A turn-scoped streaming session created from a [`ModelClient`].
@@ -561,7 +564,29 @@ impl ModelClient {
             restored_history: false,
             request_contributors,
             executed_tool_calls: None,
+            captured_chatgpt_identity: None,
+            warmup_request_guard: None,
         }
+    }
+
+    /// Keeps same-owner token refresh available while rejecting seat changes between retries.
+    pub(crate) fn with_captured_chatgpt_identity(mut self, auth: &CodexAuth) -> Result<Self> {
+        let account_id = auth.get_account_id().ok_or_else(|| {
+            std::io::Error::other("captured maintenance request has no workspace identity")
+        })?;
+        let user_id = auth.get_chatgpt_user_id().ok_or_else(|| {
+            std::io::Error::other("captured maintenance request has no user identity")
+        })?;
+        self.captured_chatgpt_identity = Some((account_id, user_id));
+        Ok(self)
+    }
+
+    pub(crate) fn with_warmup_request_guard(
+        mut self,
+        guard: Arc<crate::account_window_warmup::guard::WarmupRequestGuard>,
+    ) -> Self {
+        self.warmup_request_guard = Some(guard);
+        self
     }
 
     pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
@@ -1108,6 +1133,17 @@ impl ModelClient {
         loop {
             let revision = auth_changes.as_ref().map(|changes| *changes.borrow());
             let auth = provider.auth().await;
+            if let Some((expected_account, expected_user)) = self.captured_chatgpt_identity.as_ref()
+                && !auth.as_ref().is_some_and(|auth| {
+                    auth.get_account_id().as_ref() == Some(expected_account)
+                        && auth.get_chatgpt_user_id().as_ref() == Some(expected_user)
+                })
+            {
+                return Err(std::io::Error::other(
+                    "captured maintenance user or workspace changed before request",
+                )
+                .into());
+            }
             let (api_provider, redirect_policy) = match routing {
                 ClientRouting::Workspace => {
                     let resolved = if !Arc::ptr_eq(provider, &self.state.provider)
@@ -1872,6 +1908,9 @@ impl ModelClientSession {
                 client_setup.api_auth,
             )
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            if let Some(guard) = self.client.warmup_request_guard.as_ref() {
+                guard.before_send()?;
+            }
             let stream_result = client.stream_request(request, options).await;
 
             match stream_result {
@@ -1888,6 +1927,9 @@ impl ModelClientSession {
                 Err(ApiError::Transport(unauthorized_transport))
                     if provider.is_recoverable_auth_error(&unauthorized_transport) =>
                 {
+                    if let Some(guard) = self.client.warmup_request_guard.as_ref() {
+                        guard.definite_rejection();
+                    }
                     let response_debug_context =
                         extract_response_debug_context(&unauthorized_transport);
                     inference_trace_attempt.record_failed(
@@ -2174,6 +2216,9 @@ impl ModelClientSession {
                     ),
                 ],
             );
+            if !warmup && let Some(guard) = self.client.warmup_request_guard.as_ref() {
+                guard.before_send()?;
+            }
             let stream_result = websocket_connection
                 .stream_request(
                     ws_request,

@@ -96,6 +96,32 @@ impl ConfigManager {
         }
     }
 
+    /// Keeps standby cloud requirements and effective network policy separate from foreground state.
+    pub(crate) fn for_profile_routing(
+        &self,
+        auth_manager: Arc<AuthManager>,
+        config: &Config,
+    ) -> Self {
+        let mut manager = Self::new(
+            self.codex_home.clone(),
+            self.current_cli_overrides(),
+            self.loader_overrides.clone(),
+            self.strict_config,
+            CloudConfigBundleLoader::default(),
+            self.arg0_paths.clone(),
+            Arc::clone(&self.thread_config_loader),
+        );
+        manager.runtime_feature_enablement = Arc::clone(&self.runtime_feature_enablement);
+        // Local machine requirements apply to every profile. Effective cloud policy is private.
+        manager.local_network_policy = self.local_network_policy.clone();
+        manager.replace_cloud_config_bundle_loader(
+            auth_manager,
+            config.chatgpt_base_url.clone(),
+            config.http_client_factory(),
+        );
+        manager
+    }
+
     pub(crate) fn codex_home(&self) -> &Path {
         self.codex_home.as_path()
     }

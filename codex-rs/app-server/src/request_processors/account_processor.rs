@@ -30,6 +30,7 @@ mod gateway_oauth;
 mod mobile_commands;
 mod pool_quota;
 mod pool_updates;
+mod profile_workspace_routing;
 mod rate_limit_resets;
 mod warmup_debug;
 mod workspace_routing;
@@ -117,6 +118,8 @@ pub(crate) struct AccountRequestProcessor {
     workspace_routing: Arc<Mutex<Option<workspace_routing::CachedWorkspaceRouting>>>,
     workspace_routing_fetches: Arc<Mutex<workspace_routing::WorkspaceRoutingFetches>>,
     workspace_routing_shutdown: CancellationToken,
+    profile_routing_owners: Arc<profile_workspace_routing::ProfileRoutingOwners>,
+    pool_configuration_ready: Arc<tokio::sync::OnceCell<()>>,
     gateway_login: Arc<std::sync::Mutex<Option<gateway_oauth::ActiveGatewayLogin>>>,
     gateway_client: Arc<std::sync::Mutex<Option<Arc<codex_login::GatewayAuthManager>>>>,
     _gateway_notifications: Arc<tokio_util::task::AbortOnDropHandle<()>>,
@@ -168,7 +171,14 @@ impl AccountRequestProcessor {
             workspace_routing: Arc::new(Mutex::new(None)),
             workspace_routing_fetches: Arc::new(Mutex::new(HashMap::new())),
             workspace_routing_shutdown: CancellationToken::new(),
+            profile_routing_owners: Arc::new(
+                profile_workspace_routing::ProfileRoutingOwners::default(),
+            ),
+            pool_configuration_ready: Arc::new(tokio::sync::OnceCell::new()),
         });
+        processor
+            .profile_routing_owners
+            .initialize(Arc::downgrade(&processor));
         let resolver: Arc<dyn codex_login::WorkspaceRoutingResolver> = processor.clone();
         processor
             .auth_manager
@@ -1216,7 +1226,7 @@ impl AccountRequestProcessor {
         Ok(response)
     }
 
-    async fn get_account_pool_response(
+    pub(crate) async fn get_account_pool_response(
         &self,
     ) -> Result<codex_app_server_protocol::AccountPoolReadResponse, JSONRPCErrorError> {
         let config = self.load_latest_config().await;
@@ -1276,6 +1286,27 @@ impl AccountRequestProcessor {
                 active_generation: None,
                 accounts: Vec::new(),
             });
+        }
+
+        self.pool_configuration_ready
+            .get_or_init(|| async {
+                // A pool-only login becomes available after the bootstrap loader cached no auth.
+                // Replace that loader now so foreground requirements do not wait for its refresh.
+                self.config_manager.replace_cloud_config_bundle_loader(
+                    Arc::clone(&self.auth_manager),
+                    config.chatgpt_base_url.clone(),
+                    config.http_client_factory(),
+                );
+                self.config_manager
+                    .sync_default_client_residency_requirement()
+                    .await;
+            })
+            .await;
+
+        if config.account_pool.effective_window_warmup() {
+            self.profile_routing_owners
+                .synchronize(self.execution_account_pool.auth_managers())
+                .await;
         }
 
         // Re-login via CLI writes tokens out-of-process; resync before building the picker so
@@ -1920,6 +1951,15 @@ fn account_pool_window_warmup(
                     codex_app_server_protocol::AccountPoolWindowWarmupOutcome::SkippedNoAuth
                 }
             },
+            phase: observation.phase.map(|phase| match phase {
+                codex_login::WindowWarmupPhase::InProgress => {
+                    codex_app_server_protocol::AccountPoolWindowWarmupPhase::InProgress
+                }
+                codex_login::WindowWarmupPhase::Unconfirmed => {
+                    codex_app_server_protocol::AccountPoolWindowWarmupPhase::Unconfirmed
+                }
+            }),
+            consecutive_failures: Some(observation.consecutive_failures),
             attempted_at: observation.attempted_at.timestamp(),
             retry_after: observation.retry_after.map(|value| value.timestamp()),
         },

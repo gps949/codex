@@ -1220,11 +1220,13 @@ impl MessageProcessor {
                 .clients_revoke(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::ConfigRequirementsRead { params: _, .. } => self
-                .config_processor
-                .config_requirements_read()
-                .await
-                .map(|response| Some(response.into())),
+            ClientRequest::ConfigRequirementsRead { params: _, .. } => {
+                self.account_processor.get_account_pool_response().await?;
+                self.config_processor
+                    .config_requirements_read()
+                    .await
+                    .map(|response| Some(response.into()))
+            }
             ClientRequest::EnvironmentAdd { params, .. } => {
                 self.environment_processor.environment_add(params).await
             }

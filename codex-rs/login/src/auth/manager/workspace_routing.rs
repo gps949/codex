@@ -42,12 +42,28 @@ pub struct WorkspaceRoutingRequest {
     pub session: Option<Arc<WorkspaceRoutingSession>>,
 }
 
+/// Content clients and bootstrap governed by one maintenance account's requirements.
+#[derive(Clone)]
+pub struct WorkspaceMaintenanceClients {
+    pub chatgpt_base_url: String,
+    pub http_client_factory: codex_http_client::HttpClientFactory,
+}
+
 /// Resolves routing through the account owner's cache and requirements loader.
 /// Returns no routing for independent destinations or no selected workspace.
 /// Custom ChatGPT-auth destinations require successful discovery before independence
 /// can be established; a cache miss is not evidence of an independent destination.
 /// Implementations must reject failed discovery and changes to the selected account.
 pub trait WorkspaceRoutingResolver: Send + Sync {
+    /// Loads the account's own requirements before quota, catalog, or generating maintenance.
+    /// Hosts without profile-scoped configuration retain their existing clients.
+    fn maintenance_clients(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Option<WorkspaceMaintenanceClients>>> + Send + '_>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+
     fn resolve(
         &self,
         request: WorkspaceRoutingRequest,
@@ -58,6 +74,47 @@ impl AuthManager {
     /// Installs the app-server's routing owner before accepting model requests.
     pub fn set_workspace_routing_resolver(&self, resolver: Weak<dyn WorkspaceRoutingResolver>) {
         assert!(self.workspace_routing_resolver.set(resolver).is_ok());
+    }
+
+    /// Attaches profile-scoped discovery without replacing an existing request owner.
+    pub fn set_workspace_routing_resolver_if_unset(
+        &self,
+        resolver: Weak<dyn WorkspaceRoutingResolver>,
+    ) -> bool {
+        self.workspace_routing_resolver.set(resolver).is_ok()
+    }
+
+    /// Prepares maintenance transport without borrowing another workspace's network policy.
+    pub async fn maintenance_clients(
+        &self,
+        expected: &CodexAuth,
+    ) -> io::Result<Option<WorkspaceMaintenanceClients>> {
+        let Some(resolver) = self.workspace_routing_resolver.get() else {
+            return Ok(None);
+        };
+        let changes = self.auth_change_state_receiver();
+        let owner_generation = changes.borrow().owner_generation;
+        let matches = || {
+            self.auth_cached().is_some_and(|current| {
+                current.get_account_id() == expected.get_account_id()
+                    && current.get_chatgpt_user_id() == expected.get_chatgpt_user_id()
+            })
+        };
+        if !matches() {
+            return Err(io::Error::other(
+                "maintenance account does not match requirements owner",
+            ));
+        }
+        let resolver = resolver
+            .upgrade()
+            .ok_or_else(|| io::Error::other("maintenance requirements owner is unavailable"))?;
+        let clients = resolver.maintenance_clients().await?;
+        if changes.borrow().owner_generation != owner_generation || !matches() {
+            return Err(io::Error::other(
+                "account changed while loading maintenance requirements",
+            ));
+        }
+        Ok(clients)
     }
 
     /// CLI callers without a discovery owner retain their existing routing behavior.
