@@ -22,6 +22,7 @@ use crate::execution_auth::ExecutionAuthLease;
 use crate::reset_credit_singleflight::ResetCreditRescueAttempt;
 
 const REDEEM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const REDEEM_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 enum ResetCreditOutcome {
     Reset,
@@ -33,7 +34,7 @@ enum ResetCreditOutcome {
 /// A recovered pool after redemption or a concurrent recovery.
 pub(crate) struct ResetCreditRescue {
     pub(crate) profile_id: AccountProfileId,
-    pub(crate) redeemed: bool,
+    pub(crate) redeemed_profile_id: Option<AccountProfileId>,
 }
 
 /// Pure decision rule so the waiting policy is unit-testable: redeeming is only worth it when
@@ -55,8 +56,8 @@ fn should_redeem(
     }
 }
 
-/// Attempts to redeem one reset credit for the account that just exhausted the pool. Returns
-/// `Some` only when the credit was consumed and the profile has been force-activated again.
+/// Attempts one successful reset across exhausted profiles, starting with the last failed one.
+/// A definitive no-credit result permits the next profile; an ambiguous result stops the pass.
 pub(crate) async fn try_reset_credit_rescue(
     execution_auth: &ExecutionAuth,
     failed_lease: &ExecutionAuthLease,
@@ -66,19 +67,19 @@ pub(crate) async fn try_reset_credit_rescue(
     if let Ok(lease) = pool.lease() {
         return Some(ResetCreditRescue {
             profile_id: lease.profile().id.clone(),
-            redeemed: false,
+            redeemed_profile_id: None,
         });
     }
     let mode = config.account_pool.effective_auto_reset_credits();
     if mode == AutoResetCredits::Never {
         return None;
     }
-    let profile_id = failed_lease.profile_id()?.clone();
+    let failed_profile_id = failed_lease.profile_id()?.clone();
 
     let now = Utc::now();
-    let snapshots = pool.snapshots();
+    let mut snapshots = pool.snapshots();
     if !snapshots.iter().any(|snapshot| {
-        snapshot.profile.id == profile_id
+        snapshot.profile.id == failed_profile_id
             && matches!(snapshot.availability, AccountAvailability::Exhausted { .. })
     }) || snapshots
         .iter()
@@ -87,22 +88,23 @@ pub(crate) async fn try_reset_credit_rescue(
         return None;
     }
     let earliest_reset = snapshots
-        .into_iter()
-        .filter_map(|snapshot| match snapshot.availability {
-            AccountAvailability::Exhausted { resets_at } => resets_at,
+        .iter()
+        .filter_map(|snapshot| match &snapshot.availability {
+            AccountAvailability::Exhausted { resets_at } => *resets_at,
             AccountAvailability::Available
             | AccountAvailability::AuthenticationUnavailable { .. }
             | AccountAvailability::Disabled => None,
         })
         .min();
-    let min_wait = Duration::minutes(
+    let min_wait = Duration::try_minutes(
         config
             .account_pool
             .effective_reset_credit_min_wait_minutes(),
-    );
+    )
+    .unwrap_or(Duration::MAX);
     if !should_redeem(mode, min_wait, earliest_reset, now) {
         tracing::info!(
-            %profile_id,
+            profile_id = %failed_profile_id,
             ?earliest_reset,
             "skipping automatic reset-credit redemption; waiting for the natural reset is cheaper"
         );
@@ -115,13 +117,13 @@ pub(crate) async fn try_reset_credit_rescue(
             follower.wait().await;
             return pool.lease().ok().map(|lease| ResetCreditRescue {
                 profile_id: lease.profile().id.clone(),
-                redeemed: false,
+                redeemed_profile_id: None,
             });
         }
         ResetCreditRescueAttempt::AlreadyFinished => {
             return pool.lease().ok().map(|lease| ResetCreditRescue {
                 profile_id: lease.profile().id.clone(),
-                redeemed: false,
+                redeemed_profile_id: None,
             });
         }
     };
@@ -138,105 +140,146 @@ pub(crate) async fn try_reset_credit_rescue(
     .await
     .ok()?
     .ok()?;
-    // Another process may have completed the same reset while we waited.
-    let saved = store.load().ok()?;
-    if let Some(reset_at) = saved
-        .profiles
-        .iter()
-        .find(|entry| entry.profile_id == profile_id)
-        .and_then(|entry| entry.quota_reset_at)
-        && pool
-            .snapshots()
-            .iter()
-            .find(|snapshot| snapshot.profile.id == profile_id)
-            .is_none_or(|snapshot| snapshot.quota_reset_at.is_none_or(|local| local < reset_at))
-        && Some(reset_at)
-            > failed_lease
+    let deadline = tokio::time::Instant::now() + REDEEM_PASS_TIMEOUT;
+    snapshots.sort_by(|left, right| {
+        (left.profile.id != failed_profile_id)
+            .cmp(&(right.profile.id != failed_profile_id))
+            .then_with(|| left.profile.priority.cmp(&right.profile.priority))
+            .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
+    });
+    for candidate in snapshots
+        .into_iter()
+        .filter(|snapshot| matches!(snapshot.availability, AccountAvailability::Exhausted { .. }))
+    {
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        // Prefer any free recovery that happened while the previous profile was checked.
+        if let Ok(lease) = pool.lease() {
+            return Some(ResetCreditRescue {
+                profile_id: lease.profile().id.clone(),
+                redeemed_profile_id: None,
+            });
+        }
+        let profile_id = candidate.profile.id;
+        let previous_epoch = if profile_id == failed_profile_id {
+            failed_lease
                 .account_lease()
                 .and_then(codex_login::AccountLease::quota_reset_at)
-    {
-        pool.apply_quota_reset(&profile_id, reset_at).ok()?;
-        return pool.lease().ok().map(|lease| ResetCreditRescue {
-            profile_id: lease.profile().id.clone(),
-            redeemed: false,
-        });
-    }
-
-    // Reuse an id for an ambiguous, recent attempt rather than spend another
-    // credit after a transport timeout. This file contains no credentials.
-    let profile_key = format!("{:x}", sha1::Sha1::digest(profile_id.as_str().as_bytes()));
-    let attempt_path = config
-        .codex_home
-        .join(format!(".rate-limit-reset-credit-{profile_key}.json"));
-    let failed_snapshot = pool
-        .snapshots()
-        .into_iter()
-        .find(|snapshot| snapshot.profile.id == profile_id)?;
-    let reset_key = match failed_snapshot.availability {
-        AccountAvailability::Exhausted { resets_at } => {
-            resets_at.map(|reset| reset.timestamp() / 60)
+        } else {
+            candidate.quota_reset_at
+        };
+        // Another process may have completed the same reset while we waited.
+        let saved = store.load().ok()?;
+        if let Some(reset_at) = saved
+            .profiles
+            .iter()
+            .find(|entry| entry.profile_id == profile_id)
+            .and_then(|entry| entry.quota_reset_at)
+            && pool
+                .snapshots()
+                .iter()
+                .find(|snapshot| snapshot.profile.id == profile_id)
+                .is_none_or(|snapshot| snapshot.quota_reset_at.is_none_or(|local| local < reset_at))
+            && Some(reset_at) > previous_epoch
+        {
+            pool.apply_quota_reset(&profile_id, reset_at).ok()?;
+            return pool.lease().ok().map(|lease| ResetCreditRescue {
+                profile_id: lease.profile().id.clone(),
+                redeemed_profile_id: None,
+            });
         }
-        AccountAvailability::Available
-        | AccountAvailability::AuthenticationUnavailable { .. }
-        | AccountAvailability::Disabled => return None,
-    };
-    let quota_epoch = failed_snapshot
-        .quota_reset_at
-        .map(|reset| reset.timestamp_millis());
-    let previous = std::fs::metadata(&attempt_path)
-        .ok()
-        .filter(|metadata| metadata.len() <= 4096)
-        .and_then(|_| std::fs::read(&attempt_path).ok())
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-    let previous = previous.as_ref().filter(|attempt| {
-        attempt["profileId"].as_str() == Some(profile_id.as_str())
-            && attempt["resetKey"].as_i64() == reset_key
-            && attempt["quotaEpoch"].as_i64() == quota_epoch
-            && attempt["attemptedAt"]
-                .as_i64()
-                .is_some_and(|time| now.timestamp().saturating_sub(time) < 300)
-    });
-    let first_attempt_at = previous
-        .and_then(|attempt| attempt["attemptedAt"].as_i64())
-        .unwrap_or_else(|| now.timestamp());
-    let request_id = previous
-        .and_then(|attempt| attempt["requestId"].as_str())
-        .unwrap_or_else(|| leader.redeem_request_id())
-        .to_string();
-    std::fs::write(
-        &attempt_path,
-        serde_json::to_vec(&serde_json::json!({
-            "profileId": profile_id.as_str(), "resetKey": reset_key, "quotaEpoch": quota_epoch,
-            "attemptedAt": first_attempt_at, "requestId": request_id,
-        }))
-        .ok()?,
-    )
-    .ok()?;
 
-    let redeemed =
-        match consume_reset_credit_for_profile(&pool, &profile_id, config, &request_id).await {
+        // Reuse an id for an ambiguous, recent attempt rather than spend another
+        // credit after a transport timeout. This file contains no credentials.
+        let profile_key = format!("{:x}", sha1::Sha1::digest(profile_id.as_str().as_bytes()));
+        let attempt_path = config
+            .codex_home
+            .join(format!(".rate-limit-reset-credit-{profile_key}.json"));
+        let Some(failed_snapshot) = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == profile_id)
+        else {
+            continue;
+        };
+        let reset_key = match failed_snapshot.availability {
+            AccountAvailability::Exhausted { resets_at } => {
+                resets_at.map(|reset| reset.timestamp() / 60)
+            }
+            AccountAvailability::Available
+            | AccountAvailability::AuthenticationUnavailable { .. }
+            | AccountAvailability::Disabled => continue,
+        };
+        let quota_epoch = failed_snapshot
+            .quota_reset_at
+            .map(|reset| reset.timestamp_millis());
+        let previous = std::fs::metadata(&attempt_path)
+            .ok()
+            .filter(|metadata| metadata.len() <= 4096)
+            .and_then(|_| std::fs::read(&attempt_path).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let previous = previous.as_ref().filter(|attempt| {
+            attempt["profileId"].as_str() == Some(profile_id.as_str())
+                && attempt["resetKey"].as_i64() == reset_key
+                && attempt["quotaEpoch"].as_i64() == quota_epoch
+                && attempt["attemptedAt"]
+                    .as_i64()
+                    .is_some_and(|time| now.timestamp().saturating_sub(time) < 300)
+        });
+        let first_attempt_at = previous
+            .and_then(|attempt| attempt["attemptedAt"].as_i64())
+            .unwrap_or_else(|| now.timestamp());
+        let new_request_id = if profile_id == failed_profile_id {
+            leader.redeem_request_id().to_string()
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        let request_id = previous
+            .and_then(|attempt| attempt["requestId"].as_str())
+            .unwrap_or(&new_request_id)
+            .to_string();
+        std::fs::write(
+            &attempt_path,
+            serde_json::to_vec(&serde_json::json!({
+                "profileId": profile_id.as_str(), "resetKey": reset_key, "quotaEpoch": quota_epoch,
+                "attemptedAt": first_attempt_at, "requestId": request_id,
+            }))
+            .ok()?,
+        )
+        .ok()?;
+
+        let outcome = tokio::time::timeout_at(
+            deadline,
+            consume_reset_credit_for_profile(&pool, &profile_id, config, &request_id),
+        )
+        .await
+        .unwrap_or(ResetCreditOutcome::Unknown);
+        let redeemed = match outcome {
             ResetCreditOutcome::Reset => true,
             ResetCreditOutcome::AlreadyUsable => false,
             ResetCreditOutcome::NoReset => {
                 let _ = std::fs::remove_file(&attempt_path);
-                return None;
+                continue;
             }
             ResetCreditOutcome::Unknown => return None,
         };
 
-    let mut rescue = reactivate_redeemed_profile(&pool, profile_id.clone())?;
-    rescue.redeemed = redeemed;
-    if let Some(reset_at) = pool
-        .snapshots()
-        .into_iter()
-        .find(|snapshot| snapshot.profile.id == profile_id)
-        .and_then(|snapshot| snapshot.quota_reset_at)
-        && let Err(error) = store.record_quota_reset(&profile_id, reset_at)
-    {
-        tracing::warn!(%profile_id, %error, "failed to persist confirmed quota reset");
+        let mut rescue = reactivate_redeemed_profile(&pool, profile_id.clone())?;
+        rescue.redeemed_profile_id = redeemed.then_some(profile_id.clone());
+        if let Some(reset_at) = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.profile.id == profile_id)
+            .and_then(|snapshot| snapshot.quota_reset_at)
+            && let Err(error) = store.record_quota_reset(&profile_id, reset_at)
+        {
+            tracing::warn!(%profile_id, %error, "failed to persist confirmed quota reset");
+        }
+        let _ = std::fs::remove_file(&attempt_path);
+        return Some(rescue);
     }
-    let _ = std::fs::remove_file(&attempt_path);
-    Some(rescue)
+    None
 }
 
 async fn consume_reset_credit_for_profile(
@@ -341,12 +384,12 @@ fn reactivate_redeemed_profile(
     profile_id: AccountProfileId,
 ) -> Option<ResetCreditRescue> {
     pool.reset_rate_limits(&profile_id).ok()?;
-    match pool.force_activate(&profile_id) {
-        Ok(_) => {
+    match pool.lease() {
+        Ok(lease) => {
             tracing::info!(%profile_id, "redeemed one rate-limit reset credit and reactivated the account");
             Some(ResetCreditRescue {
-                profile_id,
-                redeemed: true,
+                profile_id: lease.profile().id.clone(),
+                redeemed_profile_id: Some(profile_id),
             })
         }
         Err(error) => {

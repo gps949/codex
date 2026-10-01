@@ -1960,10 +1960,11 @@ async fn run_sampling_request(
                                     EventMsg::Warning(WarningEvent {
                                         message: format!(
                                             "{} `{}`. {}",
-                                            if rescue.redeemed {
-                                                "Redeemed one rate-limit reset credit on Codex account"
-                                            } else {
-                                                "Codex account recovered:"
+                                            match rescue.redeemed_profile_id.as_ref() {
+                                                Some(profile_id) => format!(
+                                                    "Redeemed one rate-limit reset credit on Codex account `{profile_id}`. Execution account:"
+                                                ),
+                                                None => "Codex account recovered:".to_string(),
                                             },
                                             rescue.profile_id,
                                             if safe_to_continue {

@@ -570,30 +570,16 @@ async fn run_concurrent_reset_credit_case(
     // Concurrent turns race: one request may join reset-credit singleflight before sampling.
     // Allow any count in 1..=templates rather than requiring every template slot.
     let max_response_requests = response_templates.len() as u64;
+    let reset_applied = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let responses = {
-        use std::sync::atomic::AtomicUsize;
-        use std::sync::atomic::Ordering;
-        use wiremock::Respond;
-
-        struct SeqResponder {
-            num_calls: AtomicUsize,
-            responses: Vec<ResponseTemplate>,
-        }
-
-        impl Respond for SeqResponder {
-            fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
-                let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
-                self.responses
-                    .get(call_num)
-                    .unwrap_or_else(|| self.responses.last().expect("templates"))
-                    .clone()
-            }
-        }
-
+        let reset_applied = std::sync::Arc::clone(&reset_applied);
         let (mock, response_mock) = responses::base_mock();
-        mock.respond_with(SeqResponder {
-            num_calls: AtomicUsize::new(0),
-            responses: response_templates,
+        mock.respond_with(move |_: &wiremock::Request| {
+            if reset_applied.load(std::sync::atomic::Ordering::SeqCst) {
+                response_templates.last().expect("templates").clone()
+            } else {
+                response_templates[0].clone()
+            }
         })
         .up_to_n_times(max_response_requests)
         .expect(1..)
@@ -607,13 +593,16 @@ async fn run_concurrent_reset_credit_case(
     };
     Mock::given(method("POST"))
         .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
-        .respond_with(
+        .respond_with(move |_: &wiremock::Request| {
+            // Model the backend state transition, independent of the number/order of
+            // concurrent sampling requests. A delayed client response does not undo a reset.
+            if matches!(outcome, ConcurrentResetCreditOutcome::Reset) {
+                reset_applied.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             ResponseTemplate::new(/*status*/ 200)
-                // The second turn must reach its usage-limit response while this consume is still
-                // in flight; leave ample room for slow runners to start it.
                 .set_delay(std::time::Duration::from_secs(2))
-                .set_body_json(json!({"code": consume_code, "windows_reset": 2})),
-        )
+                .set_body_json(json!({"code": consume_code, "windows_reset": 2}))
+        })
         .expect(1)
         .mount(&server)
         .await;
@@ -776,5 +765,108 @@ async fn reset_credit_http_failure_and_timeout_never_report_success() -> anyhow:
             (1, 0),
         );
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_credit_rescue_uses_another_exhausted_seat_when_last_has_no_credit()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let exhausted = ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
+        "error": {"type": "usage_limit_reached", "message": "fixture exhausted",
+            "resets_at": (chrono::Utc::now() + chrono::Duration::hours(5)).timestamp()}
+    }));
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer access-primary"))
+        .respond_with(exhausted.clone())
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer access-backup"))
+        .respond_with(exhausted)
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
+        .and(header("authorization", "Bearer access-backup"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(json!({"code": "no_credit"})),
+        )
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
+        .and(header("authorization", "Bearer access-primary"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200)
+                .set_body_json(json!({"code": "reset", "windows_reset": 2})),
+        )
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    // Lower priority so the initial quota failure is used once before this response.
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer access-primary"))
+        .respond_with(responses::sse_response(sse(vec![
+            ev_response_created("rescued"),
+            ev_assistant_message("rescued-message", "continued"),
+            ev_completed("rescued"),
+        ])))
+        .with_priority(6)
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    let backend_base_url = format!("{}/backend-api", server.uri());
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_pre_build_hook(write_account_pool_fixture)
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend_base_url;
+            config.account_pool.auto_reset_credits = Some(AutoResetCredits::WhenPoolExhausted);
+            config.account_pool.resume_after_reset = Some(false);
+            config.account_pool.window_warmup = Some(false);
+        });
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "continue using another seat's earned credit".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let events = collect_turn_events(&fixture.codex).await?;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EventMsg::Error(_)))
+    );
+    assert_eq!(events.iter().filter(|event| matches!(
+        event, EventMsg::Warning(warning) if warning.message.contains("Redeemed one rate-limit reset credit")
+    )).count(), 1);
+    let requests = server.received_requests().await.expect("fixture requests");
+    let consume: Vec<_> = requests
+        .iter()
+        .filter(|request| {
+            request.url.path() == "/backend-api/wham/rate-limit-reset-credits/consume"
+        })
+        .collect();
+    let ids: Vec<_> = consume
+        .iter()
+        .map(|request| {
+            request
+                .body_json::<serde_json::Value>()
+                .expect("redemption body")["redeem_request_id"]
+                .clone()
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.iter().all(serde_json::Value::is_string));
+    assert_ne!(ids[0], ids[1]);
     Ok(())
 }

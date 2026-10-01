@@ -230,3 +230,33 @@ async fn redemption_uses_the_failed_profile_auth_on_the_real_backend_route() -> 
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn redemption_preserves_concurrent_selection_and_reports_the_consumed_seat()
+-> anyhow::Result<()> {
+    let pool = AccountPool::new();
+    let redeemed = AccountProfileId::new("redeemed-seat")?;
+    let selected = AccountProfileId::new("selected-seat")?;
+    for id in [&redeemed, &selected] {
+        pool.register(
+            AccountProfile::new(
+                id.clone(),
+                std::path::PathBuf::from(id.as_str()),
+                0,
+                /*label*/ None,
+            ),
+            AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+        )?;
+    }
+    pool.activate(&selected)?;
+    let rescue = reactivate_redeemed_profile(&pool, redeemed.clone()).expect("redemption recovery");
+    assert_eq!(
+        (
+            rescue.profile_id,
+            rescue.redeemed_profile_id,
+            pool.lease()?.profile().id.clone()
+        ),
+        (selected.clone(), Some(redeemed), selected),
+    );
+    Ok(())
+}
