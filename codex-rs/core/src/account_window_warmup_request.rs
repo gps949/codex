@@ -6,6 +6,16 @@
 //! not the classic `exec_command` CLI set. Warmup reuses that payload without
 //! creating a Session or calling activate/lease.
 
+use super::account_window_warmup::quota::prefer_rate_limit_snapshot;
+use crate::client::ModelClient;
+use codex_api::ResponseEvent;
+use codex_otel::SessionTelemetry;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::RateLimitSnapshot;
+use codex_rollout_trace::InferenceTraceContext;
+use futures::StreamExt;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -124,4 +134,53 @@ fn warmup_tool_specs(model_info: &ModelInfo) -> Arc<[ToolSpec]> {
             }),
         ]),
     }
+}
+
+pub(crate) async fn stream_warmup_turn(
+    client: &ModelClient,
+    prompt: &Prompt,
+    model_info: &ModelInfo,
+    session_telemetry: &SessionTelemetry,
+    effort: Option<ReasoningEffort>,
+    responses_metadata: &CodexResponsesMetadata,
+    observed_limits: &Arc<tokio::sync::Mutex<Option<RateLimitSnapshot>>>,
+) -> anyhow::Result<Option<RateLimitSnapshot>> {
+    let mut session = client.new_session();
+    let mut stream = session
+        .stream(
+            prompt,
+            model_info,
+            session_telemetry,
+            effort,
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            responses_metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await?;
+    let mut observed = None;
+    while let Some(event) = stream.next().await {
+        match event? {
+            ResponseEvent::RateLimits(snapshot)
+                if snapshot
+                    .limit_id
+                    .as_deref()
+                    .is_none_or(|limit_id| limit_id == "codex") =>
+            {
+                let preferred = prefer_rate_limit_snapshot(observed.clone(), snapshot);
+                observed = Some(preferred.clone());
+                *observed_limits.lock().await = Some(preferred);
+            }
+            // Do not abort on the first tool call. Current ChatGPT models are
+            // code_mode_only and often emit `exec` immediately; dropping the
+            // stream there cancels the in-flight Responses turn before
+            // Completed, so the 5h window never starts (ma.7: High sol
+            // finished in ~3s with get_primary=0).
+            ResponseEvent::Completed { .. } => return Ok(observed),
+            _ => {}
+        }
+    }
+    Err(anyhow::anyhow!(
+        "standby window warmup stream ended before completion"
+    ))
 }
