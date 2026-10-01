@@ -183,7 +183,10 @@ pub(crate) async fn run_warmup_pass(pool: &AccountPool, config: &Config) -> anyh
         Ok(WarmupAttemptOutcome::Started) => (WindowWarmupOutcome::Succeeded, None, 0),
         Ok(WarmupAttemptOutcome::Unconfirmed) => (
             WindowWarmupOutcome::Failed,
-            Some(Utc::now() + chrono::Duration::minutes(10)),
+            // Completion proves that a generating request already ran. Rounded or delayed
+            // 0% usage is not grounds to spend quota again every few minutes. Keep the
+            // start unconfirmed, but share one full-window retry deadline across processes.
+            Some(attempted_at + chrono::Duration::hours(5)),
             0,
         ),
         Ok(WarmupAttemptOutcome::SkippedNoAuth) => (
@@ -320,10 +323,7 @@ async fn warm_profile(
         if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
             return Ok(WarmupAttemptOutcome::Failed);
         }
-        let effort = codex_models_manager::warmup_supported_effort(
-            model_info,
-            config.model_reasoning_effort.as_ref(),
-        );
+        let effort = codex_models_manager::warmup_supported_effort(model_info);
         debug!(
             %profile_id,
             model = %model_info.slug,

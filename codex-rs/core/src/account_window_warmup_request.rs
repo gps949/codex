@@ -34,7 +34,7 @@ use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_tools::ToolSpec;
 
-const WARMUP_PROMPT: &str = "1+1?";
+const WARMUP_PROMPT: &str = "What is 1+1? Reply with only the single digit. Do not use tools.";
 
 pub(crate) fn warmup_prompt(model_info: &ModelInfo) -> Prompt {
     Prompt {

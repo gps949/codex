@@ -74,7 +74,7 @@ fn select_default_uses_lowest_priority_list_model() {
     let selected = select_default_warmup_model(&catalog).expect("model");
     assert_eq!(selected.slug, "frontier");
     assert_eq!(
-        warmup_supported_effort(&selected, /*preferred*/ None),
+        warmup_supported_effort(&selected),
         Some(ReasoningEffort::High)
     );
 }
@@ -114,7 +114,7 @@ fn select_default_skips_specialty_and_chatgpt_unsupported_list_models() {
 }
 
 #[test]
-fn warmup_supported_effort_prefers_session_then_model_default() {
+fn warmup_supported_effort_uses_the_lowest_supported_level() {
     let mut info = model(
         "m",
         /*priority*/ 1,
@@ -124,22 +124,15 @@ fn warmup_supported_effort_prefers_session_then_model_default() {
             ReasoningEffort::Medium,
             ReasoningEffort::Minimal,
             ReasoningEffort::Low,
+            ReasoningEffort::Ultra,
         ],
         None,
     );
     info.default_reasoning_level = Some(ReasoningEffort::Medium);
 
     assert_eq!(
-        warmup_supported_effort(&info, Some(&ReasoningEffort::Low)),
-        Some(ReasoningEffort::Low)
-    );
-    assert_eq!(
-        warmup_supported_effort(&info, /*preferred*/ None),
-        Some(ReasoningEffort::Medium)
-    );
-    assert_eq!(
-        warmup_supported_effort(&info, Some(&ReasoningEffort::Ultra)),
-        Some(ReasoningEffort::Medium)
+        warmup_supported_effort(&info),
+        Some(ReasoningEffort::Minimal)
     );
 }
 
@@ -166,7 +159,7 @@ fn bundled_catalog_selects_picker_default_chatgpt_capable_model() {
     // not the cheapest hidden-upgrade successor (terra) and not gpt-5.2.
     assert_eq!(selected.slug, "gpt-6.1-sol");
     assert_eq!(
-        warmup_supported_effort(&selected, /*preferred*/ None),
+        warmup_supported_effort(&selected),
         Some(ReasoningEffort::Low)
     );
 }

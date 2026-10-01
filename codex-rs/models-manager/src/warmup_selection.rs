@@ -14,8 +14,8 @@
 //! 2. The lowest-`priority` list-visible capable model (the picker default).
 //! 3. The next lowest-priority capable list model, used only if the API rejects #1/#2.
 //!
-//! Effort follows the session reasoning setting when the selected model advertises it,
-//! otherwise the model's own `default_reasoning_level`.
+//! Effort uses the lowest level advertised by the selected model. Standby maintenance
+//! should not inherit an expensive reasoning setting from the user's real work.
 
 use chrono::Utc;
 use codex_protocol::openai_models::ModelInfo;
@@ -106,19 +106,27 @@ fn catalog_capable_list_models(catalog: &ModelsResponse) -> Vec<ModelInfo> {
     models
 }
 
-/// Reasoning effort for a warmup turn: session preference when advertised, else the
-/// model's catalog default.
-pub fn warmup_supported_effort(
-    model: &ModelInfo,
-    preferred: Option<&ReasoningEffort>,
-) -> Option<ReasoningEffort> {
-    if let Some(effort) = preferred
-        && model
+/// Lowest catalog-supported effort for a maintenance request. Unknown model-owned levels
+/// retain the advertised default rather than inventing an unsupported wire value.
+pub fn warmup_supported_effort(model: &ModelInfo) -> Option<ReasoningEffort> {
+    if let Some(effort) = [
+        ReasoningEffort::None,
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Max,
+        ReasoningEffort::Ultra,
+    ]
+    .into_iter()
+    .find(|effort| {
+        model
             .supported_reasoning_levels
             .iter()
             .any(|preset| &preset.effort == effort)
-    {
-        return Some(effort.clone());
+    }) {
+        return Some(effort);
     }
     if let Some(default) = model.default_reasoning_level.as_ref()
         && model

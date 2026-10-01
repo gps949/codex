@@ -5,7 +5,6 @@
 use super::*;
 use crate::config::ConfigBuilder;
 use codex_features::Feature;
-use codex_login::AccountProfile;
 use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::WindowWarmupOutcome;
@@ -54,7 +53,7 @@ fn catalog_driven_warmup_selection_is_available_to_core() {
     let catalog = codex_models_manager::warmup_models_catalog(/*preferred*/ None);
     let model = codex_models_manager::select_warmup_model(&catalog, /*preferred_slug*/ None)
         .expect("bundled catalog should expose a default warmup model");
-    let effort = codex_models_manager::warmup_supported_effort(&model, /*preferred*/ None)
+    let effort = codex_models_manager::warmup_supported_effort(&model)
         .expect("selected warmup model should advertise at least one effort");
 
     assert!(
@@ -224,17 +223,11 @@ async fn warmup_request_fixture_with_sse(
         server.uri(),
     );
 
-    let profile_id = AccountProfileId::new("standby").expect("valid profile id");
+    let profile = codex_login::AccountProfileStore::new(codex_home.path().to_path_buf())
+        .ensure_legacy_root_profile(Some("standby".to_string()), /*priority*/ 10)?;
+    let profile_id = profile.id.clone();
     let pool = AccountPool::new();
-    pool.register(
-        AccountProfile::new(
-            profile_id.clone(),
-            codex_home.path().to_path_buf(),
-            /*priority*/ 10,
-            Some("standby".to_string()),
-        ),
-        Arc::clone(&auth_manager),
-    )?;
+    pool.register(profile, Arc::clone(&auth_manager))?;
     pool.update_rate_limits(
         &profile_id,
         AccountRateLimits {
@@ -541,6 +534,7 @@ async fn warmup_uses_official_models_endpoint_catalog() -> anyhow::Result<()> {
 async fn warmup_posts_session_model_when_chatgpt_capable() -> anyhow::Result<()> {
     let mut fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
     fixture.config.model = Some("gpt-5.6-sol".to_string());
+    fixture.config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
 
     warm_profile(
         &fixture.pool,
@@ -557,6 +551,61 @@ async fn warmup_posts_session_model_when_chatgpt_capable() -> anyhow::Result<()>
         .expect("warmup responses POST");
     let body: serde_json::Value = serde_json::from_slice(&warmup.body)?;
     assert_eq!(body["model"].as_str(), Some("gpt-5.6-sol"));
+    assert_eq!(body["reasoning"]["effort"].as_str(), Some("low"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_warmup_without_visible_usage_does_not_keep_spending_quota() -> anyhow::Result<()>
+{
+    let fixture = warmup_request_fixture_idle_stream(/*enable_agent_identity*/ false).await?;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(serde_json::json!({
+                "plan_type": "plus",
+                "rate_limit": {
+                    "allowed": true,
+                    "limit_reached": false,
+                    "primary_window": {
+                        "used_percent": 0,
+                        "limit_window_seconds": 18000,
+                        "reset_after_seconds": 18000
+                    }
+                }
+            })),
+        )
+        .mount(&fixture.server)
+        .await;
+
+    run_warmup_pass(&fixture.pool, &fixture.config).await?;
+
+    let observation = fixture
+        .pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.profile.id == fixture.profile_id)
+        .and_then(|snapshot| snapshot.window_warmup)
+        .expect("completed attempt must be shared");
+    assert_eq!(
+        observation,
+        WindowWarmupObservation::current(
+            WindowWarmupOutcome::Failed,
+            observation.attempted_at,
+            Some(observation.attempted_at + chrono::Duration::hours(5)),
+            /*consecutive_failures*/ 0,
+        )
+    );
+    run_warmup_pass(&fixture.pool, &fixture.config).await?;
+    let requests = fixture.server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("/responses"))
+            .count(),
+        1,
+        "a completed maintenance request must not be repeated while usage visibility lags"
+    );
     Ok(())
 }
 
