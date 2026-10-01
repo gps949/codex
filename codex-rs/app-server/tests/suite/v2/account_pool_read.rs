@@ -428,6 +428,17 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
             "id": "work", "label": "Work Pro", "priority": 10,
             "credential_location": "managed_profile", "state": "ready", "disabled": false
         }));
+    // Parked profiles fill page one; page two must probe only the Work account.
+    for priority in 1..=3 {
+        profiles["profiles"]
+            .as_array_mut()
+            .expect("profiles")
+            .push(json!({
+                "id": format!("parked-{priority}"), "label": format!("Parked {priority}"),
+                "priority": priority, "credential_location": "managed_profile",
+                "state": "ready", "disabled": true
+            }));
+    }
     std::fs::write(manifest, serde_json::to_vec(&profiles)?)?;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/api/codex/usage"))
@@ -448,7 +459,7 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
                 }
             }
         })))
-        .expect(1)
+        .expect(2)
         .mount(&routing_server)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -478,6 +489,7 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
     let thread: ThreadStartResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
     for (command, expected) in [
+        ("/account list 2", "Work Pro"),
         ("/account use @work", "Selected: Work Pro"),
         (
             "/account strategy earliest-reset",
@@ -495,6 +507,18 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
                 "Strategy: earliest-reset"
             },
         ),
+        ("/account settings", "Pool settings"),
+        ("/account warmup off", "Warmup: off"),
+        ("/account resume off", "Wait and resume: off"),
+        ("/account resume on", "Wait and resume: on"),
+        ("/account wait 120", "up to 120 min"),
+        (
+            "/account reset-credits when-pool-exhausted",
+            "only when all accounts exhaust",
+        ),
+        ("/account reset-credits never", "never (manual only)"),
+        ("/account wait 1441", "Usage: /account wait"),
+        ("/account warmup invalid", "Usage: /account warmup"),
         ("/account show \"Work Pro\"", "Email: work@example.com"),
         ("/account nonsense", "Unknown /account command"),
         ("/account list 0", "Usage: /account list"),
@@ -542,6 +566,22 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
     assert_eq!(
         config["account_pool"]["rotation_strategy"].as_str(),
         Some("earliest_reset")
+    );
+    assert_eq!(
+        config["account_pool"]["window_warmup"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        config["account_pool"]["resume_after_reset"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        config["account_pool"]["max_reset_wait_minutes"].as_integer(),
+        Some(120)
+    );
+    assert_eq!(
+        config["account_pool"]["auto_reset_credits"].as_str(),
+        Some("never")
     );
     Ok(())
 }

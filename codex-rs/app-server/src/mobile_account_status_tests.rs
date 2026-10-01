@@ -138,3 +138,32 @@ fn mobile_account_displayed_names_are_valid_selectors() {
         &pool.accounts[0]
     );
 }
+
+#[test]
+fn mobile_account_settings_explain_effective_controls() {
+    let mut config = codex_config::AccountPoolConfigToml {
+        window_warmup: Some(false),
+        max_reset_wait_minutes: Some(120),
+        auto_reset_credits: Some(codex_config::AutoResetCredits::WhenPoolExhausted),
+        ..Default::default()
+    };
+    config.preemptive_switch_percent = Some(0.0);
+    insta::assert_snapshot!(settings(&config), @"
+    Pool settings
+    Strategy: fill-first — use preferred accounts first
+    Early rotation: off
+    Return to preferred: true
+    Warmup: off; every 5 min, uses a tiny request
+    Wait and resume: on; up to 120 min, cancellable
+    Auto reset credits: only when all accounts exhaust and natural reset is more than 60 min away
+
+    Controls
+    /account strategy fill-first|earliest-reset
+    /account warmup on|off
+    /account resume on|off
+    /account wait <minutes: 0..1440>
+    /account reset-credits never|when-pool-exhausted
+
+    Quota observations are not additive balances. Partial output or unresolved tools may require manual reconciliation.
+    ");
+}

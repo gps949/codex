@@ -85,29 +85,77 @@ impl AccountRequestProcessor {
                     value.parse::<usize>().ok().filter(|page| *page > 0)
                         .ok_or_else(|| invalid_request("Usage: /account list <page>"))?
                 } else { 1 };
-                let scope = if verb == "show" {
+                let profile_ids = if verb == "show" {
                     let profile_id = view::resolve(&pool, value).map_err(invalid_request)?.profile_id.clone();
-                    pool_quota::RefreshScope::Profile(profile_id)
-                } else { pool_quota::RefreshScope::All };
+                    vec![profile_id]
+                } else {
+                    view::page_accounts(&pool, page).map_err(invalid_request)?
+                        .into_iter().map(|account| account.profile_id.clone()).collect()
+                };
                 // Reject invalid page numbers before performing any network probes.
-                view::list(&pool, page).map_err(invalid_request)?;
-                pool_quota::refresh(&self.load_latest_config().await, &mut pool, scope).await;
+                pool_quota::refresh(&self.load_latest_config().await, &mut pool, pool_quota::RefreshScope::Profiles(profile_ids)).await;
                 if verb == "show" {
                     view::detail(&pool, value).map_err(invalid_request)
                 } else {
                     view::list(&pool, page).map_err(invalid_request)
                 }
             }
-            (_, "use" | "auto") => {
+            (_, "use" | "auto" | "retry") => {
                 let profile_id = if verb == "auto" {
                     if !value.is_empty() { return Err(invalid_request("Usage: /account auto")); }
                     None
-                } else { Some(view::resolve(&pool, value).map_err(invalid_request)?.profile_id.clone()) };
-                self.use_account_pool_response(codex_app_server_protocol::AccountPoolUseParams { profile_id, force: true }).await?;
+                } else {
+                    let account = view::resolve(&pool, value).map_err(invalid_request)?;
+                    if verb == "use" && matches!(account.availability, codex_app_server_protocol::AccountPoolAvailability::Exhausted { .. }) {
+                        return Err(invalid_request("This account is cooling down. Choose another account or wait for reset. If quota was reset externally, use /account retry <label|@selector> to probe again."));
+                    }
+                    Some(account.profile_id.clone())
+                };
+                self.use_account_pool_response(codex_app_server_protocol::AccountPoolUseParams { profile_id, force: verb == "retry" }).await?;
                 pool = self.get_account_pool_response().await?;
                 let label = pool.accounts.iter().find(|account| account.is_active)
                     .map(view::label).unwrap_or_else(|| "Account".into());
                 Ok(format!("Selected: {label}\nApplies to subsequent requests; automatic failover remains enabled."))
+            }
+            (_, "settings") if value.is_empty() => {
+                Ok(view::settings(&self.load_latest_config().await.account_pool))
+            }
+            (_, "warmup" | "resume" | "wait" | "reset-credits") => {
+                let (key, setting) = match verb.as_str() {
+                    "warmup" | "resume" => {
+                        let enabled = match value {
+                            "on" => true,
+                            "off" => false,
+                            _ => return Err(invalid_request(format!("Usage: /account {verb} <on|off>"))),
+                        };
+                        let key = if verb == "warmup" { "window_warmup" } else { "resume_after_reset" };
+                        (key, serde_json::json!(enabled))
+                    }
+                    "wait" => {
+                        let minutes = value.parse::<u64>().ok().filter(|n| *n <= 1440)
+                            .ok_or_else(|| invalid_request("Usage: /account wait <minutes: 0..1440>"))?;
+                        ("max_reset_wait_minutes", serde_json::json!(minutes))
+                    }
+                    "reset-credits" => {
+                        let mode = match value {
+                            "never" => "never",
+                            "when-pool-exhausted" | "when_pool_exhausted" => "when_pool_exhausted",
+                            _ => return Err(invalid_request("Usage: /account reset-credits <never|when-pool-exhausted>")),
+                        };
+                        ("auto_reset_credits", serde_json::json!(mode))
+                    }
+                    _ => unreachable!("matched account-pool setting"),
+                };
+                self.write_mobile_pool_setting(config_processor, queues, key, setting.clone()).await?;
+                let config = self.load_latest_config().await;
+                let effective = serde_json::to_value(&config.account_pool)
+                    .map_err(|err| internal_error(err.to_string()))?;
+                let notice = if effective.get(key) == Some(&setting) {
+                    "Saved. Applies after configuration refresh."
+                } else {
+                    "Saved, but overridden by higher-priority configuration."
+                };
+                Ok(format!("{notice}\n\n{}", view::settings(&config.account_pool)))
             }
             (_, "strategy") => {
                 let strategy = match value {
@@ -118,16 +166,7 @@ impl AccountRequestProcessor {
                 };
                 if !value.is_empty() {
                     let value = serde_json::to_value(strategy).map_err(|err| internal_error(err.to_string()))?;
-                    let processor = config_processor.clone();
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    queues.enqueue_background(RequestSerializationQueueKey::Global("config"), RequestSerializationAccess::Exclusive, async move {
-                    let result = processor.batch_write(ConfigBatchWriteParams {
-                        edits: vec![ConfigEdit { key_path: "account_pool.rotation_strategy".into(), value, merge_strategy: MergeStrategy::Replace }],
-                        file_path: None, expected_version: None, reload_user_config: true,
-                    }).await;
-                    let _ = tx.send(result);
-                    }).await;
-                    rx.await.map_err(|_| internal_error("configuration update interrupted"))??;
+                    self.write_mobile_pool_setting(config_processor, queues, "rotation_strategy", value).await?;
                     self.get_account_pool_response().await?;
                     let effective = self.load_latest_config().await.account_pool.effective_rotation_strategy();
                     if effective != strategy {
@@ -140,8 +179,44 @@ impl AccountRequestProcessor {
                 };
                 Ok(format!("Strategy: {name}\nUsed at the next automatic selection. Select now: /account auto"))
             }
-            (_, "help") if value.is_empty() => Ok("/account list [page]\n/account show <label|@selector>\n/account use <label|@selector>\n/account auto\n/account strategy [fill-first|earliest-reset]\nQuote names containing spaces. Use the @selector when accounts share a name or email. Selection does not permanently pin an account.".into()),
+            (_, "help") if value.is_empty() => Ok("/account list [page] — accounts and quota\n/account show <label|@selector> — details\n/account use <label|@selector> — select an available account\n/account retry <label|@selector> — clear local cooldown and probe again\n/account auto — let the strategy select now\n/account strategy [fill-first|earliest-reset]\n/account settings — effective settings and controls\nQuote names containing spaces. Use @selectors for duplicate names. Selection does not permanently pin an account.".into()),
             _ => Err(invalid_request("Unknown /account command. Use /account help.")),
         }
+    }
+    async fn write_mobile_pool_setting(
+        &self,
+        config_processor: &ConfigRequestProcessor,
+        queues: &RequestSerializationQueues,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), JSONRPCErrorError> {
+        let processor = config_processor.clone();
+        let key_path = format!("account_pool.{key}");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        queues
+            .enqueue_background(
+                RequestSerializationQueueKey::Global("config"),
+                RequestSerializationAccess::Exclusive,
+                async move {
+                    let result = processor
+                        .batch_write(ConfigBatchWriteParams {
+                            edits: vec![ConfigEdit {
+                                key_path,
+                                value,
+                                merge_strategy: MergeStrategy::Replace,
+                            }],
+                            file_path: None,
+                            expected_version: None,
+                            reload_user_config: true,
+                        })
+                        .await;
+                    let _ = tx.send(result);
+                },
+            )
+            .await;
+        rx.await
+            .map_err(|_| internal_error("configuration update interrupted"))??;
+        self.get_account_pool_response().await?;
+        Ok(())
     }
 }

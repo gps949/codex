@@ -20,7 +20,7 @@ use super::account_pool_rate_limits;
 
 pub(super) enum RefreshScope {
     All,
-    Profile(String),
+    Profiles(Vec<String>),
 }
 
 pub(super) async fn refresh(
@@ -42,7 +42,9 @@ pub(super) async fn refresh(
         .filter(|record| {
             let selected = match &scope {
                 RefreshScope::All => true,
-                RefreshScope::Profile(id) => record.profile.id.as_str() == id,
+                RefreshScope::Profiles(ids) => {
+                    ids.iter().any(|id| record.profile.id.as_str() == id)
+                }
             };
             selected
                 && response.accounts.iter().any(|account| {

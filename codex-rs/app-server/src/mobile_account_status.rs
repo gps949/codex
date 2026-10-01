@@ -136,7 +136,10 @@ pub(crate) fn resolve<'a>(
     }
 }
 
-pub(crate) fn list(pool: &AccountPoolReadResponse, page: usize) -> Result<String, String> {
+pub(crate) fn page_accounts(
+    pool: &AccountPoolReadResponse,
+    page: usize,
+) -> Result<Vec<&AccountPoolAccount>, String> {
     const PAGE_SIZE: usize = 4;
     let pages = pool.accounts.len().div_ceil(PAGE_SIZE).max(1);
     if page == 0 || page > pages {
@@ -146,12 +149,19 @@ pub(crate) fn list(pool: &AccountPoolReadResponse, page: usize) -> Result<String
     }
     let mut accounts: Vec<_> = pool.accounts.iter().collect();
     accounts.sort_by_key(|account| (!account.is_active, account.priority, &account.profile_id));
-    let mut lines = vec![format!("Accounts · {page}/{pages}")];
-    for account in accounts
+    Ok(accounts
         .into_iter()
         .skip((page - 1) * PAGE_SIZE)
         .take(PAGE_SIZE)
-    {
+        .collect())
+}
+
+pub(crate) fn list(pool: &AccountPoolReadResponse, page: usize) -> Result<String, String> {
+    const PAGE_SIZE: usize = 4;
+    let pages = pool.accounts.len().div_ceil(PAGE_SIZE).max(1);
+    let accounts = page_accounts(pool, page)?;
+    let mut lines = vec![format!("Accounts · {page}/{pages}")];
+    for account in accounts {
         let name = label(account);
         let state = availability(account);
         let current = if account.is_active { " · Current" } else { "" };
@@ -250,6 +260,44 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
     }
     lines.push("Cached values remain if refresh fails.".into());
     Ok(lines.join("\n"))
+}
+
+pub(crate) fn settings(pool: &codex_config::AccountPoolConfigToml) -> String {
+    let strategy = match pool.effective_rotation_strategy() {
+        codex_config::AccountPoolRotationStrategy::FillFirst => {
+            "fill-first — use preferred accounts first"
+        }
+        codex_config::AccountPoolRotationStrategy::EarliestReset => {
+            "earliest-reset — use the window that resets soonest"
+        }
+    };
+    let early = pool
+        .effective_preemptive_switch_percent()
+        .map(|percent| format!("{percent:.0}% used; saved remainder stays reusable"))
+        .unwrap_or_else(|| "off".into());
+    let warmup = if pool.effective_window_warmup() {
+        "on"
+    } else {
+        "off"
+    };
+    let wait = pool.effective_reset_wait().as_secs() / 60;
+    let resume = if wait > 0 {
+        format!("on; up to {wait} min, cancellable")
+    } else {
+        "off".into()
+    };
+    let credits = match pool.effective_auto_reset_credits() {
+        codex_config::AutoResetCredits::Never => "never (manual only)".into(),
+        codex_config::AutoResetCredits::WhenPoolExhausted => format!(
+            "only when all accounts exhaust and natural reset is more than {} min away",
+            pool.effective_reset_credit_min_wait_minutes()
+        ),
+    };
+    format!(
+        "Pool settings\nStrategy: {strategy}\nEarly rotation: {early}\nReturn to preferred: {}\nWarmup: {warmup}; every {} min, uses a tiny request\nWait and resume: {resume}\nAuto reset credits: {credits}\n\nControls\n/account strategy fill-first|earliest-reset\n/account warmup on|off\n/account resume on|off\n/account wait <minutes: 0..1440>\n/account reset-credits never|when-pool-exhausted\n\nQuota observations are not additive balances. Partial output or unresolved tools may require manual reconciliation.",
+        pool.effective_return_to_preferred(),
+        pool.effective_window_warmup_interval().as_secs() / 60,
+    )
 }
 
 fn account_selector(pool: &AccountPoolReadResponse, account: &AccountPoolAccount) -> String {
