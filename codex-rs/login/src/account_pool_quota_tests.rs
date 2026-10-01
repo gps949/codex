@@ -243,6 +243,94 @@ fn late_same_window_quota_cannot_replace_usage_or_omit_weekly_quota() {
 }
 
 #[test]
+fn quota_failure_preserves_known_windows_when_error_metadata_is_partial() {
+    let now = Utc::now();
+    for primary_used in [None, Some(100.0)] {
+        let (pool, first, _) = scheduling_pool(AccountPoolRotationStrategy::FillFirst);
+        let lease = pool.activate(&first).expect("activate first profile");
+        let existing = AccountRateLimits {
+            primary: Some(AccountRateLimitWindow {
+                used_percent: 83.0,
+                resets_at: Some(now + Duration::hours(1)),
+                window_minutes: Some(300),
+            }),
+            secondary: Some(AccountRateLimitWindow {
+                used_percent: 98.0,
+                resets_at: Some(now + Duration::days(2)),
+                window_minutes: Some(10080),
+            }),
+            observed_at: Some(now - Duration::hours(2)),
+        };
+        pool.update_rate_limits(&first, existing.clone())
+            .expect("cache both windows");
+        let mut incoming = AccountRateLimits {
+            observed_at: Some(now),
+            ..AccountRateLimits::default()
+        };
+        if let Some(used_percent) = primary_used {
+            incoming.primary = Some(AccountRateLimitWindow {
+                used_percent,
+                ..existing.primary.clone().unwrap()
+            });
+        }
+        let expected = AccountRateLimits {
+            primary: Some(AccountRateLimitWindow {
+                used_percent: primary_used.unwrap_or(83.0),
+                ..existing.primary.clone().unwrap()
+            }),
+            secondary: existing.secondary,
+            observed_at: if primary_used.is_some() {
+                Some(now)
+            } else {
+                existing.observed_at
+            },
+        };
+        pool.mark_exhausted_with_rate_limits(&lease, Some(now + Duration::hours(1)), incoming)
+            .expect("process quota rejection");
+        let actual = pool
+            .snapshots()
+            .into_iter()
+            .find(|account| account.profile.id == first)
+            .unwrap();
+        assert_eq!(
+            (actual.rate_limits, actual.availability),
+            (
+                expected,
+                crate::AccountAvailability::Exhausted {
+                    resets_at: Some(now + Duration::hours(1)),
+                }
+            )
+        );
+        if primary_used.is_some() {
+            let rejected = pool
+                .snapshots()
+                .into_iter()
+                .find(|account| account.profile.id == first)
+                .unwrap();
+            pool.update_rate_limits(
+                &first,
+                AccountRateLimits {
+                    primary: Some(AccountRateLimitWindow {
+                        used_percent: 1.0,
+                        resets_at: Some(now + Duration::hours(3)),
+                        window_minutes: Some(300),
+                    }),
+                    secondary: None,
+                    observed_at: Some(now - Duration::minutes(1)),
+                },
+            )
+            .expect("process a delayed pre-rejection observation");
+            let after = pool
+                .snapshots()
+                .into_iter()
+                .find(|account| account.profile.id == first)
+                .unwrap();
+            assert_eq!(after.rate_limits, rejected.rate_limits);
+        }
+    }
+}
+
+#[test]
 fn quota_decrease_is_allowed_when_backend_reports_a_new_window() {
     let now = Utc::now();
     let existing = AccountRateLimits {

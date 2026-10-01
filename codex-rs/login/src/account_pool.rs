@@ -1074,6 +1074,17 @@ impl AccountPool {
         };
         let availability_changed = account.availability != merged_availability
             || account.preemptive_rotation_until.take().is_some();
+        // A bare refusal is authoritative for availability, not a new quota observation.
+        // Partial observations keep their ordering timestamp so delayed data cannot replace them.
+        let rate_limits = rate_limits
+            .filter(|limits| {
+                limits
+                    .primary
+                    .iter()
+                    .chain(limits.secondary.iter())
+                    .any(|window| window.used_percent.is_finite() && window.used_percent >= 0.0)
+            })
+            .map(|limits| merge_rate_limits_monotonic(&account.rate_limits, limits));
         let rate_limits_changed = rate_limits
             .as_ref()
             .is_some_and(|rate_limits| account.rate_limits != *rate_limits);
@@ -2736,6 +2747,11 @@ mod tests {
         let first_lease = pool.lease().expect("first lease");
         let resets_at = Utc::now() + Duration::hours(2);
         let initial_limits = AccountRateLimits {
+            primary: Some(AccountRateLimitWindow {
+                used_percent: 90.0,
+                resets_at: Some(resets_at),
+                window_minutes: Some(300),
+            }),
             observed_at: Some(Utc::now() - Duration::minutes(1)),
             ..AccountRateLimits::default()
         };
@@ -2746,6 +2762,11 @@ mod tests {
         ));
 
         let updated_limits = AccountRateLimits {
+            primary: Some(AccountRateLimitWindow {
+                used_percent: 100.0,
+                resets_at: Some(resets_at),
+                window_minutes: Some(300),
+            }),
             observed_at: Some(Utc::now()),
             ..AccountRateLimits::default()
         };
