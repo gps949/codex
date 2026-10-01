@@ -1,7 +1,32 @@
+use chrono::DateTime;
 use chrono::Utc;
 
 use super::AccountRateLimitWindow;
 use super::AccountRateLimits;
+
+/// Fresh 100% quota makes a profile a last-resort probe rather than a useful preemptive
+/// replacement. Cached quota never makes it ineligible; missing, stale, future-dated, or
+/// already-reset observations must still be allowed to discover recovered headroom.
+pub(super) fn has_fresh_exhausted_window(
+    rate_limits: &AccountRateLimits,
+    now: &DateTime<Utc>,
+) -> bool {
+    let Some(observed_at) = rate_limits.observed_at else {
+        return false;
+    };
+    if observed_at > *now || *now - observed_at >= chrono::Duration::minutes(30) {
+        return false;
+    }
+    rate_limits
+        .primary
+        .iter()
+        .chain(rate_limits.secondary.iter())
+        .any(|window| {
+            window.used_percent.is_finite()
+                && window.used_percent >= 100.0
+                && window.resets_at.is_none_or(|reset| reset > *now)
+        })
+}
 
 /// Quota GETs and inference responses can arrive out of order and omit a window. Preserve
 /// usage within one backend window; accept lower usage only after that window resets.

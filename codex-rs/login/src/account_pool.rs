@@ -313,6 +313,7 @@ mod shared_state;
 
 #[path = "account_pool_quota.rs"]
 mod quota;
+use quota::has_fresh_exhausted_window;
 pub(crate) use quota::merge_rate_limits_monotonic;
 
 #[path = "account_pool_warmup.rs"]
@@ -616,7 +617,8 @@ impl AccountPool {
     /// Rotates away from a still-working lease whose observed usage is close to its limit.
     ///
     /// Unlike [`Self::mark_exhausted`], this never leaves the pool without an active account: the
-    /// rotation only happens when another eligible, unparked profile exists to take over.
+    /// rotation only happens when another eligible, unparked profile with potential headroom
+    /// exists to take over. Freshly observed exhausted quota is not a useful replacement.
     /// The previous account remains eligible as a lower-priority fallback, so its remaining
     /// quota is recovered automatically when the other accounts run out.
     pub fn rotate_preemptively(
@@ -638,6 +640,7 @@ impl AccountPool {
                 account.profile.id != lease.profile.id
                     && account.availability.is_eligible(&now)
                     && account.preemptive_rotation_until.is_none()
+                    && !has_fresh_exhausted_window(&account.rate_limits, &now)
             });
             if !has_alternative {
                 break 'rotation None;
@@ -1228,9 +1231,13 @@ fn select_fill_first(
         .values()
         .filter(|account| account_is_eligible(account, now, eligibility))
         .min_by(|left, right| {
-            left.preemptive_rotation_until
-                .is_some()
-                .cmp(&right.preemptive_rotation_until.is_some())
+            has_fresh_exhausted_window(&left.rate_limits, now)
+                .cmp(&has_fresh_exhausted_window(&right.rate_limits, now))
+                .then_with(|| {
+                    left.preemptive_rotation_until
+                        .is_some()
+                        .cmp(&right.preemptive_rotation_until.is_some())
+                })
                 .then_with(|| left.profile.priority.cmp(&right.profile.priority))
                 // Equal-priority: prefer unstarted 5h windows so the first lease starts the clock.
                 .then_with(|| earliest_reset_key(left, now).cmp(&earliest_reset_key(right, now)))
@@ -1249,9 +1256,13 @@ fn select_earliest_reset(
         .values()
         .filter(|account| account_is_eligible(account, now, eligibility))
         .min_by(|left, right| {
-            left.preemptive_rotation_until
-                .is_some()
-                .cmp(&right.preemptive_rotation_until.is_some())
+            has_fresh_exhausted_window(&left.rate_limits, now)
+                .cmp(&has_fresh_exhausted_window(&right.rate_limits, now))
+                .then_with(|| {
+                    left.preemptive_rotation_until
+                        .is_some()
+                        .cmp(&right.preemptive_rotation_until.is_some())
+                })
                 .then_with(|| earliest_reset_key(left, now).cmp(&earliest_reset_key(right, now)))
                 .then_with(|| left.profile.priority.cmp(&right.profile.priority))
                 .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))

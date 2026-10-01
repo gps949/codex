@@ -559,7 +559,7 @@ impl ExecutionAuth {
             .rate_limits
             .observed_at
             .is_some_and(|observed_at| now - observed_at < STALE_OBSERVATION_CUTOFF);
-        let depleted_window = [
+        let depleted_windows = [
             snapshot.rate_limits.primary.as_ref(),
             snapshot.rate_limits.secondary.as_ref(),
         ]
@@ -570,13 +570,23 @@ impl ExecutionAuth {
             // A window whose reset already passed no longer constrains the account.
             Some(resets_at) => resets_at > now,
             None => observed_recently,
-        })
-        .max_by(|left, right| left.used_percent.total_cmp(&right.used_percent))?;
+        });
 
-        let used_percent = depleted_window.used_percent;
-        let resets_at = depleted_window
-            .resets_at
-            .unwrap_or_else(|| now + PREEMPTIVE_UNKNOWN_RESET_REPROBE_DELAY);
+        // Every depleted window still constrains this profile. Parking only until the
+        // highest-used window resets can return to the preferred account while another
+        // near-limit window immediately forces a second switch and discards prompt cache.
+        let (used_percent, resets_at) = depleted_windows
+            .map(|window| {
+                (
+                    window.used_percent,
+                    window
+                        .resets_at
+                        .unwrap_or(now + PREEMPTIVE_UNKNOWN_RESET_REPROBE_DELAY),
+                )
+            })
+            .reduce(|(used, reset), (next_used, next_reset)| {
+                (used.max(next_used), reset.max(next_reset))
+            })?;
         let next = pool.rotate_preemptively(&lease, resets_at)?;
         Some(PreemptiveSwitch {
             from_profile: lease.profile().id.clone(),
