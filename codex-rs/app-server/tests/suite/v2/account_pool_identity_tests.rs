@@ -213,6 +213,11 @@ async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool
     let home = TempDir::new()?;
     let backend = wiremock::MockServer::start().await;
     app_test_support::mount_workspace_routing(&backend).await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/config/bundle"))
+        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({})))
+        .mount(&backend)
+        .await;
     std::fs::write(
         home.path().join("config.toml"),
         format!(
