@@ -83,7 +83,10 @@ impl AccountRequestProcessor {
             (MobileSlashCommand::Status, _) | (MobileSlashCommand::Account, "" | "list" | "show") => {
                 let page = if matches!(verb.as_str(), "list" | "pool") && !value.is_empty() {
                     value.parse::<usize>().ok().filter(|page| *page > 0)
-                        .ok_or_else(|| invalid_request("Use /status pool <page> or /account list <page>, starting at page 1."))?
+                        .ok_or_else(|| invalid_request(match command {
+                            MobileSlashCommand::Account => "Usage: /account list <page> (page starts at 1).",
+                            MobileSlashCommand::Status => "Usage: /status pool <page> (page starts at 1).",
+                        }))?
                 } else { 1 };
                 let profile_ids = if verb == "show" {
                     let profile_id = view::resolve(&pool, value).map_err(invalid_request)?.profile_id.clone();

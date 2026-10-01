@@ -7,6 +7,8 @@ use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::GetAuthStatusParams;
 use codex_app_server_protocol::GetAuthStatusResponse;
+use codex_app_server_protocol::JSONRPCMessage;
+use codex_app_server_protocol::RequestId;
 use codex_protocol::account::PlanType as AccountPlanType;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -267,15 +269,48 @@ async fn account_pool_external_selection_updates_running_server() -> Result<()> 
                     refresh_token: false,
                 })
                 .await?;
-            let after: GetAccountResponse = mcp.read_response(id).await?;
-            let pool = after.account_pool.as_ref();
-            if after.account
-                == Some(Account::Chatgpt {
-                    email: Some("second@example.com".to_string()),
-                    plan_type: AccountPlanType::Pro,
-                })
-                && pool.is_some_and(|pool| pool.active_profile_id.as_deref() == Some("second"))
-            {
+            let after: Option<GetAccountResponse> = loop {
+                match mcp.read_next_message().await? {
+                    JSONRPCMessage::Response(response) => {
+                        assert_eq!(response.id, RequestId::Integer(id));
+                        break Some(serde_json::from_value(response.result)?);
+                    }
+                    JSONRPCMessage::Error(error) => {
+                        assert_eq!(
+                            error,
+                            codex_app_server_protocol::JSONRPCError {
+                                id: RequestId::Integer(id),
+                                error: codex_app_server_protocol::JSONRPCErrorError {
+                                    code: -32603,
+                                    message: "account changed during workspace routing discovery"
+                                        .into(),
+                                    data: None,
+                                },
+                            }
+                        );
+                        break None;
+                    }
+                    JSONRPCMessage::Notification(_) => {}
+                    JSONRPCMessage::Request(request) => anyhow::bail!(
+                        "unexpected server request while polling account: {request:?}"
+                    ),
+                }
+            };
+            if after.is_some_and(|after| {
+                after.account
+                    == Some(Account::Chatgpt {
+                        email: Some("second@example.com".to_string()),
+                        plan_type: AccountPlanType::Pro,
+                    })
+                    && after
+                        .account_pool
+                        .as_ref()
+                        .is_some_and(|pool| pool.active_profile_id.as_deref() == Some("second"))
+                    && after
+                        .workspace_routing
+                        .as_ref()
+                        .is_some_and(|routing| routing.chatgpt_account_id == "account-second")
+            }) {
                 return Ok::<_, anyhow::Error>(());
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -524,11 +559,15 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
         ("/account show \"Work Pro\"", "Email: work@example.com"),
         ("/account nonsense", "Unknown /account command"),
         ("/account list 0", "Usage: /account list"),
+        ("/account list invalid", "Usage: /account list"),
         ("/account list 999", "Page out of range"),
         ("/account auto extra", "Usage: /account auto"),
         ("/account use missing", "Account not found"),
         ("/account strategy invalid", "Usage: /account strategy"),
         ("/status extra", "Usage: /status"),
+        ("/status pool 0", "Usage: /status pool"),
+        ("/status pool invalid", "Usage: /status pool"),
+        ("/status pool 999", "Page out of range"),
     ] {
         let id = mcp
             .send_raw_request(
@@ -543,6 +582,18 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
             timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
         let text = serde_json::to_string(&reply.turn.items)?;
         assert!(text.contains(expected), "{command}: {text}");
+        if command == "/account list 0" || command == "/status pool 0" {
+            let Some(codex_app_server_protocol::ThreadItem::AgentMessage { text, .. }) =
+                reply.turn.items.first()
+            else {
+                anyhow::bail!("expected local invalid-page reply");
+            };
+            if command == "/account list 0" {
+                insta::assert_snapshot!(text, @"Usage: /account list <page> (page starts at 1).");
+            } else {
+                insta::assert_snapshot!(text, @"Usage: /status pool <page> (page starts at 1).");
+            }
+        }
         if command.starts_with("/account show") {
             assert!(text.contains("Primary: 23% used"), "{text}");
         }
