@@ -129,6 +129,7 @@ async fn restoring_a_fully_cooling_down_pool_succeeds() {
         active_profile_id: Some(first.id.clone()),
         profiles: vec![
             AccountRuntimeProfileState {
+                reset_credit_excluded_until: None,
                 profile_id: first.id.clone(),
                 exhausted_until: Some(resets_at),
                 preemptive_rotation_until: None,
@@ -137,6 +138,7 @@ async fn restoring_a_fully_cooling_down_pool_succeeds() {
                 window_warmup: None,
             },
             AccountRuntimeProfileState {
+                reset_credit_excluded_until: None,
                 profile_id: second.id.clone(),
                 exhausted_until: Some(resets_at),
                 preemptive_rotation_until: None,
@@ -535,6 +537,7 @@ async fn restore_runtime_state_keeps_warmup_retry_deadline() {
             active_profile_id: Some(first.id.clone()),
             profiles: vec![
                 AccountRuntimeProfileState {
+                    reset_credit_excluded_until: None,
                     profile_id: first.id.clone(),
                     exhausted_until: None,
                     preemptive_rotation_until: None,
@@ -543,6 +546,7 @@ async fn restore_runtime_state_keeps_warmup_retry_deadline() {
                     window_warmup: None,
                 },
                 AccountRuntimeProfileState {
+                    reset_credit_excluded_until: None,
                     profile_id: second.id.clone(),
                     exhausted_until: None,
                     preemptive_rotation_until: None,

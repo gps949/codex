@@ -173,11 +173,21 @@ pub enum WindowWarmupOutcome {
     SkippedNoAuth,
 }
 
+/// Additional attempt phase; the legacy outcome stays readable by older binaries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowWarmupPhase {
+    InProgress,
+    Unconfirmed,
+}
+
 /// Warmup attempt persisted in `account-runtime-state.json`. Scheduling shares attempt
-/// ordering and bounded retries across processes; user interfaces can hide failed attempts.
+/// ordering, generating-request protection, and bounded retries across processes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowWarmupObservation {
     pub outcome: WindowWarmupOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<WindowWarmupPhase>,
     pub attempted_at: DateTime<Utc>,
     /// Earliest retry time after a failed or not-yet-confirmed request.
     pub retry_after: Option<DateTime<Utc>>,
@@ -203,6 +213,7 @@ impl WindowWarmupObservation {
     ) -> Self {
         Self {
             outcome,
+            phase: None,
             attempted_at,
             retry_after,
             consecutive_failures,
@@ -318,7 +329,8 @@ pub(crate) use quota::merge_rate_limits_monotonic;
 
 #[path = "account_pool_warmup.rs"]
 mod window_warmup;
-use window_warmup::clear_started_window_warmup;
+use window_warmup::confirm_started_window_warmup;
+use window_warmup::ordered_warmup_candidates;
 use window_warmup::standby_needs_window_warmup;
 
 impl Default for AccountPool {
@@ -697,66 +709,34 @@ impl AccountPool {
     pub fn window_warmup_candidates(&self) -> Vec<AccountProfileId> {
         let state = self.lock_state();
         let now = Utc::now();
-        let mut candidates: Vec<(Option<DateTime<Utc>>, u8, u32, AccountProfileId)> = state
-            .accounts
-            .values()
-            .filter(|account| {
-                account.availability.is_eligible(&now)
-                    && state.active_profile.as_ref() != Some(&account.profile.id)
-                    && standby_needs_window_warmup(account, now)
-            })
-            .map(|account| {
-                // Probe unknown quota before known-idle so we learn state sooner.
-                let unknown_first = u8::from(account.rate_limits.primary.is_some());
-                (
-                    account
-                        .window_warmup
-                        .as_ref()
-                        .map(|observation| observation.attempted_at),
-                    unknown_first,
-                    account.profile.priority,
-                    account.profile.id.clone(),
-                )
-            })
-            .collect();
-        candidates.sort_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then_with(|| left.1.cmp(&right.1))
-                .then_with(|| left.2.cmp(&right.2))
-                .then_with(|| left.3.as_str().cmp(right.3.as_str()))
-        });
-        candidates.into_iter().map(|(_, _, _, id)| id).collect()
+        ordered_warmup_candidates(&state, now, standby_needs_window_warmup)
     }
 
-    /// Records an attempt for fair shared scheduling; UIs hide failure observations.
+    /// Records a monotonically advancing attempt for fair shared scheduling.
     pub fn record_window_warmup(
         &self,
         profile_id: &AccountProfileId,
-        observation: WindowWarmupObservation,
+        mut observation: WindowWarmupObservation,
     ) -> Result<(), AccountPoolError> {
         let mut state = self.lock_state();
         let account = state
             .accounts
             .get_mut(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
-        if account
-            .window_warmup
-            .as_ref()
-            .is_some_and(|current| current.attempted_at > observation.attempted_at)
-            || account
-                .quota_reset_at
-                .is_some_and(|reset| reset > observation.attempted_at)
+        if account.profile.disabled {
+            return Err(AccountPoolError::ProfileUnavailable(profile_id.clone()));
+        }
+        observation.infer_legacy_phase();
+        if account.window_warmup.as_ref().is_some_and(|current| {
+            current.attempted_at <= Utc::now() && current.compare_progress(&observation).is_gt()
+        }) || account
+            .quota_reset_at
+            .is_some_and(|reset| reset >= observation.attempted_at)
         {
             return Ok(());
         }
-        let succeeded = matches!(observation.outcome, WindowWarmupOutcome::Succeeded);
         account.window_warmup = Some(observation);
-        // Keep Succeeded when usage later looks started so a lagging 0% GET does not
-        // replace it with a stale Failed label. Scheduling still keys off used%.
-        if !succeeded {
-            clear_started_window_warmup(account);
-        }
+        confirm_started_window_warmup(account);
         drop(state);
         self.notify_change();
         Ok(())
@@ -958,7 +938,7 @@ impl AccountPool {
         let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
         let mut changed = account.rate_limits != merged;
         account.rate_limits = merged;
-        changed |= clear_started_window_warmup(account);
+        changed |= confirm_started_window_warmup(account);
         drop(state);
         if changed {
             self.notify_change();
@@ -988,7 +968,7 @@ impl AccountPool {
         let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
         let mut changed = account.rate_limits != merged;
         account.rate_limits = merged;
-        changed |= clear_started_window_warmup(account);
+        changed |= confirm_started_window_warmup(account);
         drop(state);
         if changed {
             self.notify_change();
@@ -2013,6 +1993,7 @@ mod tests {
             &idle.id,
             WindowWarmupObservation {
                 outcome: WindowWarmupOutcome::Failed,
+                phase: None,
                 attempted_at: now,
                 retry_after: Some(now + chrono::Duration::hours(6)),
                 consecutive_failures: 5,

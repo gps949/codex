@@ -15,6 +15,9 @@ use crate::AccountProfileId;
 use crate::AccountRateLimits;
 use crate::WindowWarmupObservation;
 
+#[path = "account_runtime_entitlement.rs"]
+mod entitlement;
+
 const ACCOUNT_RUNTIME_STATE_VERSION: u32 = 1;
 const ACCOUNT_RUNTIME_STATE_FILE: &str = "account-runtime-state.json";
 
@@ -41,6 +44,9 @@ pub struct AccountRuntimeProfileState {
     /// are retried rather than becoming an accidental permanent local ban.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exhausted_until: Option<DateTime<Utc>>,
+    /// Entitlement refusals cannot be repaired by spending earned reset credits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_credit_excluded_until: Option<DateTime<Utc>>,
     /// Soft scheduling preference after an early switch; remaining quota stays usable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preemptive_rotation_until: Option<DateTime<Utc>>,
@@ -107,6 +113,9 @@ impl AccountRuntimeStateStore {
                 .profiles
                 .into_iter()
                 .map(|mut profile| {
+                    if let Some(observation) = profile.window_warmup.as_mut() {
+                        observation.infer_legacy_phase();
+                    }
                     if profile
                         .exhausted_until
                         .as_ref()
@@ -161,12 +170,27 @@ impl AccountRuntimeStateStore {
     /// Serializes only restart-safe observations from the live pool.
     pub fn save_pool(&self, pool: &AccountPool) -> Result<(), AccountRuntimeStateError> {
         let snapshots = pool.snapshots();
-        self.save(&runtime_state_from_snapshots(&snapshots))
+        let _lock = crate::account_file::lock(&self.codex_home)?;
+        let previous = self.load_unlocked()?;
+        let mut state = runtime_state_from_snapshots(&snapshots);
+        for profile in &mut state.profiles {
+            profile.reset_credit_excluded_until = previous
+                .profiles
+                .iter()
+                .find(|previous| previous.profile_id == profile.profile_id)
+                .and_then(|previous| previous.reset_credit_excluded_until);
+        }
+        self.save_unlocked(&state)
     }
 
     /// Blocks until this process owns the home-scoped window-warmup lock.
     pub fn lock_window_warmup(&self) -> io::Result<std::fs::File> {
         crate::account_file::warmup_lock(&self.codex_home)
+    }
+
+    /// Claims warmup only when idle; callers skip busy pools instead of queueing generating work.
+    pub fn try_lock_window_warmup(&self) -> io::Result<Option<std::fs::File>> {
+        crate::account_file::try_warmup_lock(&self.codex_home)
     }
 
     /// Serializes automatic credit redemption across processes sharing a pool.
@@ -200,7 +224,7 @@ impl AccountRuntimeStateStore {
         {
             if profile
                 .quota_reset_at
-                .is_some_and(|current| current > reset_at)
+                .is_some_and(|current| current >= reset_at)
             {
                 return Ok(());
             }
@@ -214,6 +238,7 @@ impl AccountRuntimeStateStore {
             profile.window_warmup = None;
         } else {
             state.profiles.push(AccountRuntimeProfileState {
+                reset_credit_excluded_until: None,
                 profile_id: profile_id.clone(),
                 exhausted_until: None,
                 preemptive_rotation_until: None,
@@ -236,6 +261,9 @@ impl AccountRuntimeStateStore {
     ) -> Result<(), AccountRuntimeStateError> {
         let state = self.load()?;
         for profile in state.profiles {
+            if let Some(reset_at) = profile.quota_reset_at {
+                let _ = pool.apply_quota_reset(&profile.profile_id, reset_at);
+            }
             let _ = pool.update_rate_limits(&profile.profile_id, profile.rate_limits);
             let Some(observation) = profile.window_warmup else {
                 continue;
@@ -249,38 +277,42 @@ impl AccountRuntimeStateStore {
     pub fn record_window_warmup(
         &self,
         profile_id: &AccountProfileId,
-        observation: WindowWarmupObservation,
+        mut observation: WindowWarmupObservation,
     ) -> Result<(), AccountRuntimeStateError> {
         let _lock = crate::account_file::lock(&self.codex_home)?;
         let profiles = crate::AccountProfileStore::new(self.codex_home.clone());
         if !profiles
             .load_profile_records_unlocked()?
             .iter()
-            .any(|record| &record.profile.id == profile_id)
+            .any(|record| {
+                &record.profile.id == profile_id
+                    && record.state == crate::AccountProfileState::Ready
+                    && !record.profile.disabled
+            })
         {
             return Err(AccountRuntimeStateError::UnavailableProfile(
                 profile_id.clone(),
             ));
         }
+        observation.infer_legacy_phase();
         let mut state = self.load_unlocked()?;
         if let Some(profile) = state
             .profiles
             .iter_mut()
             .find(|profile| &profile.profile_id == profile_id)
         {
-            if profile
-                .window_warmup
-                .as_ref()
-                .is_some_and(|current| current.attempted_at > observation.attempted_at)
-                || profile
-                    .quota_reset_at
-                    .is_some_and(|reset| reset > observation.attempted_at)
+            if profile.window_warmup.as_ref().is_some_and(|current| {
+                current.attempted_at <= Utc::now() && current.compare_progress(&observation).is_gt()
+            }) || profile
+                .quota_reset_at
+                .is_some_and(|reset| reset >= observation.attempted_at)
             {
                 return Ok(());
             }
             profile.window_warmup = Some(observation);
         } else {
             state.profiles.push(AccountRuntimeProfileState {
+                reset_credit_excluded_until: None,
                 profile_id: profile_id.clone(),
                 exhausted_until: None,
                 preemptive_rotation_until: None,
@@ -398,6 +430,7 @@ impl AccountRuntimeStateStore {
                 crate::account_pool::merge_rate_limits_monotonic(&profile.rate_limits, limits);
         } else {
             state.profiles.push(AccountRuntimeProfileState {
+                reset_credit_excluded_until: None,
                 profile_id: profile_id.clone(),
                 exhausted_until: None,
                 preemptive_rotation_until: None,
@@ -438,6 +471,7 @@ fn runtime_state_from_snapshots(snapshots: &[AccountPoolSnapshot]) -> AccountRun
         profiles: snapshots
             .iter()
             .map(|snapshot| AccountRuntimeProfileState {
+                reset_credit_excluded_until: None,
                 profile_id: snapshot.profile.id.clone(),
                 exhausted_until: match &snapshot.availability {
                     AccountAvailability::Exhausted {
@@ -513,6 +547,7 @@ mod tests {
                 selection_revision: 0,
                 active_profile_id: Some(profile_id.clone()),
                 profiles: vec![AccountRuntimeProfileState {
+                    reset_credit_excluded_until: None,
                     profile_id,
                     exhausted_until: Some(Utc::now() - Duration::minutes(1)),
                     preemptive_rotation_until: None,
@@ -537,6 +572,7 @@ mod tests {
             selection_revision: 0,
             active_profile_id: Some(profile_id.clone()),
             profiles: vec![AccountRuntimeProfileState {
+                reset_credit_excluded_until: None,
                 profile_id,
                 exhausted_until: Some(reset),
                 preemptive_rotation_until: None,

@@ -19,13 +19,21 @@ pub(crate) fn warmup_lock(home: &Path) -> io::Result<File> {
     lock_named(home, WINDOW_WARMUP_LOCK)
 }
 
+pub(crate) fn try_warmup_lock(home: &Path) -> io::Result<Option<File>> {
+    try_lock_named(home, WINDOW_WARMUP_LOCK)
+}
+
 /// Serializes OAuth refresh + `auth.json` writes for one credential home.
 pub(crate) fn refresh_lock(home: &Path) -> io::Result<File> {
     lock_named(home, AUTH_REFRESH_LOCK)
 }
 
 pub(crate) fn try_reset_credit_lock(home: &Path) -> io::Result<Option<File>> {
-    let file = open_lock_file(home, RESET_CREDIT_LOCK)?;
+    try_lock_named(home, RESET_CREDIT_LOCK)
+}
+
+fn try_lock_named(home: &Path, name: &str) -> io::Result<Option<File>> {
+    let file = open_lock_file(home, name)?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),

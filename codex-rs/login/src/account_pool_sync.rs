@@ -63,6 +63,8 @@ impl AccountPool {
                 }
             }
             let local = AccountRuntimeProfileState {
+                reset_credit_excluded_until: incoming
+                    .and_then(|entry| entry.reset_credit_excluded_until),
                 profile_id: account.profile.id.clone(),
                 exhausted_until: match account.availability {
                     AccountAvailability::Exhausted {
@@ -136,6 +138,16 @@ impl AccountPool {
                     ),
                 };
             }
+            if let Some(observation) = result.window_warmup.as_mut() {
+                observation.infer_legacy_phase();
+            }
+            if result.window_warmup.as_ref().is_some_and(|observation| {
+                result
+                    .quota_reset_at
+                    .is_some_and(|reset| reset >= observation.attempted_at)
+            }) {
+                result.window_warmup = None;
+            }
             if account.quota_reset_at != result.quota_reset_at {
                 account.quota_reset_at = result.quota_reset_at;
                 account.last_active_generation = None;
@@ -155,6 +167,10 @@ impl AccountPool {
             }
             if account.window_warmup != result.window_warmup {
                 account.window_warmup = result.window_warmup.clone();
+                changed = true;
+            }
+            if confirm_started_window_warmup(account) {
+                result.window_warmup = account.window_warmup.clone();
                 changed = true;
             }
             if (local.exhausted_until != result.exhausted_until
@@ -266,7 +282,9 @@ fn merge_window_warmup(
     if local != old && incoming != old {
         match (&local, &incoming) {
             (Some(local_observation), Some(incoming_observation))
-                if incoming_observation.attempted_at > local_observation.attempted_at =>
+                if incoming_observation
+                    .compare_progress(local_observation)
+                    .is_gt() =>
             {
                 incoming
             }

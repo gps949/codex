@@ -21,6 +21,7 @@ pub enum WindowWarmupDebugKind {
     WarmupDisabled,
     PassBegin,
     PassNoCandidate,
+    PassBusy,
     PassFailed {
         error: String,
     },
@@ -73,7 +74,8 @@ impl WindowWarmupDebugKind {
             Self::TaskStopped => "task stopped".to_string(),
             Self::WarmupDisabled => "warmup disabled in config".to_string(),
             Self::PassBegin => "pass begin".to_string(),
-            Self::PassNoCandidate => "pass skipped: no idle standby".to_string(),
+            Self::PassNoCandidate => "pass skipped: no eligible standby".to_string(),
+            Self::PassBusy => "pass skipped: another process is warming this pool".to_string(),
             Self::PassFailed { error } => format!("pass failed error={error}"),
             Self::SkipNoAuth { profile_id } => {
                 format!("skip standby: no ChatGPT auth profile={profile_id}")

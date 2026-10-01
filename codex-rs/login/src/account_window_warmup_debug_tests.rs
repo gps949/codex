@@ -10,7 +10,7 @@ fn debug_kind_lines_are_single_line_and_include_profile() {
     assert_eq!(WindowWarmupDebugKind::TaskSpawned.line(), "task spawned");
     assert_eq!(
         WindowWarmupDebugKind::PassNoCandidate.line(),
-        "pass skipped: no idle standby"
+        "pass skipped: no eligible standby"
     );
     assert_eq!(
         WindowWarmupDebugKind::RequestStart {
