@@ -454,7 +454,7 @@ async fn account_pool_quota_only_updates_publish_stable_quota_without_identity_r
     assert_eq!(
         quota,
         serde_json::from_value::<AccountRateLimitsUpdatedNotification>(json!({
-            "rateLimits": {"limitId": "codex", "limitName": "Work · 1/1 ready", "planType": "pro",
+            "rateLimits": {"limitId": "codex", "limitName": "Work · Current quota", "planType": "pro",
                 "primary": {"usedPercent": 62, "windowDurationMins": 300, "resetsAt": reset_timestamp}}
         }))?
     );

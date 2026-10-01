@@ -499,11 +499,9 @@ async fn no_eligible_target_rejects_next_turn_without_sampling() -> anyhow::Resu
         }
         assert_eq!(errors, vec![Some(CodexErrorInfo::UsageLimitExceeded)]);
         assert_eq!(warnings.len(), expected_warning_count);
-        assert!(
-            warnings
-                .last()
-                .is_some_and(|warning| warning.contains("All configured Codex accounts"))
-        );
+        assert!(warnings.last().is_some_and(|warning| {
+            warning.contains("No configured Codex account is currently available")
+        }));
     }
 
     let requests = responses.requests();
