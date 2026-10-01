@@ -2,12 +2,14 @@
 //! Keep a thin smoke test here so core still exercises the catalog-driven path.
 //! Also cover success-path helpers that prevent false NOOP retries.
 
+use super::quota::*;
 use super::*;
 use crate::config::ConfigBuilder;
 use codex_features::Feature;
 use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::WindowWarmupOutcome;
+use codex_protocol::openai_models::ReasoningEffort;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
@@ -22,6 +24,9 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+
+#[path = "account_window_warmup_hardening_tests.rs"]
+mod hardening;
 
 const TEST_CHATGPT_ID_TOKEN: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjp7ImNoYXRncHRfdXNlcl9pZCI6InVzZXItMTIzNDUiLCJ1c2VyX2lkIjoidXNlci0xMjM0NSIsImNoYXRncHRfcGxhbl90eXBlIjoicHJvIiwiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC0xMjMifX0.c2ln";
 
@@ -113,7 +118,7 @@ fn merge_account_rate_limits_monotonic_keeps_started_primary() {
 }
 
 struct WarmupRequestFixture {
-    pool: AccountPool,
+    pool: Arc<AccountPool>,
     profile_id: AccountProfileId,
     auth_manager: Arc<AuthManager>,
     config: Config,
@@ -165,6 +170,26 @@ async fn warmup_request_fixture_with_sse(
     first_unusable_model_message: Option<&'static str>,
 ) -> anyhow::Result<WarmupRequestFixture> {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(serde_json::json!({
+                "plan_type": "plus",
+                "rate_limit": {
+                    "allowed": true,
+                    "limit_reached": false,
+                    "primary_window": {
+                        "used_percent": 0,
+                        "limit_window_seconds": 18000,
+                        "reset_after_seconds": 18000,
+                        "reset_at": Utc::now().timestamp() + 18000
+                    }
+                }
+            })),
+        )
+        .with_priority(10)
+        .mount(&server)
+        .await;
     let register_count = Arc::new(AtomicUsize::new(0));
     let register_hits = Arc::clone(&register_count);
     Mock::given(method("POST"))
@@ -226,7 +251,7 @@ async fn warmup_request_fixture_with_sse(
     let profile = codex_login::AccountProfileStore::new(codex_home.path().to_path_buf())
         .ensure_legacy_root_profile(Some("standby".to_string()), /*priority*/ 10)?;
     let profile_id = profile.id.clone();
-    let pool = AccountPool::new();
+    let pool = Arc::new(AccountPool::new());
     pool.register(profile, Arc::clone(&auth_manager))?;
     pool.update_rate_limits(
         &profile_id,
@@ -570,7 +595,8 @@ async fn completed_warmup_without_visible_usage_does_not_keep_spending_quota() -
                     "primary_window": {
                         "used_percent": 0,
                         "limit_window_seconds": 18000,
-                        "reset_after_seconds": 18000
+                        "reset_after_seconds": 18000,
+                    "reset_at": Utc::now().timestamp() + 18000
                     }
                 }
             })),
@@ -589,12 +615,7 @@ async fn completed_warmup_without_visible_usage_does_not_keep_spending_quota() -
         .expect("completed attempt must be shared");
     assert_eq!(
         observation,
-        WindowWarmupObservation::current(
-            WindowWarmupOutcome::Failed,
-            observation.attempted_at,
-            Some(observation.attempted_at + chrono::Duration::hours(5)),
-            /*consecutive_failures*/ 0,
-        )
+        WindowWarmupObservation::unconfirmed(observation.attempted_at)
     );
     run_warmup_pass(&fixture.pool, &fixture.config).await?;
     let requests = fixture.server.received_requests().await.expect("requests");
@@ -683,29 +704,52 @@ async fn warmup_retries_catalog_default_after_unusable_model_error() -> anyhow::
 #[tokio::test]
 async fn warmup_get_verifies_after_profile_becomes_active() -> anyhow::Result<()> {
     let fixture = warmup_request_fixture_idle_stream(/*enable_agent_identity*/ false).await?;
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reset_at = Utc::now().timestamp() + 17000;
     Mock::given(method("GET"))
         .and(path("/api/codex/usage"))
-        .respond_with(
+        .respond_with(move |_request: &wiremock::Request| {
+            let used_percent = if probes.fetch_add(1, Ordering::SeqCst) == 0 {
+                0
+            } else {
+                2
+            };
             ResponseTemplate::new(/*status*/ 200).set_body_json(serde_json::json!({
                 "plan_type": "plus",
                 "rate_limit": {
                     "allowed": true,
                     "limit_reached": false,
                     "primary_window": {
-                        "used_percent": 2,
+                        "used_percent": used_percent,
                         "limit_window_seconds": 18000,
                         "reset_after_seconds": 17000,
-                        "reset_at": 2_000_000_000
+                        "reset_at": reset_at
                     }
                 }
-            })),
-        )
+            }))
+        })
         .mount(&fixture.server)
         .await;
 
     // earliest-reset can activate the profile while the POST is in flight. By the
     // post-stream check the target is current; GET must still prove the 5h start.
-    let _lease = fixture.pool.lease().expect("activate warmed profile");
+    let pool = Arc::clone(&fixture.pool);
+    let profile_id = fixture.profile_id.clone();
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(move |_request: &wiremock::Request| {
+            pool.activate(&profile_id)
+                .expect("activate warmed profile during POST");
+            ResponseTemplate::new(/*status*/ 200).set_body_raw(
+                sse(vec![
+                    ev_response_created("resp-warmup"),
+                    ev_completed("resp-warmup"),
+                ]),
+                "text/event-stream",
+            )
+        })
+        .mount(&fixture.server)
+        .await;
 
     warm_profile(
         &fixture.pool,
@@ -743,23 +787,30 @@ async fn warmup_get_verifies_after_tool_call_then_completed() -> anyhow::Result<
         /*first_unusable_model_message*/ None,
     )
     .await?;
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reset_at = Utc::now().timestamp() + 17000;
     Mock::given(method("GET"))
         .and(path("/api/codex/usage"))
-        .respond_with(
+        .respond_with(move |_request: &wiremock::Request| {
+            let used_percent = if probes.fetch_add(1, Ordering::SeqCst) == 0 {
+                0
+            } else {
+                2
+            };
             ResponseTemplate::new(/*status*/ 200).set_body_json(serde_json::json!({
                 "plan_type": "plus",
                 "rate_limit": {
                     "allowed": true,
                     "limit_reached": false,
                     "primary_window": {
-                        "used_percent": 2,
+                        "used_percent": used_percent,
                         "limit_window_seconds": 18000,
                         "reset_after_seconds": 17000,
-                        "reset_at": 2_000_000_000
+                        "reset_at": reset_at
                     }
                 }
-            })),
-        )
+            }))
+        })
         .mount(&fixture.server)
         .await;
 
@@ -798,6 +849,7 @@ async fn warmup_refreshes_expired_quota_before_generating() -> anyhow::Result<()
             observed_at: Some(Utc::now() - chrono::Duration::hours(5)),
         },
     )?;
+    let reset_at = Utc::now().timestamp() + 17000;
     Mock::given(method("GET"))
         .and(path("/api/codex/usage"))
         .respond_with(
@@ -810,7 +862,7 @@ async fn warmup_refreshes_expired_quota_before_generating() -> anyhow::Result<()
                         "used_percent": 2,
                         "limit_window_seconds": 18000,
                         "reset_after_seconds": 17000,
-                        "reset_at": 2_000_000_000
+                        "reset_at": reset_at
                     }
                 }
             })),
@@ -830,7 +882,7 @@ async fn warmup_refreshes_expired_quota_before_generating() -> anyhow::Result<()
         pool.snapshots()[0].rate_limits.primary,
         Some(AccountRateLimitWindow {
             used_percent: 2.0,
-            resets_at: DateTime::<Utc>::from_timestamp(2_000_000_000, 0),
+            resets_at: DateTime::<Utc>::from_timestamp(reset_at, 0),
             window_minutes: Some(300),
         })
     );
@@ -894,7 +946,7 @@ async fn warmup_pass_shares_failed_attempts_and_reaches_next_standby() -> anyhow
         })
         .map(|profile| profile.profile_id)
         .collect();
-    assert_eq!(attempted, profile_ids[1..].to_vec());
+    assert_eq!(attempted, vec![profile_ids[1].clone()]);
     assert_eq!(state.active_profile_id, selection_before.active_profile_id);
     assert_eq!(
         state.selection_revision,
