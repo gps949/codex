@@ -52,6 +52,7 @@ const DESKTOP_UPDATE_URL: &str =
 /// warning instead of failing doctor outright; update freshness is useful
 /// support context but should not mask more direct install/config failures.
 pub(super) async fn updates_check(config: &Config) -> DoctorCheck {
+    let current_version = env!("CARGO_PKG_VERSION");
     let current_exe = std::env::current_exe().ok();
     let install_context = doctor_install_context(current_exe.as_deref());
     let mut details = vec![
@@ -59,7 +60,10 @@ pub(super) async fn updates_check(config: &Config) -> DoctorCheck {
             "check for update on startup: {}",
             config.check_for_update_on_startup
         ),
-        format!("update action: {}", update_action_label(&install_context)),
+        format!(
+            "update action: {}",
+            update_action_label(&install_context, current_version)
+        ),
     ];
     let version_file = config.codex_home.join(VERSION_FILE_NAME);
     push_cached_version_details(&mut details, &version_file);
@@ -67,7 +71,7 @@ pub(super) async fn updates_check(config: &Config) -> DoctorCheck {
     let mut status = CheckStatus::Ok;
     let summary = "update configuration is locally consistent".to_string();
 
-    if doctor_managed_by_npm(current_exe.as_deref()) {
+    if !is_fork_version(current_version) && doctor_managed_by_npm(current_exe.as_deref()) {
         details
             .push("npm update target: not inspected (PATH helpers are not executed)".to_string());
     }
@@ -76,14 +80,13 @@ pub(super) async fn updates_check(config: &Config) -> DoctorCheck {
         ClientRouteClass::Other,
     );
 
-    match fetch_latest_version(&client, &install_context).await {
+    match fetch_latest_version(&client, &install_context, current_version).await {
         Ok(latest_version) => {
             details.push(format!("latest version: {latest_version}"));
-            if is_newer(&latest_version, env!("CARGO_PKG_VERSION")) == Some(true) {
-                details.push("latest version status: newer version is available".to_string());
-            } else {
-                details.push("latest version status: current version is not older".to_string());
-            }
+            let (comparison_status, detail) =
+                latest_version_status(&latest_version, current_version);
+            status = status.max(comparison_status);
+            details.push(detail.to_string());
         }
         Err(err) => {
             status = status.max(CheckStatus::Warning);
@@ -388,7 +391,14 @@ fn push_cached_version_details(details: &mut Vec<String>, version_file: &Path) {
     }
 }
 
-fn update_action_label(context: &InstallContext) -> &'static str {
+fn update_action_label(context: &InstallContext, current_version: &str) -> &'static str {
+    if is_fork_version(current_version) {
+        return if cfg!(target_os = "windows") {
+            "fork release assets: https://github.com/gps949/codex/releases"
+        } else {
+            "fork installer: https://raw.githubusercontent.com/gps949/codex/feature/native-multi-account/install.sh"
+        };
+    }
     match &context.method {
         InstallMethod::Npm => "npm install -g @openai/codex",
         InstallMethod::Bun => "bun install -g @openai/codex",
@@ -400,18 +410,35 @@ fn update_action_label(context: &InstallContext) -> &'static str {
     }
 }
 
-async fn fetch_latest_version(
-    client: &RouteAwareClientPool,
-    context: &InstallContext,
-) -> Result<String, String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LatestVersionSource {
+    GithubRelease,
+    HomebrewCask,
+}
+
+fn latest_version_source(context: &InstallContext, current_version: &str) -> LatestVersionSource {
+    if is_fork_version(current_version) {
+        return LatestVersionSource::GithubRelease;
+    }
     match &context.method {
-        InstallMethod::Brew => fetch_homebrew_cask_version(client).await,
+        InstallMethod::Brew => LatestVersionSource::HomebrewCask,
         InstallMethod::Npm
         | InstallMethod::Bun
         | InstallMethod::VitePlus
         | InstallMethod::Pnpm
         | InstallMethod::Standalone { .. }
-        | InstallMethod::Other => fetch_latest_github_release_version(client).await,
+        | InstallMethod::Other => LatestVersionSource::GithubRelease,
+    }
+}
+
+async fn fetch_latest_version(
+    client: &RouteAwareClientPool,
+    context: &InstallContext,
+    current_version: &str,
+) -> Result<String, String> {
+    match latest_version_source(context, current_version) {
+        LatestVersionSource::HomebrewCask => fetch_homebrew_cask_version(client).await,
+        LatestVersionSource::GithubRelease => fetch_latest_github_release_version(client).await,
     }
 }
 
@@ -478,12 +505,53 @@ fn is_newer(latest: &str, current: &str) -> Option<bool> {
     }
 }
 
-fn parse_version(value: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = value.trim().split('.');
-    let major = parts.next()?.parse::<u64>().ok()?;
-    let minor = parts.next()?.parse::<u64>().ok()?;
-    let patch = parts.next()?.parse::<u64>().ok()?;
-    Some((major, minor, patch))
+fn latest_version_status(latest: &str, current: &str) -> (CheckStatus, &'static str) {
+    match is_newer(latest, current) {
+        Some(true) => (
+            CheckStatus::Ok,
+            "latest version status: newer version is available",
+        ),
+        Some(false) => (
+            CheckStatus::Ok,
+            "latest version status: current version is not older",
+        ),
+        None => (
+            CheckStatus::Warning,
+            "latest version status: unable to compare latest and current versions",
+        ),
+    }
+}
+
+fn is_fork_version(value: &str) -> bool {
+    parse_version(value).is_some_and(|(_, _, _, iteration)| iteration > 0)
+}
+
+fn parse_version(value: &str) -> Option<(u64, u64, u64, u64)> {
+    let parse_number = |number: &str| {
+        if number.is_empty()
+            || (number.len() > 1 && number.starts_with('0'))
+            || !number.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        number.parse::<u64>().ok()
+    };
+    let value = value.trim();
+    let (core, iteration) = match value.split_once(['-', '+']) {
+        Some((core, suffix)) => (
+            core,
+            parse_number(suffix.strip_prefix("ma.")?).filter(|iteration| *iteration > 0)?,
+        ),
+        None => (value, 0),
+    };
+    let mut parts = core.split('.');
+    let major = parse_number(parts.next()?)?;
+    let minor = parse_number(parts.next()?)?;
+    let patch = parse_number(parts.next()?)?;
+    parts
+        .next()
+        .is_none()
+        .then_some((major, minor, patch, iteration))
 }
 
 #[derive(Deserialize)]
@@ -686,26 +754,192 @@ mod tests {
     }
 
     #[test]
+    fn fork_versions_compare_core_then_positive_iterations() {
+        for (latest, current, expected) in [
+            ("0.159.2-ma.6", "0.159.2+ma.5", Some(true)),
+            ("0.159.2+ma.10", "0.159.2-ma.9", Some(true)),
+            ("0.159.2-ma.5", "0.159.2+ma.5", Some(false)),
+            ("0.159.2-ma.4", "0.159.2+ma.5", Some(false)),
+            ("0.160.0-ma.1", "0.159.2+ma.99", Some(true)),
+            ("0.159.1-ma.99", "0.159.2+ma.1", Some(false)),
+            ("0.159.2-ma.1", "0.159.2", Some(true)),
+            ("0.159.2", "0.159.2+ma.1", Some(false)),
+            (" 0.159.2-ma.6 \n", "0.159.2+ma.5", Some(true)),
+        ] {
+            assert_eq!(is_newer(latest, current), expected, "{latest} vs {current}");
+        }
+    }
+
+    #[test]
+    fn malformed_versions_cannot_be_compared() {
+        for version in [
+            "unknown",
+            "0.159",
+            "0.159.2.1",
+            "+0.159.2",
+            "0.+159.2",
+            "0.0159.2",
+            "0.159.2-beta.1",
+            "0.159.2+dev",
+            "0.159.2+ma.0",
+            "0.159.2-ma.0",
+            "0.159.2+ma.",
+            "0.159.2+ma.-1",
+            "0.159.2+ma.01",
+            "0.159.2+ma.1.2",
+            "0.159.2+ma.1-extra",
+            "0.159.2-ma.1+dev",
+            "0.159.2+ma.18446744073709551616",
+        ] {
+            assert_eq!(is_newer(version, "0.159.2"), None, "{version}");
+            assert_eq!(is_newer("0.159.3", version), None, "{version}");
+        }
+    }
+
+    #[test]
+    fn unknown_version_comparisons_are_warnings() {
+        for (latest, current) in [
+            ("unknown", "0.159.2+ma.5"),
+            ("0.159.2-ma.6", "unknown"),
+            ("0.159.2.1", "0.159.2"),
+        ] {
+            assert_eq!(
+                latest_version_status(latest, current),
+                (
+                    CheckStatus::Warning,
+                    "latest version status: unable to compare latest and current versions",
+                ),
+            );
+        }
+        assert_eq!(
+            latest_version_status("0.159.2-ma.6", "0.159.2+ma.5"),
+            (
+                CheckStatus::Ok,
+                "latest version status: newer version is available",
+            ),
+        );
+        assert_eq!(
+            latest_version_status("0.159.2-ma.5", "0.159.2+ma.5"),
+            (
+                CheckStatus::Ok,
+                "latest version status: current version is not older",
+            ),
+        );
+    }
+
+    #[test]
+    fn fork_updates_keep_the_fork_installer_and_release_source() {
+        let expected_action = if cfg!(target_os = "windows") {
+            "fork release assets: https://github.com/gps949/codex/releases"
+        } else {
+            "fork installer: https://raw.githubusercontent.com/gps949/codex/feature/native-multi-account/install.sh"
+        };
+        for version in ["0.159.2+ma.5", "0.159.2-ma.5"] {
+            for method in [
+                InstallMethod::Npm,
+                InstallMethod::Bun,
+                InstallMethod::VitePlus,
+                InstallMethod::Pnpm,
+                InstallMethod::Brew,
+                InstallMethod::Other,
+            ] {
+                let context = InstallContext {
+                    method,
+                    package_layout: None,
+                };
+                assert_eq!(
+                    (
+                        update_action_label(&context, version),
+                        latest_version_source(&context, version),
+                    ),
+                    (expected_action, LatestVersionSource::GithubRelease),
+                    "{version}, {:?}",
+                    context.method,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plain_versions_keep_install_channel_version_sources() {
+        for (method, expected) in [
+            (InstallMethod::Brew, LatestVersionSource::HomebrewCask),
+            (InstallMethod::Npm, LatestVersionSource::GithubRelease),
+        ] {
+            assert_eq!(
+                latest_version_source(
+                    &InstallContext {
+                        method,
+                        package_layout: None,
+                    },
+                    "1.2.3",
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn fork_update_details_show_unknown_version_warning() {
+        let context = InstallContext {
+            method: InstallMethod::Brew,
+            package_layout: None,
+        };
+        let (status, detail) = latest_version_status("unknown", "0.159.2+ma.5");
+        let rendered = format!(
+            "{status:?}\nupdate action: {}\n{detail}",
+            update_action_label(&context, "0.159.2+ma.5"),
+        );
+        #[cfg(not(target_os = "windows"))]
+        insta::assert_snapshot!(
+            rendered,
+            @r"
+        Warning
+        update action: fork installer: https://raw.githubusercontent.com/gps949/codex/feature/native-multi-account/install.sh
+        latest version status: unable to compare latest and current versions
+        "
+        );
+        #[cfg(target_os = "windows")]
+        insta::assert_snapshot!(
+            rendered,
+            @r"
+        Warning
+        update action: fork release assets: https://github.com/gps949/codex/releases
+        latest version status: unable to compare latest and current versions
+        "
+        );
+    }
+
+    #[test]
     fn update_action_labels_install_contexts() {
         assert_eq!(
-            update_action_label(&InstallContext {
-                method: InstallMethod::Npm,
-                package_layout: None,
-            }),
+            update_action_label(
+                &InstallContext {
+                    method: InstallMethod::Npm,
+                    package_layout: None,
+                },
+                "1.2.3",
+            ),
             "npm install -g @openai/codex"
         );
         assert_eq!(
-            update_action_label(&InstallContext {
-                method: InstallMethod::Pnpm,
-                package_layout: None,
-            }),
+            update_action_label(
+                &InstallContext {
+                    method: InstallMethod::Pnpm,
+                    package_layout: None,
+                },
+                "1.2.3",
+            ),
             "pnpm add -g @openai/codex"
         );
         assert_eq!(
-            update_action_label(&InstallContext {
-                method: InstallMethod::Other,
-                package_layout: None,
-            }),
+            update_action_label(
+                &InstallContext {
+                    method: InstallMethod::Other,
+                    package_layout: None,
+                },
+                "1.2.3",
+            ),
             "manual or unknown"
         );
     }
