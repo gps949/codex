@@ -322,3 +322,68 @@ fn late_observation_of_an_older_window_preserves_the_current_window() {
         }
     );
 }
+
+#[test]
+fn fresh_timed_observation_replaces_stale_untimed_usage_and_window_shape() {
+    let now = Utc::now();
+    let existing = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 3.0,
+            resets_at: None,
+            window_minutes: Some(300),
+        }),
+        secondary: None,
+        observed_at: Some(now - Duration::minutes(31)),
+    };
+    let idle = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 0.0,
+            resets_at: Some(now + Duration::hours(5)),
+            window_minutes: Some(300),
+        }),
+        secondary: None,
+        observed_at: Some(now),
+    };
+    assert_eq!(merge_rate_limits_monotonic(&existing, idle.clone()), idle);
+    let changed = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 1.0,
+            resets_at: Some(now + Duration::hours(5)),
+            window_minutes: Some(60),
+        }),
+        observed_at: Some(now + Duration::seconds(1)),
+        ..idle.clone()
+    };
+    assert_eq!(merge_rate_limits_monotonic(&idle, changed.clone()), changed);
+}
+
+#[test]
+fn positive_primary_usage_can_confirm_a_tentative_idle_reset_without_losing_weekly_usage() {
+    let now = Utc::now();
+    let idle = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 0.0,
+            resets_at: Some(now + Duration::hours(5)),
+            window_minutes: Some(300),
+        }),
+        secondary: Some(AccountRateLimitWindow {
+            used_percent: 8.0,
+            resets_at: Some(now + Duration::days(4)),
+            window_minutes: Some(10080),
+        }),
+        observed_at: Some(now - Duration::seconds(2)),
+    };
+    let confirmed = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 1.0,
+            resets_at: Some(now + Duration::hours(5) - Duration::seconds(1)),
+            window_minutes: Some(300),
+        }),
+        secondary: idle.secondary.clone(),
+        observed_at: Some(now),
+    };
+    assert_eq!(
+        merge_rate_limits_monotonic(&idle, confirmed.clone()),
+        confirmed
+    );
+}

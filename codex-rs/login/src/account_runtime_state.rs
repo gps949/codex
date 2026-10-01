@@ -17,6 +17,8 @@ use crate::WindowWarmupObservation;
 
 #[path = "account_runtime_entitlement.rs"]
 mod entitlement;
+#[path = "account_runtime_warmup_claim.rs"]
+mod warmup_claim;
 
 const ACCOUNT_RUNTIME_STATE_VERSION: u32 = 1;
 const ACCOUNT_RUNTIME_STATE_FILE: &str = "account-runtime-state.json";
