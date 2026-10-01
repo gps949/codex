@@ -1,0 +1,18 @@
+---
+source: tui/src/chatwidget/account_popups_tests.rs
+expression: "format!(\"Completed, quota still zero:\\n{succeeded}\\n\\nFailed:\\n{failure}\\n\\nDeferred, no counted failure:\\n{deferred}\\n\\nIn progress:\\n{pending}\\n\\nCompleted, awaiting quota evidence:\\n{unconfirmed}\")"
+---
+Completed, quota still zero:
+ready · 100% 5h left, start unconfirmed · priority 10 · warmup done; start unconfirmed
+
+Failed:
+ready · 100% 5h left, start unconfirmed · priority 10 · warmup failed; retry in 0:01
+
+Deferred, no counted failure:
+ready · 100% 5h left, start unconfirmed · priority 10 · warmup deferred; check in 0:01
+
+In progress:
+ready · 100% 5h left, start unconfirmed · priority 10 · warmup in progress
+
+Completed, awaiting quota evidence:
+ready · 100% 5h left, start unconfirmed · priority 10 · warmup sent; start unconfirmed

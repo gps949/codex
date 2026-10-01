@@ -134,7 +134,7 @@ async fn pool_quota_observations_keep_identity_and_only_activation_requires_refr
 }
 
 #[test]
-fn reset_countdown_uses_compact_colon_units() {
+fn reset_countdown_keeps_hours_compact_and_labels_days() {
     assert_eq!(format_reset_countdown(/*remaining_seconds*/ 1), "0:01");
     assert_eq!(format_reset_countdown(/*remaining_seconds*/ 60), "0:01");
     assert_eq!(
@@ -145,7 +145,7 @@ fn reset_countdown_uses_compact_colon_units() {
         format_reset_countdown(
             /*remaining_seconds*/ 3 * 24 * 60 * 60 + 21 * 60 * 60 + 2 * 60
         ),
-        "3:21:02"
+        "3d 21h 2m"
     );
 }
 
@@ -178,7 +178,7 @@ fn rate_limit_descriptions_color_remaining_percent_and_countdown_by_window() {
 }
 
 #[test]
-fn zero_percent_five_hour_window_marks_not_started() {
+fn zero_percent_five_hour_window_does_not_claim_whether_it_started() {
     let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
     let idle = AccountPoolRateLimitWindow {
         used_percent: 0.0,
@@ -191,7 +191,7 @@ fn zero_percent_five_hour_window_marks_not_started() {
             "100%".cyan(),
             " 5h left".dim(),
             ", ".dim(),
-            "not started".cyan(),
+            "start unconfirmed".cyan(),
         ]
     );
     // Weekly windows can legitimately sit at 0% with a real countdown.
@@ -269,7 +269,7 @@ fn account_display_name_prefers_label_over_email_and_profile_id() {
 }
 
 #[test]
-fn idle_failed_warmup_is_hidden_in_account_description() {
+fn idle_warmup_description_distinguishes_unconfirmed_completion_from_failure() {
     let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
     let account = AccountPoolAccount {
         profile_id: "backup".to_string(),
@@ -289,31 +289,54 @@ fn idle_failed_warmup_is_hidden_in_account_description() {
         },
         window_warmup: Some(AccountPoolWindowWarmup {
             outcome: AccountPoolWindowWarmupOutcome::Succeeded,
+            phase: None,
+            consecutive_failures: None,
             attempted_at: now.timestamp(),
             retry_after: Some(now.timestamp() + 300),
         }),
     };
     let description = account_description(&account, now);
-    assert!(
-        description
-            .iter()
-            .all(|span| !span.content.contains("5h warmed")),
-        "{description:?}"
-    );
+    let succeeded = description
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
 
     let mut failed = account;
     failed.window_warmup = Some(AccountPoolWindowWarmup {
         outcome: AccountPoolWindowWarmupOutcome::Failed,
+        phase: None,
+        consecutive_failures: None,
         attempted_at: now.timestamp(),
         retry_after: Some(now.timestamp() + 60),
     });
     let description = account_description(&failed, now);
-    assert!(
-        description
-            .iter()
-            .all(|span| !span.content.contains("warmup failed")),
-        "{description:?}"
-    );
+    let failure = description
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    failed.window_warmup.as_mut().unwrap().consecutive_failures = Some(0);
+    let deferred = account_description(&failed, now)
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    failed.window_warmup.as_mut().unwrap().phase = Some(AccountPoolWindowWarmupPhase::InProgress);
+    let pending = account_description(&failed, now)
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    failed.window_warmup.as_mut().unwrap().phase = Some(AccountPoolWindowWarmupPhase::Unconfirmed);
+    let unconfirmed = account_description(&failed, now)
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    insta::assert_snapshot!(format!(
+        "Completed, quota still zero:\n{succeeded}\n\nFailed:\n{failure}\n\nDeferred, no counted failure:\n{deferred}\n\nIn progress:\n{pending}\n\nCompleted, awaiting quota evidence:\n{unconfirmed}"
+    ));
+    assert!(succeeded.contains("warmup done; start unconfirmed"));
+    assert!(failure.contains("warmup failed; retry in 0:01"));
+    assert!(deferred.contains("warmup deferred; check in 0:01"));
+    assert!(pending.contains("warmup in progress"));
+    assert!(unconfirmed.contains("warmup sent; start unconfirmed"));
 }
 
 #[test]
@@ -337,6 +360,8 @@ fn started_five_hour_window_hides_warmup_failure() {
         },
         window_warmup: Some(AccountPoolWindowWarmup {
             outcome: AccountPoolWindowWarmupOutcome::Failed,
+            phase: None,
+            consecutive_failures: None,
             attempted_at: now.timestamp(),
             retry_after: Some(now.timestamp() + 60),
         }),
@@ -371,6 +396,8 @@ fn active_account_hides_leftover_warmup_failure() {
         },
         window_warmup: Some(AccountPoolWindowWarmup {
             outcome: AccountPoolWindowWarmupOutcome::Failed,
+            phase: None,
+            consecutive_failures: None,
             attempted_at: now.timestamp(),
             retry_after: Some(now.timestamp() + 60),
         }),

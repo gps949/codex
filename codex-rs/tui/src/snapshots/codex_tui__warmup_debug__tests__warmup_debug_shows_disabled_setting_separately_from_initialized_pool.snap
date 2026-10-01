@@ -1,0 +1,25 @@
+---
+source: tui/src/warmup_debug_tests.rs
+expression: rendered
+---
+/warmup
+
+Config:
+  window_warmup = false
+  pool_enabled = true
+  task_running = false
+  pass_requested = false
+  interval = 300s
+  settle = 30s
+  rotation_strategy = fillFirst
+  session_model = <unset>
+
+Accounts:
+  <none>
+
+Events (this process; oldest first):
+  <none>
+  Automatic warmup is off. Enable it before requesting a pass.
+
+0% does not confirm a 5h start. Weekly resets are separate. Persisted attempts survive restarts.
+/warmup now checks one standby; it respects off/backoff and may use quota.

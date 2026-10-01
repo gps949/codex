@@ -534,6 +534,7 @@ pub(crate) async fn run_account_pool(
         let warmup = snapshot
             .window_warmup
             .as_ref()
+            .filter(|_| !snapshot.is_active)
             .and_then(|observation| {
                 codex_login::visible_window_warmup_status(
                     observation,

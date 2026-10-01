@@ -25,14 +25,14 @@ pub fn format_exhausted_reset_unix(unix: i64) -> String {
     }
 }
 
-/// Compact remaining-time countdown: `H:MM`, or `D:HH:MM` when ≥ 24h.
+/// Compact remaining-time countdown: `H:MM`, with explicit units when ≥ 24h.
 pub fn format_reset_countdown(remaining_seconds: u64) -> String {
     let total_minutes = remaining_seconds.div_ceil(60).max(1);
     let days = total_minutes / (24 * 60);
     let hours = (total_minutes / 60) % 24;
     let minutes = total_minutes % 60;
     if days > 0 {
-        format!("{days}:{hours:02}:{minutes:02}")
+        format!("{days}d {hours}h {minutes}m")
     } else {
         format!("{hours}:{minutes:02}")
     }
@@ -40,15 +40,16 @@ pub fn format_reset_countdown(remaining_seconds: u64) -> String {
 
 /// Formats the primary (5h) window reset line.
 ///
-/// Idle accounts at ≤0% used have not started their window yet, so we avoid showing a
-/// fake ~5h countdown and instead say the window is not started.
+/// Zero observed usage cannot confirm whether a tiny request started the window.
+/// The backend can return a full-window reset even for idle accounts, so do not
+/// present that reset as evidence of a ticking clock.
 pub fn format_primary_window_reset(
     used_percent: f64,
     reset_at: Option<i64>,
     now: DateTime<Utc>,
 ) -> String {
     if used_percent <= 0.0 {
-        return "not started".to_string();
+        return "start unconfirmed".to_string();
     }
 
     let Some(reset_at) = reset_at else {
@@ -73,29 +74,79 @@ pub fn format_relative_reset(reset: DateTime<Utc>, now: DateTime<Utc>) -> String
 
 /// Compact status line for the latest standby 5h-window warmup observation.
 ///
-/// Kept for leftover persisted outcomes. User-facing surfaces use
-/// [`visible_window_warmup_status`], which does not show these labels.
+/// Attempt phases distinguish completed requests from observed window starts.
+/// Observations are bounded to a primary window so old errors do not remain forever.
 pub fn format_window_warmup_status(
     observation: &crate::account_pool::WindowWarmupObservation,
-    _now: DateTime<Utc>,
+    now: DateTime<Utc>,
 ) -> String {
     use crate::account_pool::WindowWarmupOutcome;
+    use crate::account_pool::WindowWarmupPhase;
+
+    let age = now.signed_duration_since(observation.attempted_at);
+    if age < -chrono::Duration::minutes(5) || age >= chrono::Duration::hours(5) {
+        return "warmup observation expired".to_string();
+    }
+    let phase = observation.phase.or_else(|| {
+        (observation.outcome == WindowWarmupOutcome::Failed
+            && observation.consecutive_failures == 0
+            && observation.retry_after.is_some_and(|retry_after| {
+                retry_after.signed_duration_since(observation.attempted_at)
+                    == chrono::Duration::hours(5)
+            }))
+        .then_some(WindowWarmupPhase::Unconfirmed)
+    });
+    match phase {
+        Some(WindowWarmupPhase::InProgress) if age < chrono::Duration::minutes(3) => {
+            return "warmup in progress".to_string();
+        }
+        Some(WindowWarmupPhase::InProgress) => {
+            return "warmup attempt; start unconfirmed".to_string();
+        }
+        Some(WindowWarmupPhase::Unconfirmed) => {
+            return "warmup sent; start unconfirmed".to_string();
+        }
+        None => {}
+    }
     match observation.outcome {
-        WindowWarmupOutcome::Succeeded => "5h warmed".to_string(),
-        WindowWarmupOutcome::SkippedNoAuth => "warmup skipped (no auth)".to_string(),
-        WindowWarmupOutcome::Failed => "warmup failed".to_string(),
+        WindowWarmupOutcome::Succeeded => "5h confirmed".to_string(),
+        WindowWarmupOutcome::SkippedNoAuth => "warmup needs login".to_string(),
+        WindowWarmupOutcome::Failed => match observation.retry_after {
+            Some(retry_after) if retry_after > now && observation.consecutive_failures == 0 => {
+                format!(
+                    "warmup deferred; check {}",
+                    format_relative_reset(retry_after, now)
+                )
+            }
+            Some(retry_after) if retry_after > now => format!(
+                "warmup failed; retry {}",
+                format_relative_reset(retry_after, now)
+            ),
+            Some(_) | None => "warmup retry ready".to_string(),
+        },
     }
 }
 
-/// User-facing warmup copy. The 5h used% line is the success signal. A failed
-/// attempt is treated as if nothing happened, so leftover Failed/Skipped labels
-/// stay off the picker and CLI.
+/// Shows recent attempt status without confusing request completion with quota evidence.
+/// Positive primary usage suppresses obsolete failures. Zero usage stays unconfirmed,
+/// including when an earlier successful observation may have become stale.
 pub fn visible_window_warmup_status(
-    _observation: &crate::account_pool::WindowWarmupObservation,
-    _primary_used_percent: Option<f64>,
-    _now: DateTime<Utc>,
+    observation: &crate::account_pool::WindowWarmupObservation,
+    primary_used_percent: Option<f64>,
+    now: DateTime<Utc>,
 ) -> Option<String> {
-    None
+    let age = now.signed_duration_since(observation.attempted_at);
+    if age < -chrono::Duration::minutes(5) || age >= chrono::Duration::hours(5) {
+        return None;
+    }
+    if primary_used_percent.is_some_and(|used| used > 0.0) {
+        return (observation.outcome == crate::WindowWarmupOutcome::Succeeded)
+            .then(|| "5h confirmed".to_string());
+    }
+    if observation.outcome == crate::WindowWarmupOutcome::Succeeded {
+        return Some("warmup done; start unconfirmed".to_string());
+    }
+    Some(format_window_warmup_status(observation, now))
 }
 
 pub fn format_plan_type_label(plan_type: Option<&str>) -> String {
@@ -120,11 +171,11 @@ mod tests {
     }
 
     #[test]
-    fn format_primary_window_reset_marks_idle_zero_percent() {
+    fn format_primary_window_reset_does_not_infer_a_start_from_zero_usage() {
         let now = Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap();
         assert_eq!(
             format_primary_window_reset(0.0, Some(now.timestamp() + 5 * 3600), now),
-            "not started"
+            "start unconfirmed"
         );
         assert_eq!(
             format_primary_window_reset(38.0, Some(now.timestamp() + 3 * 3600 + 46 * 60), now),
@@ -134,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn format_reset_countdown_uses_colon_style() {
+    fn format_reset_countdown_keeps_hours_compact_and_labels_days() {
         assert_eq!(format_reset_countdown(/*remaining_seconds*/ 1), "0:01");
         assert_eq!(
             format_reset_countdown(/*remaining_seconds*/ 3 * 60 * 60 + 46 * 60),
@@ -144,7 +195,7 @@ mod tests {
             format_reset_countdown(
                 /*remaining_seconds*/ 3 * 24 * 60 * 60 + 21 * 60 * 60 + 2 * 60
             ),
-            "3:21:02"
+            "3d 21h 2m"
         );
     }
 
@@ -157,7 +208,7 @@ mod tests {
             None,
             /*consecutive_failures*/ 0,
         );
-        assert_eq!(format_window_warmup_status(&succeeded, now), "5h warmed");
+        assert_eq!(format_window_warmup_status(&succeeded, now), "5h confirmed");
 
         let failed = crate::account_pool::WindowWarmupObservation::current(
             crate::account_pool::WindowWarmupOutcome::Failed,
@@ -165,11 +216,14 @@ mod tests {
             Some(now + chrono::Duration::hours(6)),
             /*consecutive_failures*/ 5,
         );
-        assert_eq!(format_window_warmup_status(&failed, now), "warmup failed");
+        assert_eq!(
+            format_window_warmup_status(&failed, now),
+            "warmup failed; retry in 6:00"
+        );
     }
 
     #[test]
-    fn visible_window_warmup_status_hides_leftover_failures() {
+    fn visible_window_warmup_status_distinguishes_completion_from_quota_evidence() {
         let now = Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap();
         let succeeded = crate::account_pool::WindowWarmupObservation::current(
             crate::account_pool::WindowWarmupOutcome::Succeeded,
@@ -179,11 +233,11 @@ mod tests {
         );
         assert_eq!(
             visible_window_warmup_status(&succeeded, /*primary_used_percent*/ Some(0.0), now),
-            None
+            Some("warmup done; start unconfirmed".to_string())
         );
         assert_eq!(
             visible_window_warmup_status(&succeeded, /*primary_used_percent*/ Some(4.0), now),
-            None
+            Some("5h confirmed".to_string())
         );
 
         let failed = crate::account_pool::WindowWarmupObservation::current(
@@ -198,7 +252,126 @@ mod tests {
         );
         assert_eq!(
             visible_window_warmup_status(&failed, /*primary_used_percent*/ Some(0.0), now),
-            None
+            Some("warmup failed; retry in 0:02".to_string())
+        );
+    }
+
+    #[test]
+    fn phase_status_expires_and_interrupted_attempts_stop_showing_progress() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap();
+        let mut pending = crate::WindowWarmupObservation::current(
+            crate::WindowWarmupOutcome::Failed,
+            now,
+            Some(now + chrono::Duration::hours(5)),
+            /*consecutive_failures*/ 0,
+        );
+        pending.phase = Some(crate::WindowWarmupPhase::InProgress);
+        assert_eq!(
+            (
+                visible_window_warmup_status(&pending, Some(0.0), now),
+                visible_window_warmup_status(
+                    &pending,
+                    Some(0.0),
+                    now + chrono::Duration::minutes(4)
+                ),
+                visible_window_warmup_status(&pending, Some(0.0), now + chrono::Duration::hours(5)),
+            ),
+            (
+                Some("warmup in progress".to_string()),
+                Some("warmup attempt; start unconfirmed".to_string()),
+                None,
+            )
+        );
+        pending.phase = Some(crate::WindowWarmupPhase::Unconfirmed);
+        assert_eq!(
+            visible_window_warmup_status(&pending, Some(0.0), now),
+            Some("warmup sent; start unconfirmed".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_unconfirmed_is_distinguished_from_a_real_failure_with_the_same_retry() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap();
+        let legacy = crate::WindowWarmupObservation::current(
+            crate::WindowWarmupOutcome::Failed,
+            now,
+            Some(now + chrono::Duration::hours(5)),
+            /*consecutive_failures*/ 0,
+        );
+        let failed = crate::WindowWarmupObservation {
+            consecutive_failures: 1,
+            ..legacy
+        };
+        assert_eq!(
+            (
+                visible_window_warmup_status(&legacy, Some(0.0), now),
+                visible_window_warmup_status(&failed, Some(0.0), now),
+                visible_window_warmup_status(&failed, Some(0.0), now + chrono::Duration::hours(5)),
+            ),
+            (
+                Some("warmup sent; start unconfirmed".to_string()),
+                Some("warmup failed; retry in 5:00".to_string()),
+                None,
+            )
+        );
+    }
+
+    #[test]
+    fn expired_backoff_is_retry_ready_and_future_observations_are_hidden() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap();
+        let failed = crate::WindowWarmupObservation::current(
+            crate::WindowWarmupOutcome::Failed,
+            now - chrono::Duration::minutes(3),
+            Some(now - chrono::Duration::minutes(1)),
+            /*consecutive_failures*/ 1,
+        );
+        let future = crate::WindowWarmupObservation {
+            attempted_at: now + chrono::Duration::hours(1),
+            ..failed
+        };
+        assert_eq!(
+            (
+                visible_window_warmup_status(&failed, None, now),
+                visible_window_warmup_status(&future, None, now),
+            ),
+            (Some("warmup retry ready".to_string()), None)
+        );
+    }
+
+    #[test]
+    fn zero_failure_deferral_waits_without_claiming_failure_or_confirmation() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 17, 12, 0, 0).unwrap();
+        let deferred = crate::WindowWarmupObservation::current(
+            crate::WindowWarmupOutcome::Failed,
+            now,
+            Some(now + chrono::Duration::minutes(2)),
+            /*consecutive_failures*/ 0,
+        );
+        assert_eq!(
+            (
+                visible_window_warmup_status(
+                    &deferred,
+                    /*primary_used_percent*/ Some(0.0),
+                    now
+                ),
+                visible_window_warmup_status(&deferred, /*primary_used_percent*/ None, now),
+                visible_window_warmup_status(
+                    &deferred,
+                    /*primary_used_percent*/ Some(4.0),
+                    now
+                ),
+                visible_window_warmup_status(
+                    &deferred,
+                    /*primary_used_percent*/ Some(0.0),
+                    now + chrono::Duration::minutes(2)
+                ),
+            ),
+            (
+                Some("warmup deferred; check in 0:02".to_string()),
+                Some("warmup deferred; check in 0:02".to_string()),
+                None,
+                Some("warmup retry ready".to_string()),
+            )
         );
     }
 }

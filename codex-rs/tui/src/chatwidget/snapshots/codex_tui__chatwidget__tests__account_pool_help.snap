@@ -1,6 +1,5 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
-assertion_line: 3670
 expression: "render_bottom_popup(&chat, 80)"
 ---
   How your pool works
@@ -14,8 +13,9 @@ expression: "render_bottom_popup(&chat, 80)"
                    use it when other accounts are empty.
   Wait and resume  Wait up to 360 min for quota recovery and continue when safe.
                    Cancel the turn to stop waiting.
-  Standby warmup   Small standby requests every 5 min start 5h clocks earlier.
-                   They consume a little quota; weekly limits still apply.
+  Standby warmup   Check one standby every 5 min after a 30s startup wait. Small
+                   requests use quota; 0% means start unconfirmed. See /warmup
+                   for details.
   Reset credits    Manual only. Check /status for available reset credits.
   Change settings  Use `codex account config --help` to control warmup, waiting,
                    and automatic credit use.

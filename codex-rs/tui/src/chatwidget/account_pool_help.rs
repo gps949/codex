@@ -23,7 +23,7 @@ pub(super) fn items(config: &AccountPoolConfigToml) -> Vec<SelectionItem> {
     };
     let warmup_policy = if config.effective_window_warmup() {
         format!(
-            "Small standby requests every {} min start 5h clocks earlier. They consume a little quota; weekly limits still apply.",
+            "Check one standby every {} min after a 30s startup wait. Small requests use quota; 0% means start unconfirmed. See /warmup for details.",
             config.effective_window_warmup_interval().as_secs() / 60
         )
     } else {

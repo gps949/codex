@@ -15,9 +15,11 @@ use codex_app_server_protocol::AccountPoolUpdatedNotification;
 use codex_app_server_protocol::AccountPoolUseResponse;
 use codex_app_server_protocol::AccountPoolWindowWarmup;
 use codex_app_server_protocol::AccountPoolWindowWarmupOutcome;
+use codex_app_server_protocol::AccountPoolWindowWarmupPhase;
 use codex_config::AccountPoolRotationStrategy;
 use codex_login::WindowWarmupObservation;
 use codex_login::WindowWarmupOutcome;
+use codex_login::WindowWarmupPhase;
 use codex_login::format_reset_countdown;
 use codex_login::visible_window_warmup_status;
 use ratatui::text::Span;
@@ -341,17 +343,22 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
     {
         parts.push(vec![email.to_string().dim()]);
     }
-    if let Some(warmup) = account.window_warmup.as_ref().and_then(|warmup| {
-        visible_window_warmup_status(
-            &protocol_warmup_to_login(warmup),
-            account
-                .rate_limits
-                .primary
-                .as_ref()
-                .map(|window| window.used_percent),
-            now,
-        )
-    }) {
+    if let Some(warmup) = account
+        .window_warmup
+        .as_ref()
+        .filter(|_| !account.is_active)
+        .and_then(|warmup| {
+            visible_window_warmup_status(
+                &protocol_warmup_to_login(warmup),
+                account
+                    .rate_limits
+                    .primary
+                    .as_ref()
+                    .map(|window| window.used_percent),
+                now,
+            )
+        })
+    {
         parts.push(vec![warmup.dim()]);
     }
 
@@ -391,11 +398,11 @@ fn account_rate_limit_description(
         )),
         label.dim(),
     ];
-    // A 0% primary window has not started ticking; the backend still reports a full-window
-    // reset which would otherwise look stuck at ~5h until the first real request.
+    // Zero usage can also follow a completed tiny request. The backend's full-window
+    // reset alone does not confirm that a primary clock has started.
     if matches!(kind, AccountRateLimitKind::FiveHour) && window.used_percent <= 0.0 {
         spans.push(", ".dim());
-        spans.push(colorize("not started".to_string()));
+        spans.push(colorize("start unconfirmed".to_string()));
         return spans;
     }
     if let Some(resets_at) = window.resets_at {
@@ -449,13 +456,17 @@ fn protocol_warmup_to_login(warmup: &AccountPoolWindowWarmup) -> WindowWarmupObs
             AccountPoolWindowWarmupOutcome::Failed => WindowWarmupOutcome::Failed,
             AccountPoolWindowWarmupOutcome::SkippedNoAuth => WindowWarmupOutcome::SkippedNoAuth,
         },
+        phase: warmup.phase.map(|phase| match phase {
+            AccountPoolWindowWarmupPhase::InProgress => WindowWarmupPhase::InProgress,
+            AccountPoolWindowWarmupPhase::Unconfirmed => WindowWarmupPhase::Unconfirmed,
+        }),
         attempted_at: DateTime::<Utc>::from_timestamp(warmup.attempted_at, 0)
             .unwrap_or_else(Utc::now),
         retry_after: warmup
             .retry_after
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
-        // Wire protocol omits streak; display keys off outcome and 5h used%.
-        consecutive_failures: 0,
+        // Wire protocol omits streak; explicit phase preserves attempt semantics.
+        consecutive_failures: warmup.consecutive_failures.unwrap_or(1),
         request_generation: 0,
     }
 }
