@@ -48,6 +48,7 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_fork_install.py
           python3 -m unittest discover -s .github/scripts -p test_fork_release_gate.py
+          python3 -m unittest discover -s .github/scripts -p test_restore_rusty_v8_native.py
           python3 -m unittest discover -s .github/scripts -p test_latest_upstream_stable_tag.py
 
       - name: Rust cache

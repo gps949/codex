@@ -141,8 +141,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs
-          shared-key: fork-release-${{ matrix.target }}
+          shared-key: fork-release-v8-native-${{ matrix.target }}
           cache-workspace-crates: false
+
+      - name: Restore verified V8 native archive after Cargo cache
+        shell: bash
+        run: python3 .github/scripts/restore_rusty_v8_native.py --archive "$RUSTY_V8_ARCHIVE" --target "${{ matrix.target }}"
 
       - name: Stamp version from tag
         shell: bash
