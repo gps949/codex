@@ -221,6 +221,29 @@ fn native_status_quota_overlay_uses_bucket_identity_and_preserves_payload() {
     assert_eq!(response, expected);
 }
 
+#[test]
+fn native_status_quota_title_uses_profile_id_when_active_flags_are_stale() {
+    let mut pool = popup_pool();
+    pool.active_profile_id = Some("backup-profile".into());
+    let snapshot: RateLimitSnapshot = serde_json::from_value(json!({
+        "limitId": "codex", "limitName": "Codex",
+        "primary": {"usedPercent": 37, "windowDurationMins": 300, "resetsAt": 1900000000}
+    }))
+    .unwrap();
+    let mut response = GetAccountRateLimitsResponse {
+        ordinary_usage_allowed: None,
+        rate_limits: snapshot,
+        rate_limits_by_limit_id: None,
+        rate_limit_reset_credits: None,
+        account_id: None,
+        rate_limit_upsell: None,
+    };
+    let mut expected = response.clone();
+    expected.rate_limits.limit_name = Some("Backup · Current quota".into());
+    overlay_get_account_rate_limits_for_remote_client(&mut response, &pool);
+    assert_eq!(response, expected);
+}
+
 #[tokio::test]
 async fn mobile_account_refresh_keeps_caption_and_desktop_payload() {
     let (tx, mut rx) = mpsc::channel(2);

@@ -1323,7 +1323,9 @@ impl AccountRequestProcessor {
                 profile_id: snapshot.profile.id.to_string(),
                 label: snapshot.profile.label.clone(),
                 priority: snapshot.profile.priority,
-                is_active: snapshot.is_active,
+                is_active: active
+                    .as_ref()
+                    .is_some_and(|identity| identity.profile_id == snapshot.profile.id),
                 availability: account_pool_availability(snapshot.availability),
                 plan_type,
                 email,
@@ -1853,7 +1855,9 @@ async fn build_account_pool_read_response(
             profile_id: snapshot.profile.id.to_string(),
             label: snapshot.profile.label.clone(),
             priority: snapshot.profile.priority,
-            is_active: snapshot.is_active,
+            is_active: active
+                .as_ref()
+                .is_some_and(|identity| identity.profile_id == snapshot.profile.id),
             availability: account_pool_availability(snapshot.availability),
             plan_type,
             email,

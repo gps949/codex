@@ -21,7 +21,7 @@ pub(crate) fn pool_caption(pool: &AccountPoolReadResponse) -> Option<String> {
         let name = pool
             .accounts
             .iter()
-            .find(|account| account.is_active)
+            .find(|account| Some(account.profile_id.as_str()) == pool.active_profile_id.as_deref())
             .map(|account| compact_label(&label(account), 16))
             .unwrap_or_else(|| "Codex".into());
         format!("{name} · {ready}/{} ready", pool.accounts.len())
@@ -33,7 +33,7 @@ pub(crate) fn quota_caption(pool: &AccountPoolReadResponse) -> Option<String> {
     pool.enabled.then(|| {
         pool.accounts
             .iter()
-            .find(|account| account.is_active)
+            .find(|account| Some(account.profile_id.as_str()) == pool.active_profile_id.as_deref())
             .map(|account| format!("{} · Current quota", compact_label(&label(account), 16)))
             .unwrap_or_else(|| "No current account · Quota".into())
     })
@@ -171,18 +171,14 @@ pub(crate) fn list(pool: &AccountPoolReadResponse, page: usize) -> Result<String
     const PAGE_SIZE: usize = 4;
     let pages = pool.accounts.len().div_ceil(PAGE_SIZE).max(1);
     let accounts = page_accounts(pool, page)?;
+    let now = Utc::now();
     let mut lines = vec![format!("Accounts · {page}/{pages}")];
     for account in accounts {
         let name = label(account);
         let state = availability(account);
         let current = if account.is_active { " · Current" } else { "" };
         lines.push(format!("\n{name}{current}{state}"));
-        lines.push(format!(
-            "Select: /account use {}",
-            account_selector(pool, account)
-        ));
-        let primary = usage(account.rate_limits.primary.as_ref());
-        let secondary = usage(account.rate_limits.secondary.as_ref());
+        lines.push(selection_control(pool, account));
         let cached = if account
             .rate_limits
             .observed_at
@@ -192,14 +188,25 @@ pub(crate) fn list(pool: &AccountPoolReadResponse, page: usize) -> Result<String
         } else {
             ""
         };
+        for (name, window, primary) in [
+            ("Primary", account.rate_limits.primary.as_ref(), true),
+            ("Secondary", account.rate_limits.secondary.as_ref(), false),
+        ] {
+            lines.push(format!(
+                "{name}: {} used · reset {}",
+                usage(window),
+                reset_label(window, primary, now)
+            ));
+        }
         lines.push(format!(
-            "Used: primary {primary} · secondary {secondary}{cached}"
+            "Snapshot: {}{cached}",
+            timestamp(account.rate_limits.observed_at)
         ));
     }
     if page < pages {
         lines.push(format!("\nNext: /account list {}", page + 1));
     }
-    lines.push("\nDetails: /account show <label|@selector>\nControls: /account help".into());
+    lines.push("\nMissing windows may retain older cached observations.\nDetails: /account show <label|@selector>\nControls: /account help".into());
     Ok(lines.join("\n"))
 }
 
@@ -218,10 +225,7 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
             format!("{plan:?}").to_ascii_lowercase()
         ));
     }
-    lines.push(format!(
-        "Select: /account use {}",
-        account_selector(pool, account)
-    ));
+    lines.push(selection_control(pool, account));
     let now = Utc::now();
     for (name, window, primary) in [
         ("Primary", account.rate_limits.primary.as_ref(), true),
@@ -386,6 +390,22 @@ fn account_selector(pool: &AccountPoolReadResponse, account: &AccountPoolAccount
         }
     }
     format!("@{id}")
+}
+
+fn selection_control(pool: &AccountPoolReadResponse, account: &AccountPoolAccount) -> String {
+    let selector = account_selector(pool, account);
+    match account.availability {
+        AccountPoolAvailability::Available => format!("Select: /account use {selector}"),
+        AccountPoolAvailability::Exhausted { .. } => {
+            format!("Retry: /account retry {selector} (probes quota)")
+        }
+        AccountPoolAvailability::Disabled => {
+            "Enable this account on the host before selecting it.".into()
+        }
+        AccountPoolAvailability::AuthenticationUnavailable { .. } => {
+            "Sign in again on the host before selecting this account.".into()
+        }
+    }
 }
 
 fn usage(window: Option<&AccountPoolRateLimitWindow>) -> String {

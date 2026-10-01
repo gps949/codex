@@ -1,0 +1,16 @@
+---
+source: app-server/src/mobile_account_status_tests.rs
+assertion_line: 55
+expression: text
+---
+Accounts · 1/1
+
+Work · Current · Cooling down
+Retry: /account retry @secret-w (probes quota)
+Primary: 37% used · reset due
+Secondary: unknown used · reset unknown
+Snapshot: unknown · cached
+
+Missing windows may retain older cached observations.
+Details: /account show <label|@selector>
+Controls: /account help

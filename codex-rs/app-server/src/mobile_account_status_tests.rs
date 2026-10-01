@@ -14,14 +14,23 @@ fn pool() -> AccountPoolReadResponse {
 
 #[test]
 fn mobile_account_compact_views_show_selectors_and_unknown_quota() {
-    let pool = pool();
+    let mut pool = pool();
+    pool.accounts[0]
+        .rate_limits
+        .primary
+        .as_mut()
+        .unwrap()
+        .resets_at = None;
     insta::assert_snapshot!(list(&pool, 1).unwrap(), @"
     Accounts · 1/1
 
     Work · Current
     Select: /account use @secret-w
-    Used: primary 37% · secondary unknown · cached
+    Primary: 37% used · reset unknown
+    Secondary: unknown used · reset unknown
+    Snapshot: unknown · cached
 
+    Missing windows may retain older cached observations.
     Details: /account show <label|@selector>
     Controls: /account help
     ");
@@ -40,6 +49,23 @@ fn mobile_account_label_prefers_custom_label_over_email() {
         resolve(&pool, "work@example.com").unwrap(),
         &pool.accounts[0]
     );
+}
+
+#[test]
+fn mobile_account_list_shows_reset_times_and_cooldown_retry() {
+    let mut pool = pool();
+    pool.accounts[0].availability = AccountPoolAvailability::Exhausted { resets_at: None };
+    pool.accounts[0]
+        .rate_limits
+        .primary
+        .as_mut()
+        .unwrap()
+        .resets_at = Some(0);
+    let text = list(&pool, 1).unwrap();
+    assert!(text.contains("Primary: 37% used · reset due"));
+    assert!(text.contains("Retry: /account retry @secret-w"));
+    assert!(text.contains("Snapshot: unknown · cached"));
+    insta::assert_snapshot!("mobile_account_list_with_reset_and_retry", text);
 }
 
 #[test]
@@ -76,7 +102,7 @@ fn mobile_account_pages_are_bounded_and_names_cannot_inject_markup() {
     other.label = Some("[bad](https://example.com)\n**name**".repeat(100));
     pool.accounts.extend(std::iter::repeat_n(other, 8));
     let text = list(&pool, 1).unwrap();
-    assert_eq!(text.matches("Used:").count(), 4);
+    assert_eq!(text.matches("Primary:").count(), 4);
     assert!(text.contains("Next: /account list 2"));
     assert_eq!(text.matches("Select: /account use @").count(), 4);
     assert!(!text.contains("[bad]"));

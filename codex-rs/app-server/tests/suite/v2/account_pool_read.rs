@@ -354,8 +354,10 @@ async fn account_pool_read_fetches_quota_before_first_model_request() -> Result<
     Ok(())
 }
 
+#[test_case::test_case("/account"; "account")]
+#[test_case::test_case("/status pool 1"; "status_pool")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn account_pool_mobile_query_does_not_add_model_history() -> Result<()> {
+async fn account_pool_mobile_query_does_not_add_model_history(command: &str) -> Result<()> {
     use codex_app_server_protocol::ClientInfo;
     use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::ThreadStartParams;
@@ -383,7 +385,7 @@ async fn account_pool_mobile_query_does_not_add_model_history() -> Result<()> {
         .await?;
     let thread: ThreadStartResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
-    let id = mcp.send_raw_request("turn/start", Some(json!({"threadId": thread.thread.id, "input": [{"type": "text", "text": "/account", "textElements": []}]}))).await?;
+    let id = mcp.send_raw_request("turn/start", Some(json!({"threadId": thread.thread.id, "input": [{"type": "text", "text": command, "textElements": []}]}))).await?;
     let turn: TurnStartResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
     assert_eq!(
         turn.turn.status,

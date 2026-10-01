@@ -74,16 +74,16 @@ impl AccountRequestProcessor {
             .split_once(char::is_whitespace)
             .map_or((args, ""), |(verb, value)| (verb, value.trim()));
         let verb = verb.to_ascii_lowercase();
-        if command == MobileSlashCommand::Status && !args.is_empty() {
+        if command == MobileSlashCommand::Status && !args.is_empty() && verb != "pool" {
             return Err(invalid_request(
-                "Usage: /status. For accounts, use /account.",
+                "Usage: /status pool [page]. You can also use /account list [page].",
             ));
         }
         match (command, verb.as_str()) {
             (MobileSlashCommand::Status, _) | (MobileSlashCommand::Account, "" | "list" | "show") => {
-                let page = if verb == "list" && !value.is_empty() {
+                let page = if matches!(verb.as_str(), "list" | "pool") && !value.is_empty() {
                     value.parse::<usize>().ok().filter(|page| *page > 0)
-                        .ok_or_else(|| invalid_request("Usage: /account list <page>"))?
+                        .ok_or_else(|| invalid_request("Use /status pool <page> or /account list <page>, starting at page 1."))?
                 } else { 1 };
                 let profile_ids = if verb == "show" {
                     let profile_id = view::resolve(&pool, value).map_err(invalid_request)?.profile_id.clone();

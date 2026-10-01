@@ -54,7 +54,7 @@ Use quoted labels with spaces. CLI selectors accept an exact profile ID or a uni
 
 CLI `use` and mobile `/account use` respect a quota cooldown. If you have confirmed that an account's quota recovered, explicitly retry it with `codex account use "Work" --force` or `/account retry "Work"` on mobile. This clears a local cooldown so Codex can probe again; the server's actual quota limit still applies. Cooling accounts in the TUI are explicitly labeled `Retry`, with the retry effect shown when selected.
 
-The mobile `/status` popup titles progress windows as the current account's quota. Its account field previews the pool's ready count, current account and one standby, with short labels and availability states. `/account` opens paginated details for the other accounts. These percentages remain per-account observations; the popup does not add them into a pool balance. Native app versions can limit how much of the preview is visible.
+The native mobile `/status` popup shows the current account's quota. The fork supplies a short pool preview, but the app controls its rendering and may truncate or ignore it; this popup is not a dependable view of every account. Use `/account` or `/status pool` for a local, paginated account list with usage, reset times, observation timestamps and account controls. These percentages remain per-account observations and are not added into a pool balance.
 
 The TUI `/account` picker has **Accounts**, **Strategy**, and **Help** tabs. Follow the footer's key hints to change tabs and select an entry; type to filter account names or emails. Help explains the current reserve, waiting, warmup, and reset-credit settings. Parked profiles and profiles requiring login include a host CLI command for recovery.
 
@@ -161,6 +161,8 @@ In a supported ChatGPT iOS or Android remote client:
 
 ```text
 /account help
+/status pool
+/status pool 2
 /account list 2
 /account show "Work"
 /account use "Work"
@@ -173,9 +175,9 @@ In a supported ChatGPT iOS or Android remote client:
 /account reset-credits never
 ```
 
-The list shows and refreshes four accounts per page; copy its `@selector` for an unambiguous detail or selection command. Detail queries refresh only the selected account. `/account` and `/status` are handled locally by the host and do not send an inference request or enter the model's conversation history. They can still make quota metadata requests. During an active turn, use the app's Status panel or wait for the turn to finish before issuing these chat commands.
+The list shows and refreshes four accounts per page; copy its `@selector` for an unambiguous detail or selection command. Cooling accounts offer `retry` to probe quota; disabled or expired logins require action on the host. `cached` means the displayed observation was not refreshed recently, and a reset being due does not prove recovery. Detail queries refresh only the selected account. `/account` and `/status pool` are handled locally by the host and do not send an inference request or enter the model's conversation history. The app may intercept plain `/status` to open its native panel. Queries can still make quota metadata requests. During an active turn, use the app's Status panel or wait for the turn to finish before issuing these chat commands.
 
-The fork supplies pool captions, status replies, and controls through interfaces the mobile client already renders. It cannot replace the app's native screens. Real device behavior can differ across app versions; iOS reconnect acceptance remains pending.
+The fork supplies pool captions, status replies, and controls through interfaces the mobile client already renders. It cannot replace the app's native screens. The `/status pool` alias requires a host build newer than ma.5; on ma.5, use `/account`. If the app also intercepts `/status pool`, use `/account` instead. Real device behavior can differ across app versions; iOS reconnect acceptance remains pending.
 
 ## Understand status and recover
 

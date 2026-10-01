@@ -54,7 +54,7 @@ codex account set "Existing login" --label "Personal"
 
 CLI 的 `use` 和手机端 `/account use` 会遵守额度冷却。确认账号额度已经恢复后，可以用 `codex account use "Work" --force` 或手机端 `/account retry "Work"` 明确重试。它仅清除本地冷却以便重新探测，服务端的真实配额限制仍然有效。TUI 中冷却账号会明确标为 `Retry`，选中后可查看重试说明。
 
-手机 `/status` 弹框的进度条标题明确表示当前账号的额度；账号栏预览池内可用数量、当前账号及一个备用账号，使用短标签和可用状态。其他账号通过 `/account` 分页查看。百分比仍属于各自账号，不会被相加成“账号池总余额”。不同原生 App 版本可能限制预览文字的可见长度。
+手机原生 `/status` 弹框显示当前账号额度。fork 会提供简短账号池预览，但渲染由手机 App 控制，可能截断或忽略这些文字，因此它不能可靠展示每个账号。查看完整账号池，请输入 `/account` 或 `/status pool`，在本地分页回复中查看使用率、重置时间、观测时间和账号操作。百分比分别属于各账号，不会相加成“账号池总余额”。
 
 TUI 的 `/account` 窗口分为 **Accounts**、**Strategy**、**Help** 三页。按底部键位提示切换页面、选择项目，输入文字可筛选名称或邮箱。Help 解释当前的额度保留、等待续跑、预热、reset-credit 设置；暂留或需要重新登录的账号会给出主机 CLI 恢复命令。
 
@@ -161,6 +161,8 @@ codex remote-control start
 
 ```text
 /account help
+/status pool
+/status pool 2
 /account list 2
 /account show "Work"
 /account use "Work"
@@ -173,9 +175,9 @@ codex remote-control start
 /account reset-credits never
 ```
 
-列表每页显示四个账号。复制列表给出的 `@selector` 可以准确查看或选择账号。单账号详情只刷新该账号。`/account` 与 `/status` 在主机本地处理，不发送模型推理请求，也不进入模型对话历史；查询仍然可能发送额度元数据请求。任务运行期间，请使用应用的 Status 面板，或等当前任务结束后再输入这些聊天命令。
+列表每页显示并刷新四个账号。复制列表给出的 `@selector` 可以准确查看或选择账号；冷却账号提供 `retry` 以重新探测额度，停用或登录过期的账号需要先在主机处理。`cached` 表示最近没有刷新该观测，重置时间已到也不代表服务端确认恢复。单账号详情只刷新该账号。`/account` 与 `/status pool` 在主机本地处理，不发送模型推理请求，也不进入模型对话历史；直接输入 `/status` 可能被 App 拦截并打开原生弹框。查询仍然可能发送额度元数据请求。任务运行期间，请使用应用的 Status 面板，或等当前任务结束后再输入这些聊天命令。
 
-fork 通过手机端已有界面提供账号池标题、状态回复与控制，无法替换应用的原生页面。具体表现可能随客户端版本变化，iOS 重连仍待实机验收。
+fork 通过手机端已有界面提供账号池标题、状态回复与控制，无法替换应用的原生页面。`/status pool` 别名需要 ma.5 之后的主机构建，ma.5 请使用 `/account`；如果 App 连 `/status pool` 也拦截，也请使用 `/account`。具体表现可能随客户端版本变化，iOS 重连仍待实机验收。
 
 ## 状态怎么看，遇到问题怎么处理
 
