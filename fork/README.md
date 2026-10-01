@@ -54,6 +54,8 @@ Use quoted labels with spaces. CLI selectors accept an exact profile ID or a uni
 
 CLI `use` and mobile `/account use` respect a quota cooldown. If you have confirmed that an account's quota recovered, explicitly retry it with `codex account use "Work" --force` or `/account retry "Work"` on mobile. This clears a local cooldown so Codex can probe again; the server's actual quota limit still applies. Cooling accounts in the TUI are explicitly labeled `Retry`, with the retry effect shown when selected.
 
+The mobile `/status` popup titles progress windows as the current account's quota. Its account field previews the pool's ready count, current account and one standby, with short labels and availability states. `/account` opens paginated details for the other accounts. These percentages remain per-account observations; the popup does not add them into a pool balance. Native app versions can limit how much of the preview is visible.
+
 The TUI `/account` picker has **Accounts**, **Strategy**, and **Help** tabs. Follow the footer's key hints to change tabs and select an entry; type to filter account names or emails. Help explains the current reserve, waiting, warmup, and reset-credit settings. Parked profiles and profiles requiring login include a host CLI command for recovery.
 
 ## Use quota fully and keep the pool available longer
@@ -69,13 +71,36 @@ codex account set "Work" --priority 10
 
 Codex normally switches at **95% observed usage** when another account is eligible. The remaining quota stays available as a fallback after other accounts run out. Changing the threshold trades a larger margin against more account switches; it does not increase any account's quota.
 
-**Standby warmup** is enabled by default. It sends a small generating request to an idle standby account to start its primary window without changing the account used by your task. Maintenance uses the lowest reasoning effort supported by its model and asks for a one-digit reply. This still consumes some quota. After a completed request with usage still at 0%, generating retries wait a full five hours. Near an early switch, warmup checks can accelerate to five-minute intervals. Leave it enabled for sustained use; turn it off when preserving every unused standby allocation matters more than starting its countdown early.
+**Standby warmup** is enabled by default. It sends a small generating request to an eligible idle standby account to try to start its primary window without changing the account used by your task. Maintenance uses the lowest reasoning effort supported by its model and asks for a one-digit reply. This still consumes some quota. Completed or interrupted attempts are protected from repeated generation for five hours while quota-only checks can confirm their result. Near an early switch, warmup checks can accelerate to five-minute intervals. Leave it enabled for sustained use; turn it off when preserving every unused standby allocation matters more than starting its countdown early.
+
+A model-specific limit keeps the account available for other models; follow the backend's switch-model message. If an account does not include the requested use, Codex tries another eligible account and records a short cooldown. Such entitlement errors do not justify spending reset credits. Workspace-wide backend limits can still affect several seats even when their observed percentages differ.
 
 **Reset credits** are saved by default. Automatic redemption is opt-in and only considered after the whole pool is exhausted, when the next natural reset is farther away than the configured threshold. If the last failed account has no credit, other exhausted accounts are checked until one recovers; an ambiguous redemption stops the pass. A manual redemption uses a limited credit for that account; refreshing quota or selecting it with `--force` does not create new quota.
 
 When all accounts run out, Codex can **wait and continue safely** after quota recovers. The default maximum wait is six hours. The original host process must remain running; stopping it ends the wait. You can cancel at any time. Visible partial output and unresolved tool results can require reconciliation instead of automatic continuation.
 
 Mobile percentages labeled **Used** and CLI `5H%` / `WEEK%` show usage. TUI labels ending in **left** show the remaining percentage. Primary is usually a rolling 5-hour window and secondary is usually weekly; either window can limit an account. Compare each account's windows separately: adding percentages across plans does not produce a meaningful pool balance. Unknown or cached values remain observations; a failed refresh does not mean an account has 0% usage.
+
+## Understand standby warmup
+
+Keep a Codex session or connected app-server running for automatic warmup; a one-shot `codex account status` command does not keep the scheduler alive. The first automatic pass waits about 30 seconds. Each pass checks at most one standby account, with a default interval of five minutes. Several standby accounts are handled over successive passes. The current account, disabled profiles, profiles needing login, depleted quota, and protected attempts are excluded from generating requests. Processes sharing `CODEX_HOME` coordinate attempts so they do not all warm the same account.
+
+Request completion and an observed 5-hour window start are different. A tiny completed request can still have 0% observed usage, and an idle account can receive a reset timestamp even before its clock starts. `start unconfirmed` reports this uncertainty. Positive primary usage confirms a window was observed; a weekly countdown does not confirm the primary window. Day countdowns use explicit units, for example `4d 3h 43m`.
+
+| Warmup status                       | Meaning                                                                                                                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `warmup in progress`                | A recent attempt is running; the selection used by your task stays unchanged.                                                                                            |
+| `warmup sent; start unconfirmed`    | A generating request was sent and may have completed or been interrupted; primary usage has not confirmed the clock. Quota checks can continue without generating again. |
+| `warmup attempt; start unconfirmed` | An earlier attempt may have been interrupted. Its generating retry remains protected while the result is checked.                                                        |
+| `warmup failed; retry in …`         | The attempt failed and is backing off; the shown time is an earliest retry, not a quota reset.                                                                           |
+| `warmup deferred; check in …`       | Preflight found the account temporarily ineligible; no generating request was sent.                                                                                      |
+| `warmup retry ready`                | The failure backoff ended. A later eligible pass can retry.                                                                                                              |
+| `warmup needs login`                | Repair that profile with `codex account login "Work"`.                                                                                                                   |
+| `5h confirmed`                      | Recent warmup and positive primary usage agree.                                                                                                                          |
+
+In the TUI, run `/warmup` to inspect effective settings, whether the task is running, each account's eligibility or skip reason, persisted attempts, and recent events. Events belong to the current host process; persisted attempt protection survives restarts. On mobile, `/account warmup` reads the summary. Both are read-only diagnostics and do not send a generating request.
+
+`/warmup now` in the TUI or `/account warmup now` on mobile asks for one pass. It respects warmup being off, account eligibility, and existing backoff; it can consume quota if a generating request is needed. It returns before the pass finishes, so read the summary again afterward. Repeated commands do not bypass the protection period. To disable warmup, use `codex account config set-window-warmup false` on the host or `/account warmup off` on mobile.
 
 ## Configure the behavior
 
