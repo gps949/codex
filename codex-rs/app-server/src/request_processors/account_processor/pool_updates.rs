@@ -174,7 +174,7 @@ fn quota_snapshot(
     }
     Some(codex_app_server_protocol::RateLimitSnapshot {
         limit_id: Some("codex".into()),
-        limit_name: crate::mobile_account_status::pool_caption(response),
+        limit_name: crate::mobile_account_status::quota_caption(response),
         normal_model_slug: None,
         primary,
         secondary,

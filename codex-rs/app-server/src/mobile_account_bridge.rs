@@ -2,7 +2,7 @@
 //! parse experimental `accountPool/*` RPCs or `accountPool` JSON fields.
 //!
 //! These helpers repurpose interfaces mobile already renders:
-//! - `account/read` (`account.email` overlay)
+//! - `account/read` (bounded current/standby preview in `account.email`)
 //! - `account/workspaceMessages/read` (headline banners)
 //! - `warning` notifications (ephemeral status toasts)
 //! - `turn/start` for `/account` and `/status` (connection-local replies without model history)
@@ -207,14 +207,16 @@ pub(crate) fn overlay_get_account_rate_limits_for_remote_client(
     if !pool.enabled {
         return;
     }
-    let Some(overlay) = crate::mobile_account_status::pool_caption(pool) else {
+    let Some(overlay) = crate::mobile_account_status::quota_caption(pool) else {
         return;
     };
     crate::mobile_account_status::overlay_snapshot(&mut response.rate_limits, &overlay);
-    if let Some(rate_limits_by_limit_id) = response.rate_limits_by_limit_id.as_mut() {
-        for snapshot in rate_limits_by_limit_id.values_mut() {
-            crate::mobile_account_status::overlay_snapshot(snapshot, &overlay);
-        }
+    if let Some(snapshot) = response
+        .rate_limits_by_limit_id
+        .as_mut()
+        .and_then(|buckets| buckets.get_mut("codex"))
+    {
+        crate::mobile_account_status::overlay_snapshot(snapshot, &overlay);
     }
 }
 
@@ -290,9 +292,55 @@ pub(crate) fn overlay_get_account_for_remote_client(
     if !pool.enabled {
         return;
     }
-    let summary = crate::mobile_account_status::account_caption(pool);
     if let Some(Account::Chatgpt { email, .. }) = response.account.as_mut() {
-        *email = Some(summary);
+        // Legacy remote clients receive pool details through this account display field.
+        // Keep the quota title short and leave its native progress windows untouched.
+        let mut accounts: Vec<_> = pool.accounts.iter().collect();
+        accounts.sort_by_key(|account| (!account.is_active, account.priority, &account.profile_id));
+        let has_current = accounts.iter().any(|account| account.is_active);
+        let visible = accounts.len().min(2);
+        let ready = accounts
+            .iter()
+            .filter(|account| {
+                matches!(
+                    account.availability,
+                    codex_app_server_protocol::AccountPoolAvailability::Available
+                )
+            })
+            .count();
+        let mut entries = vec![format!("Pool · {ready}/{} ready", accounts.len())];
+        if accounts.is_empty() {
+            entries.push("Account pool is empty".into());
+        } else if !has_current {
+            entries.push("No current account".into());
+        }
+        for account in accounts.into_iter().take(visible) {
+            let name = crate::mobile_account_status::label(account)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let name = crate::mobile_account_status::compact_label(&name, /*max*/ 16);
+            let name = if name.is_empty() { "Account" } else { &name };
+            let state = match &account.availability {
+                codex_app_server_protocol::AccountPoolAvailability::Available => "Ready",
+                codex_app_server_protocol::AccountPoolAvailability::Exhausted { .. } => {
+                    "Cooling down"
+                }
+                codex_app_server_protocol::AccountPoolAvailability::AuthenticationUnavailable {
+                    ..
+                } => "Login required",
+                codex_app_server_protocol::AccountPoolAvailability::Disabled => "Disabled",
+            };
+            let current = if account.is_active { " · Current" } else { "" };
+            entries.push(format!("{name}{current} · {state}"));
+        }
+        let hidden = pool.accounts.len() - visible;
+        entries.push(if hidden > 0 {
+            format!("+{hidden} more · /account")
+        } else {
+            "/account".into()
+        });
+        *email = Some(entries.join(" | "));
     }
 }
 
@@ -363,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn rate_limits_overlay_replaces_limit_name_with_pool_summary() {
+    fn rate_limits_overlay_marks_the_current_account_quota() {
         let pool = AccountPoolReadResponse {
             enabled: true,
             active_profile_id: Some("primary".to_string()),
@@ -395,7 +443,7 @@ mod tests {
                 .rate_limits
                 .limit_name
                 .as_deref()
-                .is_some_and(|name| name == "Codex · 0/0 ready")
+                .is_some_and(|name| name == "No current account · Quota")
         );
     }
 
@@ -438,7 +486,7 @@ mod tests {
         };
         overlay_get_account_rate_limits_for_remote_client(&mut response, &pool);
         let mut expected = snapshot;
-        expected.limit_name = Some("Work · 1/1 ready".to_string());
+        expected.limit_name = Some("Work · Current quota".to_string());
         assert_eq!(response.rate_limits, expected);
         assert_eq!(
             response.rate_limits_by_limit_id,
@@ -447,7 +495,7 @@ mod tests {
                 ("other".to_string(), other)
             ]))
         );
-        insta::assert_snapshot!(response.rate_limits.limit_name.unwrap(), @"Work · 1/1 ready");
+        insta::assert_snapshot!(response.rate_limits.limit_name.unwrap(), @"Work · Current quota");
     }
 
     #[test]
