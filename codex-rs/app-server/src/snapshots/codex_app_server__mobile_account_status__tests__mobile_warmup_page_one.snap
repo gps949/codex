@@ -1,0 +1,32 @@
+---
+source: app-server/src/mobile_account_status_tests.rs
+expression: "warmup_status(&pool, &debug, 1).unwrap()"
+---
+Standby warmup · 1/2
+Automatic: on · Task: running
+Checks: every 5 min; one standby per pass
+
+Work
+No recent warmup attempt recorded
+Next: current execution account
+
+Personal
+warmup in progress
+Next: attempt protected; quota-only confirmation or retry later
+Attempt: 09-17 08:00 UTC
+
+Travel
+warmup sent; start unconfirmed
+Next: attempt protected; quota-only confirmation or retry later
+Attempt: 09-17 08:00 UTC
+
+Backup
+warmup deferred; check in 0:30
+Next: attempt protected; quota-only confirmation or retry later
+Attempt: 09-17 08:00 UTC
+
+Next page: /account warmup 2
+
+Controls: /account warmup on|off
+Request one pass: /account warmup now (may use quota)
+0% does not prove a request was never sent. Pending starts use quota-only confirmation before another generation.

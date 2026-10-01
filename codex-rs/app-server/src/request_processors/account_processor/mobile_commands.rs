@@ -120,6 +120,20 @@ impl AccountRequestProcessor {
             (_, "settings") if value.is_empty() => {
                 Ok(view::settings(&self.load_latest_config().await.account_pool))
             }
+            (_, "warmup") if value.is_empty() || value == "now" || value.parse::<usize>().is_ok() => {
+                let page = if value.is_empty() || value == "now" { 1 } else {
+                    value.parse::<usize>().map_err(|_| invalid_request("Usage: /account warmup [page|now|on|off]"))?
+                };
+                view::page_accounts(&pool, page).map_err(invalid_request)?;
+                let debug = self.account_pool_warmup_debug_response(
+                    codex_app_server_protocol::AccountPoolWarmupDebugParams { run_now: value == "now" },
+                ).await?;
+                pool = self.get_account_pool_response().await?;
+                let text = view::warmup_status(&pool, &debug, page).map_err(invalid_request)?;
+                if value == "now" && !debug.pass_requested {
+                    Ok(format!("No pass requested. Enable warmup with /account warmup on first.\n\n{text}"))
+                } else { Ok(text) }
+            }
             (_, "warmup" | "resume" | "wait" | "reset-credits") => {
                 let (key, setting) = match verb.as_str() {
                     "warmup" | "resume" => {
@@ -179,7 +193,7 @@ impl AccountRequestProcessor {
                 };
                 Ok(format!("Strategy: {name}\nUsed at the next automatic selection. Select now: /account auto"))
             }
-            (_, "help") if value.is_empty() => Ok("/account list [page] — accounts and quota\n/account show <label|@selector> — details\n/account use <label|@selector> — select an available account\n/account retry <label|@selector> — clear local cooldown and probe again\n/account auto — let the strategy select now\n/account strategy [fill-first|earliest-reset]\n/account settings — effective settings and controls\nQuote names containing spaces. Use @selectors for duplicate names. Selection does not permanently pin an account.".into()),
+            (_, "help") if value.is_empty() => Ok("/account list [page] — accounts and quota\n/account show <label|@selector> — details\n/account use <label|@selector> — select an available account\n/account retry <label|@selector> — clear local cooldown and probe again\n/account auto — let the strategy select now\n/account strategy [fill-first|earliest-reset]\n/account settings — effective settings and controls\n/account warmup [page|now|on|off] — status or request one pass\nQuote names containing spaces. Use @selectors for duplicate names. Selection does not permanently pin an account.".into()),
             _ => Err(invalid_request("Unknown /account command. Use /account help.")),
         }
     }

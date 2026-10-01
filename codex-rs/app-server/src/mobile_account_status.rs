@@ -28,6 +28,17 @@ pub(crate) fn pool_caption(pool: &AccountPoolReadResponse) -> Option<String> {
     })
 }
 
+/// Titles quota windows as observations of the current execution account.
+pub(crate) fn quota_caption(pool: &AccountPoolReadResponse) -> Option<String> {
+    pool.enabled.then(|| {
+        pool.accounts
+            .iter()
+            .find(|account| account.is_active)
+            .map(|account| format!("{} · Current quota", compact_label(&label(account), 16)))
+            .unwrap_or_else(|| "No current account · Quota".into())
+    })
+}
+
 pub(crate) fn account_caption(pool: &AccountPoolReadResponse) -> String {
     pool_caption(pool).unwrap_or_else(|| "Account pool is not configured.".into())
 }
@@ -239,11 +250,19 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
                     codex_login::WindowWarmupOutcome::SkippedNoAuth
                 }
             },
+            phase: warmup.phase.map(|phase| match phase {
+                codex_app_server_protocol::AccountPoolWindowWarmupPhase::InProgress => {
+                    codex_login::WindowWarmupPhase::InProgress
+                }
+                codex_app_server_protocol::AccountPoolWindowWarmupPhase::Unconfirmed => {
+                    codex_login::WindowWarmupPhase::Unconfirmed
+                }
+            }),
             attempted_at: DateTime::<Utc>::from_timestamp(warmup.attempted_at, 0).unwrap_or(now),
             retry_after: warmup
                 .retry_after
                 .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
-            consecutive_failures: 0,
+            consecutive_failures: warmup.consecutive_failures.unwrap_or(1),
             request_generation: 0,
         };
         if let Some(status) = visible_window_warmup_status(
@@ -298,6 +317,58 @@ pub(crate) fn settings(pool: &codex_config::AccountPoolConfigToml) -> String {
         pool.effective_return_to_preferred(),
         pool.effective_window_warmup_interval().as_secs() / 60,
     )
+}
+
+pub(crate) fn warmup_status(
+    pool: &AccountPoolReadResponse,
+    debug: &codex_app_server_protocol::AccountPoolWarmupDebugResponse,
+    page: usize,
+) -> Result<String, String> {
+    let accounts = page_accounts(pool, page)?;
+    let pages = pool.accounts.len().div_ceil(4).max(1);
+    let mut lines = vec![
+        format!("Standby warmup · {page}/{pages}"),
+        format!(
+            "Automatic: {} · Task: {}",
+            if debug.enabled { "on" } else { "off" },
+            if debug.task_running {
+                "running"
+            } else {
+                "stopped"
+            }
+        ),
+        format!(
+            "Checks: every {} min; one standby per pass",
+            debug.interval_seconds / 60
+        ),
+    ];
+    if debug.pass_requested {
+        lines.push("One pass requested; refresh this status after it finishes.".into());
+    }
+    for account in accounts {
+        let entry = debug
+            .accounts
+            .iter()
+            .find(|entry| entry.profile_id == account.profile_id);
+        lines.push(format!("\n{}", label(account)));
+        lines.push(
+            entry
+                .and_then(|entry| entry.status.as_deref())
+                .map(|status| compact_label(status, 120))
+                .unwrap_or_else(|| "No recent warmup attempt recorded".into()),
+        );
+        if let Some(reason) = entry.and_then(|entry| entry.candidate_reason.as_deref()) {
+            lines.push(format!("Next: {}", compact_label(reason, 140)));
+        }
+        if let Some(attempted_at) = entry.and_then(|entry| entry.attempted_at) {
+            lines.push(format!("Attempt: {}", timestamp(Some(attempted_at))));
+        }
+    }
+    if page < pages {
+        lines.push(format!("\nNext page: /account warmup {}", page + 1));
+    }
+    lines.push("\nControls: /account warmup on|off\nRequest one pass: /account warmup now (may use quota)\n0% does not prove a request was never sent. Pending starts use quota-only confirmation before another generation.".into());
+    Ok(lines.join("\n"))
 }
 
 fn account_selector(pool: &AccountPoolReadResponse, account: &AccountPoolAccount) -> String {

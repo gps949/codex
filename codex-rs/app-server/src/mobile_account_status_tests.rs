@@ -108,11 +108,11 @@ fn mobile_account_detail_marks_idle_primary_window_not_started() {
     });
     let text = detail(&pool, "Work").unwrap();
     assert!(text.contains("Primary: 0% used"));
-    assert!(text.contains("Reset: not started"));
+    assert!(text.contains("Reset: start unconfirmed"));
 }
 
 #[test]
-fn mobile_account_detail_hides_warmup_failure() {
+fn mobile_account_detail_shows_recent_warmup_failure() {
     let mut pool = pool();
     pool.accounts[0].rate_limits.primary = Some(AccountPoolRateLimitWindow {
         used_percent: 0.0,
@@ -120,13 +120,14 @@ fn mobile_account_detail_hides_warmup_failure() {
     });
     pool.accounts[0].window_warmup = Some(codex_app_server_protocol::AccountPoolWindowWarmup {
         outcome: codex_app_server_protocol::AccountPoolWindowWarmupOutcome::Failed,
-        attempted_at: 1_900_000_000,
+        phase: None,
+        consecutive_failures: None,
+        attempted_at: chrono::Utc::now().timestamp(),
         retry_after: None,
     });
     let text = detail(&pool, "Work").unwrap();
-    assert!(!text.contains("Warmup:"));
-    assert!(!text.contains("warmup failed"));
-    assert!(!text.contains("5h warmed"));
+    assert!(text.contains("Warmup: warmup retry ready"));
+    assert!(!text.contains("5h confirmed"));
 }
 
 #[test]
@@ -166,4 +167,136 @@ fn mobile_account_settings_explain_effective_controls() {
 
     Quota observations are not additive balances. Partial output or unresolved tools may require manual reconciliation.
     ");
+}
+
+fn warmup_pool_and_debug() -> (
+    AccountPoolReadResponse,
+    codex_app_server_protocol::AccountPoolWarmupDebugResponse,
+) {
+    let mut pool = pool();
+    let template = pool.accounts[0].clone();
+    let entries = [
+        (
+            "reserve-id",
+            "Reserve",
+            40,
+            false,
+            Some("warmup retry ready"),
+            "eligible for quota check and warmup",
+        ),
+        (
+            "travel-id",
+            "Travel",
+            20,
+            false,
+            Some("warmup sent; start unconfirmed"),
+            "attempt protected; quota-only confirmation or retry later",
+        ),
+        (
+            "secret-work-id",
+            "Work",
+            100,
+            true,
+            None,
+            "current execution account",
+        ),
+        (
+            "backup-id",
+            "Backup",
+            30,
+            false,
+            Some("warmup deferred; check in 0:30"),
+            "attempt protected; quota-only confirmation or retry later",
+        ),
+        (
+            "personal-id",
+            "Personal",
+            10,
+            false,
+            Some("warmup in progress"),
+            "attempt protected; quota-only confirmation or retry later",
+        ),
+    ];
+    pool.accounts = entries
+        .iter()
+        .map(|(id, name, priority, is_active, _, _)| {
+            let mut account = template.clone();
+            account.profile_id = (*id).into();
+            account.label = Some((*name).into());
+            account.email = Some(format!("{id}@example.com"));
+            account.priority = *priority;
+            account.is_active = *is_active;
+            account.rate_limits.primary = Some(AccountPoolRateLimitWindow {
+                used_percent: if *is_active { 37.0 } else { 0.0 },
+                resets_at: Some(1_900_000_000),
+            });
+            account
+        })
+        .collect();
+    let debug = codex_app_server_protocol::AccountPoolWarmupDebugResponse {
+        enabled: true,
+        pool_enabled: Some(true),
+        task_running: true,
+        pass_requested: false,
+        interval_seconds: 300,
+        settle_seconds: 30,
+        rotation_strategy: "fillFirst".into(),
+        session_model: None,
+        accounts: entries
+            .into_iter()
+            .map(|(id, name, priority, is_active, status, reason)| {
+                codex_app_server_protocol::AccountPoolWarmupDebugAccount {
+                    profile_id: id.into(),
+                    label: Some(name.into()),
+                    email: Some(format!("{id}@example.com")),
+                    priority,
+                    is_active,
+                    is_candidate: reason == "eligible for quota check and warmup",
+                    availability: "available".into(),
+                    primary_used_percent: Some(if is_active { 37.0 } else { 0.0 }),
+                    status: status.map(str::to_string),
+                    candidate_reason: Some(reason.into()),
+                    attempted_at: status.map(|_| 1_789_632_030),
+                    retry_after: None,
+                    persisted_warmup_outcome: None,
+                }
+            })
+            .collect(),
+        events: Vec::new(),
+    };
+    (pool, debug)
+}
+
+#[test]
+fn mobile_warmup_status_pages_show_labels_phases_and_candidate_reasons() {
+    let (pool, debug) = warmup_pool_and_debug();
+    insta::assert_snapshot!(
+        "mobile_warmup_page_one",
+        warmup_status(&pool, &debug, 1).unwrap()
+    );
+    insta::assert_snapshot!(
+        "mobile_warmup_page_two",
+        warmup_status(&pool, &debug, 2).unwrap()
+    );
+}
+
+#[test]
+fn mobile_warmup_status_reports_off_and_requested_pass() {
+    let (mut pool, mut debug) = warmup_pool_and_debug();
+    pool.accounts.retain(|account| account.is_active);
+    debug.accounts.retain(|account| account.is_active);
+    debug.enabled = false;
+    debug.task_running = false;
+    insta::assert_snapshot!(
+        "mobile_warmup_off",
+        warmup_status(&pool, &debug, 1).unwrap()
+    );
+
+    debug.enabled = true;
+    debug.task_running = true;
+    debug.pass_requested = true;
+    insta::assert_snapshot!(
+        "mobile_warmup_now_requested",
+        warmup_status(&pool, &debug, 1).unwrap()
+    );
 }
