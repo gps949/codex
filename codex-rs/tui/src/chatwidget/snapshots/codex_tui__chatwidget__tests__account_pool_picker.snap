@@ -1,22 +1,22 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
-assertion_line: 3648
+assertion_line: 3659
 expression: popup
 ---
-  Select Codex account
+  Account pool
+  Choose an account to use next. Automatic failover stays enabled.
 
+   Accounts (3)   Strategy   Help
 
-› 1. Rotation: fill-first (current)  Prefer the lowest priority among eligible
-                                     profiles.
-  2. Rotation: earliest-reset        Prefer due cooldowns, idle (not-yet-
-                                     started) 5h windows, then the soonest
-                                     reset.
-  3. Automatic                       Let the scheduler pick the next eligible
-                                     profile using the rotation strategy above.
-  4. Team plan (current)             priority 0 · primary@example.com ·
-                                     available · 38% 5h used, reset in 3:46 ·
-                                     40% weekly used, reset in 3:21:02
-  5. Backup label                    priority 10 · backup@example.com · cooling
-                                     down · quota unknown
+  Search accounts or settings
 
-  enter select · esc back
+› Team plan (current)        ready · 62% 5h left, reset in 3:46 · 60% weekly
+                             left, reset in 3:21:02 · quota observed 1d ago ·
+                             priority 0 · primary@example.com
+  Retry Backup label         cooling down · quota unknown · priority 10 ·
+                             backup@example.com
+  Paused account (disabled)  disabled · quota unknown · priority 20 (disabled:
+                             Enable with `codex account enable paused-acct`)
+  Choose automatically       Pick an eligible account using the Strategy tab
+
+  ← previous tab · → next tab · enter select · esc back

@@ -1,18 +1,18 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
-assertion_line: 4488
+assertion_line: 3665
 expression: "render_bottom_popup(&chat, 80)"
 ---
   Automatic selection
   Both strategies use eligible accounts and preserve reserve quota.
 
-   Accounts (0)   Strategy   Help
+   Accounts (3)   Strategy   Help
 
   Search accounts or settings
 
-› By reset time (current)  Start idle 5h windows early, then prefer the soonest
-                           reset
-  By priority              Use the lowest priority number first; keep others for
-                           failover
+› By priority (current)  Use the lowest priority number first; keep others for
+                         failover
+  By reset time          Start idle 5h windows early, then prefer the soonest
+                         reset
 
   ← previous tab · → next tab · enter select · esc back

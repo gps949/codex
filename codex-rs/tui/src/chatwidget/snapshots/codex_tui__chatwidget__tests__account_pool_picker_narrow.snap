@@ -1,0 +1,42 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3660
+expression: "render_bottom_popup(&chat, 45)"
+---
+  Account pool
+  Choose an account to use next. Automatic
+  failover stays enabled.
+
+   Accounts (3)   Strategy   Help
+
+  Search accounts or settings
+
+› Team plan (current)        ready · 62% 5h
+                             left, reset in
+                             3:46 · 60%
+                             weekly left,
+                             reset in 3:21:02
+                             · quota observed
+                             1d ago ·
+                             priority 0 ·
+                             primary@example.
+                             com
+  Retry Backup label         cooling down ·
+                             quota unknown ·
+                             priority 10 ·
+                             backup@example.c
+                             om
+  Paused account (disabled)  disabled · quota
+                             unknown ·
+                             priority 20
+                             (disabled:
+                             Enable with
+                             `codex account
+                             enable paused-
+                             acct`)
+  Choose automatically       Pick an eligible
+                             account using
+                             the Strategy tab
+
+  ← previous tab · → next tab · enter select
+  · esc back

@@ -3641,11 +3641,36 @@ async fn account_pool_picker_snapshot() {
                 rate_limits: AccountPoolRateLimits::default(),
                 window_warmup: None,
             },
+            AccountPoolAccount {
+                profile_id: "paused-acct".to_string(),
+                label: Some("Paused account".to_string()),
+                priority: 20,
+                is_active: false,
+                availability: AccountPoolAvailability::Disabled,
+                plan_type: None,
+                email: None,
+                rate_limits: AccountPoolRateLimits::default(),
+                window_warmup: None,
+            },
         ],
     }));
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert_chatwidget_snapshot!("account_pool_picker", popup);
+    assert_chatwidget_snapshot!(
+        "account_pool_picker_narrow",
+        render_bottom_popup(&chat, /*width*/ 45)
+    );
+    chat.handle_key_event(KeyEvent::from(KeyCode::Right));
+    assert_chatwidget_snapshot!(
+        "account_pool_strategy",
+        render_bottom_popup(&chat, /*width*/ 80)
+    );
+    chat.handle_key_event(KeyEvent::from(KeyCode::Right));
+    assert_chatwidget_snapshot!(
+        "account_pool_help",
+        render_bottom_popup(&chat, /*width*/ 80)
+    );
 }
 
 #[tokio::test]
@@ -4459,6 +4484,7 @@ async fn account_pool_strategy_updates_in_open_chat() {
         active_generation: None,
         accounts: vec![],
     }));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Right));
     assert_chatwidget_snapshot!(
         "account_pool_earliest_reset",
         render_bottom_popup(&chat, /*width*/ 80)

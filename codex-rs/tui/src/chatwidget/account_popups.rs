@@ -1,9 +1,9 @@
 //! `/account` picker for the native multi-account pool.
 //!
-//! The picker lists every configured account profile with its scheduling
-//! state and lets the user activate one (or return to automatic fill-first
-//! scheduling). Activation goes through the app-server `accountPool/use`
-//! RPC, so it drives the exact same scheduler used by model requests.
+//! Accounts, Strategy, and Help tabs separate the next account choice from
+//! automatic scheduling and explain the current quota-saving settings.
+//! Choosing a profile uses the app-server `accountPool/use` RPC; automatic
+//! failover remains enabled for subsequent model requests.
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -21,11 +21,18 @@ use codex_login::WindowWarmupOutcome;
 use codex_login::format_reset_countdown;
 use codex_login::visible_window_warmup_status;
 use ratatui::text::Span;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Wrap;
 
 use super::*;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
+use crate::bottom_pane::SelectionTab;
 use crate::bottom_pane::SelectionViewParams;
+use crate::keymap::ListAction;
+
+#[path = "account_pool_help.rs"]
+mod help;
 
 impl ChatWidget {
     pub(crate) fn open_account_pool_picker(
@@ -48,13 +55,14 @@ impl ChatWidget {
             return;
         }
 
-        let rotation_strategy = self.config_ref().account_pool.effective_rotation_strategy();
+        let config = &self.config_ref().account_pool;
+        let rotation_strategy = config.effective_rotation_strategy();
         let now = Utc::now();
-        let mut items: Vec<SelectionItem> =
-            Vec::with_capacity(pool.accounts.len() + rotation_strategy_items().len() + 1);
+        let mut strategy_items = Vec::new();
         for (strategy, name, description) in rotation_strategy_items() {
             let is_current = rotation_strategy == strategy;
-            items.push(SelectionItem {
+            strategy_items.push(SelectionItem {
+                search_value: Some(format!("{strategy:?} {name} {description}")),
                 name,
                 description: Some(description),
                 is_current,
@@ -65,45 +73,132 @@ impl ChatWidget {
                 ..Default::default()
             });
         }
-        let automatic_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
-            tx.send(AppEvent::ActivateAccountPoolProfile {
-                profile_id: None,
-                force: true,
-            });
-        })];
-        items.push(SelectionItem {
-            name: "Automatic".to_string(),
-            description: Some(
-                "Let the scheduler pick the next eligible profile using the rotation strategy above."
-                    .to_string(),
-            ),
-            actions: automatic_actions,
-            dismiss_on_select: true,
-            ..Default::default()
+        strategy_items.sort_by_key(|item| !item.is_current);
+        let initial_selected_idx = pool.accounts.iter().position(|account| {
+            account.is_active
+                && !matches!(
+                    account.availability,
+                    AccountPoolAvailability::Disabled
+                        | AccountPoolAvailability::AuthenticationUnavailable { .. }
+                )
         });
+        let mut account_items = Vec::with_capacity(pool.accounts.len() + 1);
         for account in &pool.accounts {
             let profile_id = account.profile_id.clone();
+            let retry = matches!(
+                account.availability,
+                AccountPoolAvailability::Exhausted { .. }
+            );
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::ActivateAccountPoolProfile {
                     profile_id: Some(profile_id.clone()),
-                    // Explicit picker selection must probe cooling-down accounts.
-                    force: true,
+                    force: retry,
                 });
             })];
-            items.push(SelectionItem {
-                name: account_display_name(account),
+            let disabled_reason = match account.availability {
+                AccountPoolAvailability::Disabled => Some(format!(
+                    "Enable with `codex account enable {profile_id}`",
+                    profile_id = account.profile_id
+                )),
+                AccountPoolAvailability::AuthenticationUnavailable { .. } => Some(format!(
+                    "Sign in again with `codex account login {profile_id}`",
+                    profile_id = account.profile_id
+                )),
+                AccountPoolAvailability::Available | AccountPoolAvailability::Exhausted { .. } => {
+                    None
+                }
+            };
+            account_items.push(SelectionItem {
+                name: if retry {
+                    format!("Retry {}", account_display_name(account))
+                } else {
+                    account_display_name(account)
+                },
                 description_spans: account_description(account, now),
+                selected_description: retry.then(|| {
+                    "Clear the local cooldown and retry this account. The server's quota limit still applies."
+                        .to_string()
+                }),
+                search_value: Some(format!(
+                    "{} {} {}",
+                    account_display_name(account),
+                    account.profile_id,
+                    account.email.as_deref().unwrap_or_default()
+                )),
                 is_current: account.is_active,
+                disabled_reason,
                 actions,
                 dismiss_on_select: true,
                 ..Default::default()
             });
         }
+        let automatic_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
+            tx.send(AppEvent::ActivateAccountPoolProfile {
+                profile_id: None,
+                force: false,
+            });
+        })];
+        account_items.push(SelectionItem {
+            name: "Choose automatically".to_string(),
+            description: Some("Pick an eligible account using the Strategy tab".to_string()),
+            search_value: Some("automatic scheduler".to_string()),
+            actions: automatic_actions,
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let help_items = help::items(config);
+        let mut hint = Vec::new();
+        let keymap = self.bottom_pane.list_keymap();
+        for (action, label) in [
+            (ListAction::MoveLeft, "previous tab"),
+            (ListAction::MoveRight, "next tab"),
+            (ListAction::Accept, "select"),
+            (ListAction::Cancel, "back"),
+        ] {
+            if let Some(key) = keymap.primary_hint(action) {
+                if !hint.is_empty() {
+                    hint.push(" · ".dim());
+                }
+                hint.extend(key.spans());
+                hint.push(format!(" {label}").dim());
+            }
+        }
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Select Codex account".to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
+            footer_hint: Some(hint.into()),
+            tabs: vec![
+                SelectionTab {
+                    id: "accounts".to_string(),
+                    label: format!("Accounts ({})", pool.accounts.len()),
+                    header: account_picker_header(
+                        "Account pool",
+                        "Choose an account to use next. Automatic failover stays enabled.",
+                    ),
+                    items: account_items,
+                },
+                SelectionTab {
+                    id: "strategy".to_string(),
+                    label: "Strategy".to_string(),
+                    header: account_picker_header(
+                        "Automatic selection",
+                        "Both strategies use eligible accounts and preserve reserve quota.",
+                    ),
+                    items: strategy_items,
+                },
+                SelectionTab {
+                    id: "help".to_string(),
+                    label: "Help".to_string(),
+                    header: account_picker_header(
+                        "How your pool works",
+                        "Review current settings and quota-saving behavior.",
+                    ),
+                    items: help_items,
+                },
+            ],
+            is_searchable: true,
+            search_placeholder: Some("Search accounts or settings".to_string()),
+            initial_selected_idx,
             ..Default::default()
         });
     }
@@ -184,21 +279,8 @@ pub(crate) fn account_display_name(account: &AccountPoolAccount) -> String {
 }
 
 fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<Span<'static>> {
-    let mut parts: Vec<Vec<Span<'static>>> =
-        vec![vec![format!("priority {}", account.priority).dim()]];
-    if let Some(email) = account
-        .email
-        .as_deref()
-        .map(str::trim)
-        .filter(|email| !email.is_empty() && *email != account_display_name(account))
-    {
-        parts.push(vec![email.to_string().dim()]);
-    }
-    if let Some(plan) = &account.plan_type {
-        parts.push(vec![format!("{plan:?}").to_lowercase().dim()]);
-    }
-    parts.push(vec![match &account.availability {
-        AccountPoolAvailability::Available => "available".dim(),
+    let mut parts = vec![vec![match &account.availability {
+        AccountPoolAvailability::Available => "ready".green(),
         AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
             Some(resets_at) => {
                 let remaining_seconds = (*resets_at).saturating_sub(now.timestamp());
@@ -214,11 +296,9 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
             }
             None => "cooling down".dim(),
         },
-        AccountPoolAvailability::AuthenticationUnavailable { .. } => {
-            "login broken; run `codex account login <id>`".dim()
-        }
+        AccountPoolAvailability::AuthenticationUnavailable { .. } => "needs login".red(),
         AccountPoolAvailability::Disabled => "disabled".dim(),
-    }]);
+    }]];
     if account.rate_limits.primary.is_none() && account.rate_limits.secondary.is_none() {
         parts.push(vec!["quota unknown".dim()]);
     }
@@ -235,6 +315,31 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
             AccountRateLimitKind::Weekly,
             now,
         ));
+    }
+    if let Some(observed_at) = account.rate_limits.observed_at {
+        let age_minutes = now.timestamp().saturating_sub(observed_at) / 60;
+        if age_minutes >= 15 {
+            let age = if age_minutes >= 24 * 60 {
+                format!("{}d", age_minutes / (24 * 60))
+            } else if age_minutes >= 60 {
+                format!("{}h", age_minutes / 60)
+            } else {
+                format!("{age_minutes}m")
+            };
+            parts.push(vec![format!("quota observed {age} ago").dim()]);
+        }
+    }
+    if let Some(plan) = &account.plan_type {
+        parts.push(vec![format!("{plan:?}").to_lowercase().dim()]);
+    }
+    parts.push(vec![format!("priority {}", account.priority).dim()]);
+    if let Some(email) = account
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|email| !email.is_empty() && *email != account_display_name(account))
+    {
+        parts.push(vec![email.to_string().dim()]);
     }
     if let Some(warmup) = account.window_warmup.as_ref().and_then(|warmup| {
         visible_window_warmup_status(
@@ -276,11 +381,14 @@ fn account_rate_limit_description(
         AccountRateLimitKind::Weekly => text.magenta(),
     };
     let label = match kind {
-        AccountRateLimitKind::FiveHour => " 5h used",
-        AccountRateLimitKind::Weekly => " weekly used",
+        AccountRateLimitKind::FiveHour => " 5h left",
+        AccountRateLimitKind::Weekly => " weekly left",
     };
     let mut spans = vec![
-        colorize(format!("{:.0}%", window.used_percent)),
+        colorize(format!(
+            "{:.0}%",
+            (100.0 - window.used_percent).clamp(0.0, 100.0)
+        )),
         label.dim(),
     ];
     // A 0% primary window has not started ticking; the backend still reports a full-window
@@ -310,16 +418,28 @@ fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 
     [
         (
             AccountPoolRotationStrategy::FillFirst,
-            "Rotation: fill-first".to_string(),
-            "Prefer the lowest priority among eligible profiles.".to_string(),
+            "By priority".to_string(),
+            "Use the lowest priority number first; keep others for failover".to_string(),
         ),
         (
             AccountPoolRotationStrategy::EarliestReset,
-            "Rotation: earliest-reset".to_string(),
-            "Prefer due cooldowns, idle (not-yet-started) 5h windows, then the soonest reset."
-                .to_string(),
+            "By reset time".to_string(),
+            "Start idle 5h windows early, then prefer the soonest reset".to_string(),
         ),
     ]
+}
+
+fn account_picker_header(
+    title: &str,
+    subtitle: &str,
+) -> Box<dyn crate::render::renderable::Renderable> {
+    Box::new(
+        Paragraph::new(vec![
+            Line::from(title.to_string().bold()),
+            Line::from(subtitle.to_string().dim()),
+        ])
+        .wrap(Wrap { trim: false }),
+    )
 }
 
 fn protocol_warmup_to_login(warmup: &AccountPoolWindowWarmup) -> WindowWarmupObservation {

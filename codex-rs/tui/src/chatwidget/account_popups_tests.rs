@@ -4,6 +4,105 @@ use codex_login::format_reset_countdown;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn account_picker_starts_on_active_account_and_skips_disabled_profile() {
+    let (mut chat, _tx, mut rx, _op_rx) =
+        crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+    let active = AccountPoolAccount {
+        profile_id: "work".into(),
+        label: Some("Work seat".into()),
+        priority: 0,
+        is_active: true,
+        availability: AccountPoolAvailability::Available,
+        plan_type: None,
+        email: None,
+        rate_limits: AccountPoolRateLimits::default(),
+        window_warmup: None,
+    };
+    let pool = AccountPoolReadResponse {
+        enabled: true,
+        active_profile_id: Some(active.profile_id.clone()),
+        active_generation: Some(1),
+        accounts: vec![
+            AccountPoolAccount {
+                profile_id: "personal".into(),
+                label: Some("Personal account".into()),
+                priority: 10,
+                is_active: false,
+                ..active.clone()
+            },
+            active.clone(),
+            AccountPoolAccount {
+                profile_id: "paused".into(),
+                label: Some("Paused account".into()),
+                is_active: false,
+                availability: AccountPoolAvailability::Disabled,
+                ..active.clone()
+            },
+            AccountPoolAccount {
+                profile_id: "relogin".into(),
+                label: Some("Sign-in expired".into()),
+                is_active: false,
+                availability: AccountPoolAvailability::AuthenticationUnavailable {
+                    reason: "Refresh token expired".into(),
+                },
+                ..active
+            },
+        ],
+    };
+    chat.open_account_pool_picker(Ok(pool.clone()));
+    while rx.try_recv().is_ok() {}
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    match rx.try_recv().expect("account selection event") {
+        AppEvent::ActivateAccountPoolProfile { profile_id, force } => {
+            assert_eq!((profile_id.as_deref(), force), (Some("work"), false));
+        }
+        other => panic!("expected account activation, got {other:?}"),
+    }
+    chat.open_account_pool_picker(Ok(pool));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    match rx.try_recv().expect("automatic selection event") {
+        AppEvent::ActivateAccountPoolProfile { profile_id, force } => {
+            assert_eq!((profile_id, force), (None, false));
+        }
+        other => panic!("expected automatic selection, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn exhausted_profile_requires_the_labeled_retry_action() {
+    let (mut chat, _tx, mut rx, _op_rx) =
+        crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+    chat.open_account_pool_picker(Ok(AccountPoolReadResponse {
+        enabled: true,
+        active_profile_id: None,
+        active_generation: None,
+        accounts: vec![AccountPoolAccount {
+            profile_id: "work".into(),
+            label: Some("Work seat".into()),
+            priority: 0,
+            is_active: false,
+            availability: AccountPoolAvailability::Exhausted { resets_at: None },
+            plan_type: None,
+            email: None,
+            rate_limits: AccountPoolRateLimits::default(),
+            window_warmup: None,
+        }],
+    }));
+    let rendered = crate::chatwidget::tests::render_bottom_popup(&chat, /*width*/ 80);
+    assert!(rendered.contains("Retry Work seat"), "{rendered}");
+    assert!(rendered.contains("Clear the local cooldown"), "{rendered}");
+    while rx.try_recv().is_ok() {}
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    match rx.try_recv().expect("explicit retry event") {
+        AppEvent::ActivateAccountPoolProfile { profile_id, force } => {
+            assert_eq!((profile_id.as_deref(), force), (Some("work"), true));
+        }
+        other => panic!("expected account retry, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn pool_quota_observations_keep_identity_and_only_activation_requires_refresh() {
     let (mut chat, _tx, _rx, _op_rx) =
         crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
@@ -51,7 +150,7 @@ fn reset_countdown_uses_compact_colon_units() {
 }
 
 #[test]
-fn rate_limit_descriptions_color_percent_and_countdown_by_window() {
+fn rate_limit_descriptions_color_remaining_percent_and_countdown_by_window() {
     let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
     let window = AccountPoolRateLimitWindow {
         used_percent: 38.0,
@@ -61,8 +160,8 @@ fn rate_limit_descriptions_color_percent_and_countdown_by_window() {
     assert_eq!(
         account_rate_limit_description(&window, AccountRateLimitKind::FiveHour, now),
         vec![
-            "38%".cyan(),
-            " 5h used".dim(),
+            "62%".cyan(),
+            " 5h left".dim(),
             ", reset in ".dim(),
             "3:46".cyan(),
         ]
@@ -70,8 +169,8 @@ fn rate_limit_descriptions_color_percent_and_countdown_by_window() {
     assert_eq!(
         account_rate_limit_description(&window, AccountRateLimitKind::Weekly, now),
         vec![
-            "38%".magenta(),
-            " weekly used".dim(),
+            "62%".magenta(),
+            " weekly left".dim(),
             ", reset in ".dim(),
             "3:46".magenta(),
         ]
@@ -89,8 +188,8 @@ fn zero_percent_five_hour_window_marks_not_started() {
     assert_eq!(
         account_rate_limit_description(&idle, AccountRateLimitKind::FiveHour, now),
         vec![
-            "0%".cyan(),
-            " 5h used".dim(),
+            "100%".cyan(),
+            " 5h left".dim(),
             ", ".dim(),
             "not started".cyan(),
         ]
@@ -99,8 +198,8 @@ fn zero_percent_five_hour_window_marks_not_started() {
     assert_eq!(
         account_rate_limit_description(&idle, AccountRateLimitKind::Weekly, now),
         vec![
-            "0%".magenta(),
-            " weekly used".dim(),
+            "100%".magenta(),
+            " weekly left".dim(),
             ", reset in ".dim(),
             "5:00".magenta(),
         ]
@@ -122,15 +221,15 @@ fn elapsed_and_unknown_resets_have_compact_output() {
     assert_eq!(
         account_rate_limit_description(&elapsed, AccountRateLimitKind::Weekly, now),
         vec![
-            "40%".magenta(),
-            " weekly used".dim(),
+            "60%".magenta(),
+            " weekly left".dim(),
             ", reset ".dim(),
             "now".magenta(),
         ]
     );
     assert_eq!(
         account_rate_limit_description(&unknown, AccountRateLimitKind::Weekly, now),
-        vec!["40%".magenta(), " weekly used".dim()]
+        vec!["60%".magenta(), " weekly left".dim()]
     );
 }
 
