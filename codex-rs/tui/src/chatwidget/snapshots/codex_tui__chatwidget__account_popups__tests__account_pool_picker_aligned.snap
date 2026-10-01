@@ -1,0 +1,18 @@
+---
+source: tui/src/chatwidget/account_popups_tests.rs
+expression: popup
+---
+  Account pool
+  Choose an account to use next. Automatic failover stays enabled.
+
+   Accounts (4)   Strategy   Help
+
+  Search accounts or settings
+
+› Work seat (current)      ready                       · 100% 5h left, start unconfirmed ·   0% weekly left, reset now       · pro    · priority    0
+  Spare seat               ready                       ·   9% 5h left, reset 3:46        · 100% weekly left, reset 3d 21h 2m · plus   · priority   10
+  Expired seat (disabled)  needs login                 ·   -- 5h left, unknown           ·   -- weekly left, unknown         · plan ? · priority  100 (disabled: Sign in again with `codex account login expired`)
+  Retry Cooling seat       cooling down, reset in 0:30 ·   0% 5h left                    ·   -- weekly left, unknown         · pro    · priority 1000
+  Choose automatically     Pick an eligible account using the Strategy tab
+
+  ← previous tab · → next tab · enter select · esc back

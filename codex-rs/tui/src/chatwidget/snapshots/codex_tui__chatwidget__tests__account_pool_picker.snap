@@ -9,13 +9,16 @@ expression: popup
 
   Search accounts or settings
 
-› Team plan (current)        ready · 62% 5h left, reset in 3:46 · 60% weekly
-                             left, reset in 3d 21h 2m · quota observed 1d ago ·
-                             priority 0 · primary@example.com
-  Retry Backup label         cooling down · quota unknown · priority 10 ·
-                             backup@example.com
-  Paused account (disabled)  disabled · quota unknown · priority 20 (disabled:
-                             Enable with `codex account enable paused-acct`)
+› Team plan (current)        ready        ·  62% 5h left, reset 3:46 ·  60%
+                             weekly left, reset 3d 21h 2m · plan ? · priority  0
+                             · quota observed 1d ago · primary@example.com
+  Retry Backup label         cooling down ·   -- 5h left, unknown    ·   --
+                             weekly left, unknown         · plan ? · priority 10
+                             · backup@example.com
+  Paused account (disabled)  disabled     ·   -- 5h left, unknown    ·   --
+                             weekly left, unknown         · plan ? · priority 20
+                             (disabled: Enable with `codex account enable
+                             paused-acct`)
   Choose automatically       Pick an eligible account using the Strategy tab
 
   ← previous tab · → next tab · enter select · esc back

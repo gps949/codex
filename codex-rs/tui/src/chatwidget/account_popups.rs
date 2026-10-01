@@ -33,6 +33,8 @@ use crate::bottom_pane::SelectionTab;
 use crate::bottom_pane::SelectionViewParams;
 use crate::keymap::ListAction;
 
+#[path = "account_pool_columns.rs"]
+mod columns;
 #[path = "account_pool_help.rs"]
 mod help;
 
@@ -84,6 +86,7 @@ impl ChatWidget {
                         | AccountPoolAvailability::AuthenticationUnavailable { .. }
                 )
         });
+        let column_widths = columns::AccountColumnWidths::new(&pool.accounts, now);
         let mut account_items = Vec::with_capacity(pool.accounts.len() + 1);
         for account in &pool.accounts {
             let profile_id = account.profile_id.clone();
@@ -116,7 +119,7 @@ impl ChatWidget {
                 } else {
                     account_display_name(account)
                 },
-                description_spans: account_description(account, now),
+                description_spans: column_widths.description(account, now),
                 selected_description: retry.then(|| {
                     "Clear the local cooldown and retry this account. The server's quota limit still applies."
                         .to_string()
@@ -280,7 +283,10 @@ pub(crate) fn account_display_name(account: &AccountPoolAccount) -> String {
         .unwrap_or_else(|| account.profile_id.clone())
 }
 
-fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<Span<'static>> {
+fn account_description_parts(
+    account: &AccountPoolAccount,
+    now: DateTime<Utc>,
+) -> Vec<Vec<Span<'static>>> {
     let mut parts = vec![vec![match &account.availability {
         AccountPoolAvailability::Available => "ready".green(),
         AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
@@ -301,15 +307,14 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
         AccountPoolAvailability::AuthenticationUnavailable { .. } => "needs login".red(),
         AccountPoolAvailability::Disabled => "disabled".dim(),
     }]];
-    if account.rate_limits.primary.is_none() && account.rate_limits.secondary.is_none() {
-        parts.push(vec!["quota unknown".dim()]);
-    }
     if let Some(primary) = &account.rate_limits.primary {
         parts.push(account_rate_limit_description(
             primary,
             AccountRateLimitKind::FiveHour,
             now,
         ));
+    } else {
+        parts.push(vec!["  -- 5h left, unknown".dim()]);
     }
     if let Some(secondary) = &account.rate_limits.secondary {
         parts.push(account_rate_limit_description(
@@ -317,7 +322,15 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
             AccountRateLimitKind::Weekly,
             now,
         ));
+    } else {
+        parts.push(vec!["  -- weekly left, unknown".dim()]);
     }
+    if let Some(plan) = &account.plan_type {
+        parts.push(vec![format!("{plan:?}").to_lowercase().dim()]);
+    } else {
+        parts.push(vec!["plan ?".dim()]);
+    }
+    parts.push(vec!["priority ".dim(), account.priority.to_string().dim()]);
     if let Some(observed_at) = account.rate_limits.observed_at {
         let age_minutes = now.timestamp().saturating_sub(observed_at) / 60;
         if age_minutes >= 15 {
@@ -331,10 +344,7 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
             parts.push(vec![format!("quota observed {age} ago").dim()]);
         }
     }
-    if let Some(plan) = &account.plan_type {
-        parts.push(vec![format!("{plan:?}").to_lowercase().dim()]);
-    }
-    parts.push(vec![format!("priority {}", account.priority).dim()]);
+
     if let Some(email) = account
         .email
         .as_deref()
@@ -362,14 +372,7 @@ fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<
         parts.push(vec![warmup.dim()]);
     }
 
-    let mut description = Vec::new();
-    for part in parts {
-        if !description.is_empty() {
-            description.push(" · ".dim());
-        }
-        description.extend(part);
-    }
-    description
+    parts
 }
 
 #[derive(Clone, Copy)]
@@ -393,7 +396,7 @@ fn account_rate_limit_description(
     };
     let mut spans = vec![
         colorize(format!(
-            "{:.0}%",
+            "{:>3.0}%",
             (100.0 - window.used_percent).clamp(0.0, 100.0)
         )),
         label.dim(),
@@ -410,10 +413,7 @@ fn account_rate_limit_description(
         let (prefix, countdown) = if remaining_seconds <= 0 {
             (", reset ", "now".to_string())
         } else {
-            (
-                ", reset in ",
-                format_reset_countdown(remaining_seconds as u64),
-            )
+            (", reset ", format_reset_countdown(remaining_seconds as u64))
         };
         spans.push(prefix.dim());
         spans.push(colorize(countdown));

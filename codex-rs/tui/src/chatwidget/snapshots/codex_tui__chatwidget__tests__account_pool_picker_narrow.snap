@@ -10,23 +10,32 @@ expression: "render_bottom_popup(&chat, 45)"
 
   Search accounts or settings
 
-› Team plan (current)        ready · 62% 5h
-                             left, reset in
-                             3:46 · 60%
-                             weekly left,
-                             reset in 3d 21h
-                             2m · quota
-                             observed 1d ago
-                             · priority 0 ·
+› Team plan (current)        ready        ·
+                             62% 5h left,
+                             reset 3:46 ·
+                             60% weekly left,
+                             reset 3d 21h 2m
+                             · plan ? ·
+                             priority  0 ·
+                             quota observed
+                             1d ago ·
                              primary@example.
                              com
   Retry Backup label         cooling down ·
-                             quota unknown ·
+                             -- 5h left,
+                             unknown    ·
+                             -- weekly left,
+                             unknown
+                             · plan ? ·
                              priority 10 ·
                              backup@example.c
                              om
-  Paused account (disabled)  disabled · quota
-                             unknown ·
+  Paused account (disabled)  disabled     ·
+                             -- 5h left,
+                             unknown    ·
+                             -- weekly left,
+                             unknown
+                             · plan ? ·
                              priority 20
                              (disabled:
                              Enable with

@@ -3,6 +3,134 @@ use codex_app_server_protocol::AccountPoolRateLimits;
 use codex_login::format_reset_countdown;
 use pretty_assertions::assert_eq;
 
+fn account_description(account: &AccountPoolAccount, now: DateTime<Utc>) -> Vec<Span<'static>> {
+    columns::AccountColumnWidths::new(std::slice::from_ref(account), now).description(account, now)
+}
+
+#[tokio::test]
+async fn account_pool_picker_aligns_mixed_quota_columns() {
+    let (mut chat, _tx, _rx, _op_rx) =
+        crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+    let now = Utc::now().timestamp();
+    let active = AccountPoolAccount {
+        profile_id: "work".into(),
+        label: Some("Work seat".into()),
+        priority: 0,
+        is_active: true,
+        availability: AccountPoolAvailability::Available,
+        plan_type: Some(codex_protocol::account::PlanType::Pro),
+        email: None,
+        rate_limits: AccountPoolRateLimits {
+            primary: Some(AccountPoolRateLimitWindow {
+                used_percent: 0.0,
+                resets_at: Some(now + 5 * 60 * 60),
+            }),
+            secondary: Some(AccountPoolRateLimitWindow {
+                used_percent: 100.0,
+                resets_at: Some(now - 60),
+            }),
+            observed_at: None,
+        },
+        window_warmup: None,
+    };
+    chat.open_account_pool_picker(Ok(AccountPoolReadResponse {
+        enabled: true,
+        active_profile_id: Some("work".into()),
+        active_generation: Some(1),
+        accounts: vec![
+            active.clone(),
+            AccountPoolAccount {
+                profile_id: "spare".into(),
+                label: Some("Spare seat".into()),
+                priority: 10,
+                is_active: false,
+                plan_type: Some(codex_protocol::account::PlanType::Plus),
+                rate_limits: AccountPoolRateLimits {
+                    primary: Some(AccountPoolRateLimitWindow {
+                        used_percent: 91.0,
+                        resets_at: Some(now + 3 * 60 * 60 + 46 * 60),
+                    }),
+                    secondary: Some(AccountPoolRateLimitWindow {
+                        used_percent: 0.0,
+                        resets_at: Some(now + 3 * 24 * 60 * 60 + 21 * 60 * 60 + 2 * 60),
+                    }),
+                    observed_at: None,
+                },
+                ..active.clone()
+            },
+            AccountPoolAccount {
+                profile_id: "expired".into(),
+                label: Some("Expired seat".into()),
+                priority: 100,
+                is_active: false,
+                availability: AccountPoolAvailability::AuthenticationUnavailable {
+                    reason: "Sign-in expired".into(),
+                },
+                plan_type: None,
+                rate_limits: AccountPoolRateLimits::default(),
+                ..active.clone()
+            },
+            AccountPoolAccount {
+                profile_id: "cooling".into(),
+                label: Some("Cooling seat".into()),
+                priority: 1000,
+                is_active: false,
+                availability: AccountPoolAvailability::Exhausted {
+                    resets_at: Some(now + 30 * 60),
+                },
+                rate_limits: AccountPoolRateLimits {
+                    primary: Some(AccountPoolRateLimitWindow {
+                        used_percent: 100.0,
+                        resets_at: None,
+                    }),
+                    secondary: None,
+                    observed_at: None,
+                },
+                ..active
+            },
+        ],
+    }));
+    let popup = crate::chatwidget::tests::render_bottom_popup(&chat, /*width*/ 220);
+    let rows: Vec<_> = ["Work seat", "Spare seat", "Expired seat", "Cooling seat"]
+        .into_iter()
+        .map(|name| popup.lines().find(|line| line.contains(name)).unwrap())
+        .collect();
+    let columns: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            ["5h", "week", "priority"].map(|field| {
+                row.find(field)
+                    .map(|index| unicode_width::UnicodeWidthStr::width(&row[..index]))
+            })
+        })
+        .collect();
+    assert_eq!(columns, vec![columns[0]; rows.len()]);
+    let weekly_reset_values: Vec<_> = rows
+        .iter()
+        .take(2)
+        .map(|row| {
+            let weekly = row.find("weekly left").unwrap();
+            let reset = weekly + row[weekly..].find("reset ").unwrap() + "reset ".len();
+            unicode_width::UnicodeWidthStr::width(&row[..reset])
+        })
+        .collect();
+    assert_eq!(weekly_reset_values, vec![weekly_reset_values[0]; 2]);
+    let priority_ends: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            let start = row.find("priority ").unwrap() + "priority ".len();
+            let number: String = row[start..]
+                .chars()
+                .take_while(|character| character.is_ascii_digit() || *character == ' ')
+                .collect();
+            unicode_width::UnicodeWidthStr::width(&row[..start])
+                + unicode_width::UnicodeWidthStr::width(number.trim_end())
+        })
+        .collect();
+    assert_eq!(priority_ends, vec![priority_ends[0]; rows.len()]);
+    insta::assert_snapshot!("account_pool_picker_aligned", popup);
+}
+
 #[tokio::test]
 async fn account_picker_starts_on_active_account_and_skips_disabled_profile() {
     let (mut chat, _tx, mut rx, _op_rx) =
@@ -160,18 +288,18 @@ fn rate_limit_descriptions_color_remaining_percent_and_countdown_by_window() {
     assert_eq!(
         account_rate_limit_description(&window, AccountRateLimitKind::FiveHour, now),
         vec![
-            "62%".cyan(),
+            " 62%".cyan(),
             " 5h left".dim(),
-            ", reset in ".dim(),
+            ", reset ".dim(),
             "3:46".cyan(),
         ]
     );
     assert_eq!(
         account_rate_limit_description(&window, AccountRateLimitKind::Weekly, now),
         vec![
-            "62%".magenta(),
+            " 62%".magenta(),
             " weekly left".dim(),
-            ", reset in ".dim(),
+            ", reset ".dim(),
             "3:46".magenta(),
         ]
     );
@@ -200,7 +328,7 @@ fn zero_percent_five_hour_window_does_not_claim_whether_it_started() {
         vec![
             "100%".magenta(),
             " weekly left".dim(),
-            ", reset in ".dim(),
+            ", reset ".dim(),
             "5:00".magenta(),
         ]
     );
@@ -221,7 +349,7 @@ fn elapsed_and_unknown_resets_have_compact_output() {
     assert_eq!(
         account_rate_limit_description(&elapsed, AccountRateLimitKind::Weekly, now),
         vec![
-            "60%".magenta(),
+            " 60%".magenta(),
             " weekly left".dim(),
             ", reset ".dim(),
             "now".magenta(),
@@ -229,7 +357,7 @@ fn elapsed_and_unknown_resets_have_compact_output() {
     );
     assert_eq!(
         account_rate_limit_description(&unknown, AccountRateLimitKind::Weekly, now),
-        vec!["60%".magenta(), " weekly left".dim()]
+        vec![" 60%".magenta(), " weekly left".dim()]
     );
 }
 
