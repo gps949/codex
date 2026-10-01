@@ -158,83 +158,119 @@ fn merge_window(
     Some(incoming)
 }
 
+pub(super) struct WarmupQuotaProbe {
+    pub(super) limits: AccountRateLimits,
+    pub(super) ordinary_allowed: bool,
+}
+
 pub(super) async fn refresh_rate_limits_via_get_with_retries(
     config: &Config,
+    auth_manager: &AuthManager,
     auth: &CodexAuth,
     stream_started: bool,
-) -> Option<AccountRateLimits> {
+) -> anyhow::Result<Option<AccountRateLimits>> {
     let mut best = None;
     for (index, delay_secs) in GET_VERIFY_DELAYS_SECS.iter().enumerate() {
         if *delay_secs > 0 {
             tokio::time::sleep(Duration::from_secs(*delay_secs)).await;
         }
-        let Some(limits) = refresh_rate_limits_via_get(config, auth).await else {
+        let Some(limits) = refresh_rate_limits_via_get(config, auth_manager, auth).await? else {
+            if stream_started {
+                break;
+            }
             continue;
         };
+        let limits = merge_account_rate_limits_monotonic(best.as_ref(), limits.limits);
         if account_primary_started(&limits) {
-            return Some(limits);
+            return Ok(Some(limits));
         }
-        // Keep the freshest idle snapshot; if Responses already proved a start, preserve that
-        // below via monotonic merge with stream limits.
         best = Some(limits);
-        // After a stream-proven start, one confirming GET is enough.
         if stream_started && index == 0 {
             break;
         }
     }
-    best
-}
-
-pub(super) fn primary_window_started(pool: &AccountPool, profile_id: &AccountProfileId) -> bool {
-    pool.snapshots()
-        .into_iter()
-        .find(|snapshot| &snapshot.profile.id == profile_id)
-        .is_some_and(|snapshot| account_primary_started(&snapshot.rate_limits))
+    Ok(best)
 }
 
 pub(super) async fn refresh_rate_limits_via_get(
     config: &Config,
-    auth: &CodexAuth,
-) -> Option<AccountRateLimits> {
+    auth_manager: &AuthManager,
+    expected_auth: &CodexAuth,
+) -> anyhow::Result<Option<WarmupQuotaProbe>> {
+    auth_manager.reload().await;
+    let Some((auth, _)) = auth_manager.auth_with_http_client_factory().await else {
+        anyhow::bail!("standby credentials became unavailable during warmup");
+    };
+    if !same_warmup_identity(expected_auth, &auth) {
+        anyhow::bail!("standby user or workspace changed during warmup");
+    }
     let client = BackendClient::from_auth(
         config.chatgpt_base_url.clone(),
-        auth,
+        &auth,
         config.http_client_factory(),
     );
     let observed_at = Utc::now();
-    let snapshots = tokio::time::timeout(GET_REFRESH_TIMEOUT, client.get_rate_limits_many())
-        .await
-        .ok()?
-        .ok()?;
-    let snapshot = snapshots
+    let observed = match tokio::time::timeout(
+        GET_REFRESH_TIMEOUT,
+        client.get_rate_limits_with_reset_credits(),
+    )
+    .await
+    {
+        Ok(Ok(snapshots)) => snapshots,
+        Ok(Err(_)) | Err(_) => return Ok(None),
+    };
+    // Re-login may have replaced the seat while the GET was in flight. Its quota must not be
+    // published under the prior profile identity, even if the HTTP request itself succeeded.
+    auth_manager.reload().await;
+    if !auth_manager
+        .auth_cached()
+        .as_ref()
+        .is_some_and(|current| same_warmup_identity(expected_auth, current))
+    {
+        anyhow::bail!("standby user or workspace changed while refreshing quota");
+    }
+    if observed
+        .account_id
+        .as_ref()
+        .is_some_and(|id| Some(id) != auth.get_account_id().as_ref())
+        || observed
+            .user_id
+            .as_ref()
+            .is_some_and(|id| Some(id) != auth.get_chatgpt_user_id().as_ref())
+    {
+        anyhow::bail!("standby quota belongs to a different user or workspace");
+    }
+    let snapshot = observed
+        .rate_limits
         .iter()
         .find(|snapshot| snapshot.limit_id.as_deref() == Some("codex"))
         .or_else(|| {
-            snapshots
+            observed
+                .rate_limits
                 .iter()
                 .find(|snapshot| snapshot.limit_id.is_none())
-        })?;
-    Some(AccountRateLimits {
-        primary: snapshot.primary.as_ref().map(convert_rate_limit_window),
-        secondary: snapshot.secondary.as_ref().map(convert_rate_limit_window),
-        observed_at: Some(observed_at),
-    })
+        });
+    Ok(snapshot.map(|snapshot| WarmupQuotaProbe {
+        ordinary_allowed: observed.ordinary_usage_allowed != Some(false)
+            && snapshot.spend_control_reached != Some(true),
+        limits: AccountRateLimits {
+            observed_at: Some(observed_at),
+            ..convert_rate_limits(snapshot)
+        },
+    }))
 }
 
 pub(super) fn convert_rate_limits(snapshot: &RateLimitSnapshot) -> AccountRateLimits {
-    AccountRateLimits {
-        primary: snapshot.primary.as_ref().map(convert_rate_limit_window),
-        secondary: snapshot.secondary.as_ref().map(convert_rate_limit_window),
-        observed_at: Some(Utc::now()),
-    }
-}
-
-fn convert_rate_limit_window(window: &RateLimitWindow) -> AccountRateLimitWindow {
-    AccountRateLimitWindow {
+    let convert = |window: &RateLimitWindow| AccountRateLimitWindow {
         used_percent: window.used_percent,
         resets_at: window
             .resets_at
             .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0)),
         window_minutes: window.window_minutes,
+    };
+    AccountRateLimits {
+        primary: snapshot.primary.as_ref().map(convert),
+        secondary: snapshot.secondary.as_ref().map(convert),
+        observed_at: Some(Utc::now()),
     }
 }

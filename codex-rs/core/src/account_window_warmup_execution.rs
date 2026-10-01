@@ -1,34 +1,74 @@
 //! Identity-preserving request execution for standby window warmup.
 
+use super::quota::*;
 use super::*;
+use codex_login::AccountAvailability;
+use codex_login::AccountProfileState;
+use codex_login::AccountProfileStore;
+use codex_protocol::config_types::Verbosity;
+use std::sync::atomic::AtomicBool;
 
+#[cfg(test)]
 pub(super) async fn warm_profile(
     pool: &AccountPool,
     config: &Config,
     profile_id: &AccountProfileId,
     auth_manager: Arc<AuthManager>,
 ) -> anyhow::Result<WarmupAttemptOutcome> {
+    let guard = Arc::new(super::guard::WarmupRequestGuard::new(
+        AccountRuntimeStateStore::new(config.codex_home.to_path_buf()),
+        profile_id.clone(),
+        Utc::now(),
+    ));
+    warm_profile_with_guard(pool, config, profile_id, auth_manager, guard).await
+}
+
+pub(super) async fn warm_profile_with_guard(
+    pool: &AccountPool,
+    config: &Config,
+    profile_id: &AccountProfileId,
+    auth_manager: Arc<AuthManager>,
+    request_guard: Arc<super::guard::WarmupRequestGuard>,
+) -> anyhow::Result<WarmupAttemptOutcome> {
     if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
         return Ok(WarmupAttemptOutcome::Failed);
     }
-    let attempted_at = Utc::now();
+    let attempted_at = request_guard.attempted_at();
     // CLI re-login may have refreshed tokens on disk while this process still holds a stale cache.
-    let _ = auth_manager.reload().await;
-    let Some(auth) = auth_manager.auth().await.filter(CodexAuth::is_chatgpt_auth) else {
+    let expected_auth = auth_manager.auth_cached();
+    auth_manager.reload().await;
+    let Some((auth, mut factory)) = auth_manager
+        .auth_with_http_client_factory()
+        .await
+        .filter(|(auth, _)| auth.is_chatgpt_auth())
+    else {
         debug!(%profile_id, "skipping window warmup without ChatGPT auth");
         record_window_warmup_debug(WindowWarmupDebugKind::SkipNoAuth {
             profile_id: profile_id.to_string(),
         });
         return Ok(WarmupAttemptOutcome::SkippedNoAuth);
     };
-
-    let needs_refresh = pool
-        .snapshots()
-        .into_iter()
-        .find(|snapshot| &snapshot.profile.id == profile_id)
-        .and_then(|snapshot| snapshot.rate_limits.primary)
-        .is_none_or(|window| window.resets_at.is_some_and(|reset| reset <= attempted_at));
-    if needs_refresh && let Some(limits) = refresh_rate_limits_via_get(config, &auth).await {
+    if expected_auth
+        .as_ref()
+        .is_some_and(|expected| !same_warmup_identity(expected, &auth))
+    {
+        return Ok(WarmupAttemptOutcome::SkippedNoAuth);
+    }
+    let mut profile_config = config.clone();
+    if let Some(clients) = auth_manager.maintenance_clients(&auth).await? {
+        factory = clients.http_client_factory;
+        profile_config.chatgpt_base_url = clients.chatgpt_base_url;
+    }
+    profile_config.application_network_policy = factory.network_policy().clone();
+    profile_config.application_auth_route_config = Some(
+        codex_login::AuthRouteConfig::from_http_client_factory(factory.clone()),
+    );
+    let config = &profile_config;
+    // Even a cached idle account can have been used by another Codex process or device. Verify
+    // every generating attempt instead of spending quota based on a stale 0% observation.
+    if let Some(probe) = refresh_rate_limits_via_get(config, &auth_manager, &auth).await? {
+        let allowed = probe.ordinary_allowed && quota_allows_generation(&probe.limits);
+        let limits = probe.limits;
         let started = account_primary_started(&limits);
         pool.update_rate_limits(profile_id, limits)?;
         if started {
@@ -43,13 +83,30 @@ pub(super) async fn warm_profile(
             )?;
             return Ok(WarmupAttemptOutcome::Started);
         }
+        if !allowed {
+            record_window_warmup_debug(WindowWarmupDebugKind::RequestFailed {
+                profile_id: profile_id.to_string(),
+                error: "quota preflight found an exhausted or unsupported window; no generating request sent".to_string(),
+            });
+            return Ok(WarmupAttemptOutcome::SkippedNotEligible);
+        }
+    } else {
+        record_window_warmup_debug(WindowWarmupDebugKind::RequestFailed {
+            profile_id: profile_id.to_string(),
+            error: "quota preflight unavailable; no generating request sent".to_string(),
+        });
+        return Ok(WarmupAttemptOutcome::Failed);
     }
 
     // Keep the session provider as-is (including websockets). A new ModelClient /
     // thread does not share the active session socket. Forcing HTTP was another
     // unusable dependency: interactive Codex turns meter the 5h window and emit
     // `codex.rate_limits` on the session websocket.
-    let provider = config.model_provider.clone();
+    let mut provider = config.model_provider.clone();
+    // Transport retries cannot establish whether an interrupted maintenance POST was billed.
+    // Leave auth recovery to ModelClient, but never repeat an ambiguous generating request.
+    provider.request_max_retries = Some(0);
+    provider.stream_max_retries = Some(0);
 
     // Official Codex list for this profile's auth. OnlineIfUncached matches
     // interactive turns. Do not call get_default_model: a configured slug is
@@ -58,7 +115,7 @@ pub(super) async fn warm_profile(
     let catalog = crate::thread_manager::build_models_manager(config, Arc::clone(&auth_manager))
         .raw_model_catalog(
             codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
-            config.http_client_factory(),
+            factory.clone(),
         )
         .await;
     let models = codex_models_manager::select_warmup_models(&catalog, config.model.as_deref());
@@ -81,7 +138,10 @@ pub(super) async fn warm_profile(
         provider,
         SessionSource::Cli,
         warmup_originator(),
-        /*model_verbosity*/ None,
+        models
+            .iter()
+            .all(|model| model.support_verbosity)
+            .then_some(Verbosity::Low),
         /*content_item_kinds_enabled*/ true,
         config
             .features
@@ -91,10 +151,12 @@ pub(super) async fn warm_profile(
         /*beta_features_header*/ None,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
-        config.http_client_factory(),
+        factory,
         config.workspace_routing_context(),
         Vec::new(),
-    );
+    )
+    .with_captured_chatgpt_identity(&auth)?
+    .with_warmup_request_guard(Arc::clone(&request_guard));
     // Interactive turns persist a UUID installation id and reject non-UUID files.
     // The previous literal is not a UUID and is not a real install identity.
     let installation_id = resolve_installation_id(&config.codex_home)
@@ -105,11 +167,18 @@ pub(super) async fn warm_profile(
     // Share observed rate limits outside the timeout future so a late timeout can still keep
     // headers that already arrived (timeout otherwise drops them and falsely records failure).
     let observed_limits = Arc::new(tokio::sync::Mutex::new(None));
+    let accepted = Arc::new(AtomicBool::new(false));
     let mut stream_limits = None;
-    let mut request_completed = false;
+    let mut request_maybe_accepted = false;
     for (index, model_info) in models.iter().enumerate() {
-        if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
-            return Ok(WarmupAttemptOutcome::Failed);
+        if !profile_allows_generation(pool, config, profile_id)? {
+            return Ok(WarmupAttemptOutcome::SkippedNotEligible);
+        }
+        let Some((current_auth, _)) = auth_manager.auth_with_http_client_factory().await else {
+            return Ok(WarmupAttemptOutcome::SkippedNoAuth);
+        };
+        if !same_warmup_identity(&auth, &current_auth) {
+            return Ok(WarmupAttemptOutcome::SkippedNoAuth);
         }
         let effort = codex_models_manager::warmup_supported_effort(model_info);
         debug!(
@@ -129,6 +198,7 @@ pub(super) async fn warm_profile(
             use_responses_lite: model_info.use_responses_lite,
         });
         *observed_limits.lock().await = None;
+        accepted.store(false, Ordering::Relaxed);
         let session_telemetry = SessionTelemetry::new(
             thread_id,
             &model_info.slug,
@@ -151,19 +221,28 @@ pub(super) async fn warm_profile(
                 &session_telemetry,
                 effort,
                 &responses_metadata,
-                &observed_limits,
+                WarmupStreamEvidence {
+                    observed_limits: &observed_limits,
+                    accepted: &accepted,
+                },
             ),
         )
         .await;
         match stream_result {
             Ok(Ok(observed)) => {
-                request_completed = true;
+                request_maybe_accepted = true;
                 stream_limits = observed;
                 break;
             }
             Ok(Err(error)) => {
-                let can_retry = index + 1 < models.len()
+                let definitely_rejected =
+                    !accepted.load(Ordering::Relaxed) && request_was_definitely_rejected(&error);
+                let can_retry = definitely_rejected
+                    && index + 1 < models.len()
                     && codex_models_manager::is_unusable_warmup_model_error(&error.to_string());
+                if definitely_rejected {
+                    request_guard.definite_rejection();
+                }
                 if can_retry {
                     warn!(
                         %profile_id,
@@ -186,12 +265,14 @@ pub(super) async fn warm_profile(
                     error: error.to_string(),
                 });
                 stream_limits = observed_limits.lock().await.clone();
+                request_maybe_accepted = !definitely_rejected && request_guard.may_have_been_sent();
                 // The POST already went out. Keep GET-verify — a tool-call
                 // stream can end without Completed and still start the 5h window.
                 break;
             }
             Err(_elapsed) => {
                 stream_limits = observed_limits.lock().await.clone();
+                request_maybe_accepted = request_guard.may_have_been_sent();
                 warn!(%profile_id, "standby window warmup timed out");
                 record_window_warmup_debug(WindowWarmupDebugKind::RequestTimeout {
                     profile_id: profile_id.to_string(),
@@ -203,6 +284,18 @@ pub(super) async fn warm_profile(
         }
     }
 
+    auth_manager.reload().await;
+    if !auth_manager
+        .auth_cached()
+        .as_ref()
+        .is_some_and(|current| same_warmup_identity(&auth, current))
+    {
+        return Ok(if request_maybe_accepted {
+            WarmupAttemptOutcome::Unconfirmed
+        } else {
+            WarmupAttemptOutcome::SkippedNoAuth
+        });
+    }
     let stream_account_limits = stream_limits.as_ref().map(convert_rate_limits);
     let stream_started = stream_account_limits
         .as_ref()
@@ -223,7 +316,9 @@ pub(super) async fn warm_profile(
     let mut best_limits = stream_account_limits.clone();
 
     if let Some(limits) = stream_account_limits.as_ref() {
-        pool.update_rate_limits(profile_id, limits.clone())?;
+        if pool.update_rate_limits(profile_id, limits.clone()).is_err() {
+            return Ok(WarmupAttemptOutcome::Unconfirmed);
+        }
         if still_standby {
             debug!(%profile_id, "warmed standby 5h rate-limit window");
         } else {
@@ -235,21 +330,27 @@ pub(super) async fn warm_profile(
 
     // Cold-idle Responses headers typically still show 0%. Retry accounts usage GET with short
     // delays before declaring NOOP — lagging GETs were the main false "warmup retry" source.
-    if let Some(limits) =
-        refresh_rate_limits_via_get_with_retries(config, &auth, stream_started).await
-    {
+    let verified =
+        refresh_rate_limits_via_get_with_retries(config, &auth_manager, &auth, stream_started)
+            .await;
+    if verified.is_err() && request_maybe_accepted {
+        return Ok(WarmupAttemptOutcome::Unconfirmed);
+    }
+    if let Some(limits) = verified? {
         if account_primary_started(&limits) {
             started = true;
         }
         let merged = merge_account_rate_limits_monotonic(best_limits.as_ref(), limits);
-        pool.update_rate_limits(profile_id, merged.clone())?;
+        if pool.update_rate_limits(profile_id, merged.clone()).is_err() {
+            return Ok(WarmupAttemptOutcome::Unconfirmed);
+        }
         best_limits = Some(merged);
         debug!(%profile_id, "refreshed standby rate limits after window warmup");
     }
 
     // Prefer local evidence over a racy pool re-read: concurrent quota sync can briefly regress
     // primary usage back to 0% after we already observed a start.
-    if !started && !primary_window_started(pool, profile_id) {
+    if !started {
         warn!(
             %profile_id,
             stream_started,
@@ -267,7 +368,7 @@ pub(super) async fn warm_profile(
                 .and_then(|limits| limits.primary.as_ref())
                 .map(|window| window.used_percent.to_string()),
         });
-        return Ok(if request_completed {
+        return Ok(if request_maybe_accepted {
             WarmupAttemptOutcome::Unconfirmed
         } else {
             WarmupAttemptOutcome::Failed
@@ -299,4 +400,119 @@ pub(super) async fn warm_profile(
         used_percent,
     });
     Ok(WarmupAttemptOutcome::Started)
+}
+
+pub(super) async fn confirm_profile(
+    pool: &AccountPool,
+    config: &Config,
+    profile_id: &AccountProfileId,
+    auth_manager: Arc<AuthManager>,
+) -> anyhow::Result<()> {
+    let Some(expected_auth) = auth_manager
+        .auth_cached()
+        .filter(CodexAuth::is_chatgpt_auth)
+    else {
+        return Ok(());
+    };
+    let mut profile_config = config.clone();
+    if let Some(clients) = auth_manager.maintenance_clients(&expected_auth).await? {
+        profile_config.chatgpt_base_url = clients.chatgpt_base_url;
+        profile_config.application_network_policy =
+            clients.http_client_factory.network_policy().clone();
+        profile_config.application_auth_route_config = Some(
+            codex_login::AuthRouteConfig::from_http_client_factory(clients.http_client_factory),
+        );
+    }
+    let Some(probe) =
+        refresh_rate_limits_via_get(&profile_config, &auth_manager, &expected_auth).await?
+    else {
+        return Ok(());
+    };
+    let limits = probe.limits;
+    let started = account_primary_started(&limits);
+    let observation = pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| &snapshot.profile.id == profile_id)
+        .and_then(|snapshot| snapshot.window_warmup);
+    pool.update_rate_limits(profile_id, limits)?;
+    if started && let Some(observation) = observation {
+        pool.record_window_warmup(
+            profile_id,
+            WindowWarmupObservation::current(
+                WindowWarmupOutcome::Succeeded,
+                observation.attempted_at,
+                /*retry_after*/ None,
+                /*consecutive_failures*/ 0,
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn profile_allows_generation(
+    pool: &AccountPool,
+    config: &Config,
+    profile_id: &AccountProfileId,
+) -> anyhow::Result<bool> {
+    if !config.account_pool.effective_window_warmup()
+        || codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home)
+    {
+        return Ok(false);
+    }
+    let Some(snapshot) = pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| &snapshot.profile.id == profile_id)
+    else {
+        return Ok(false);
+    };
+    let available = match snapshot.availability {
+        AccountAvailability::Available => true,
+        AccountAvailability::Exhausted {
+            resets_at: Some(reset),
+        } => reset <= Utc::now(),
+        AccountAvailability::Exhausted { resets_at: None }
+        | AccountAvailability::AuthenticationUnavailable { .. }
+        | AccountAvailability::Disabled => false,
+    };
+    if !available || snapshot.profile.disabled || snapshot.is_active {
+        return Ok(false);
+    }
+    let now = Utc::now();
+    let quota_fresh = snapshot
+        .rate_limits
+        .observed_at
+        .is_some_and(|observed| observed <= now && now - observed < chrono::Duration::minutes(30));
+    if account_primary_started(&snapshot.rate_limits)
+        || quota_fresh
+            && snapshot
+                .rate_limits
+                .primary
+                .iter()
+                .chain(snapshot.rate_limits.secondary.iter())
+                .any(|window| {
+                    window.used_percent >= 100.0 && window.resets_at.is_none_or(|reset| reset > now)
+                })
+    {
+        return Ok(false);
+    }
+    let profiles = AccountProfileStore::new(config.codex_home.to_path_buf());
+    if profiles.manifest_path().exists()
+        && !profiles.load_profile_records()?.iter().any(|record| {
+            record.profile.id == *profile_id
+                && record.profile.credential_home == snapshot.profile.credential_home
+                && !record.profile.disabled
+                && record.state == AccountProfileState::Ready
+        })
+    {
+        return Ok(false);
+    }
+    Ok(
+        AccountRuntimeStateStore::new(config.codex_home.to_path_buf())
+            .load()?
+            .active_profile_id
+            .as_ref()
+            != Some(profile_id),
+    )
 }

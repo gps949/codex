@@ -5,7 +5,6 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use crate::account_window_warmup::run_warmup_pass;
 use crate::account_window_warmup::spawn_window_warmup_task;
 use crate::config::Config;
 use crate::execution_request_auth::ExecutionRequestAuth;
@@ -69,6 +68,7 @@ pub(crate) struct ExecutionAuth {
 struct WindowWarmupTask {
     handle: JoinHandle<()>,
     config_tx: watch::Sender<Config>,
+    requested: Arc<tokio::sync::Notify>,
 }
 
 /// Private outcome of one lazy pool-install attempt. `NotConfigured` keeps the cell empty so a
@@ -340,9 +340,11 @@ impl ExecutionAuth {
         match (enabled, running) {
             (true, false) => {
                 let (config_tx, config_rx) = watch::channel(config.clone());
+                let requested = Arc::new(tokio::sync::Notify::new());
                 *slot = Some(WindowWarmupTask {
-                    handle: spawn_window_warmup_task(pool, config_rx),
+                    handle: spawn_window_warmup_task(pool, config_rx, Arc::clone(&requested)),
                     config_tx,
+                    requested,
                 });
             }
             (false, true) => {
@@ -386,19 +388,27 @@ impl ExecutionAuth {
             .is_some_and(|slot| slot.as_ref().is_some_and(|task| !task.handle.is_finished()))
     }
 
-    pub(crate) fn request_window_warmup_pass_now(&self, config: Config) {
+    pub(crate) fn request_window_warmup_pass_now(&self, config: Config) -> bool {
+        if !config.account_pool.effective_window_warmup() || self.pool_is_suspended() {
+            record_window_warmup_debug(WindowWarmupDebugKind::WarmupDisabled);
+            return false;
+        }
         let Some(pool) = self.account_pool() else {
             record_window_warmup_debug(WindowWarmupDebugKind::PassNoCandidate);
-            return;
+            return false;
         };
+        self.sync_window_warmup_task(pool, &config);
+        let Ok(slot) = self.window_warmup_task.lock() else {
+            return false;
+        };
+        let Some(task) = slot.as_ref().filter(|task| !task.handle.is_finished()) else {
+            return false;
+        };
+        // Notify stores at most one permit: repeated controls request one pending pass,
+        // and disabling/logout aborts the same tracked task, including its manual work.
+        task.requested.notify_one();
         record_window_warmup_debug(WindowWarmupDebugKind::RunNowRequested);
-        tokio::spawn(async move {
-            if let Err(error) = run_warmup_pass(&pool, &config).await {
-                record_window_warmup_debug(WindowWarmupDebugKind::PassFailed {
-                    error: error.to_string(),
-                });
-            }
-        });
+        true
     }
 
     pub(crate) fn runtime(&self) -> Option<Arc<AccountPoolRuntime>> {

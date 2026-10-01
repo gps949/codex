@@ -15,9 +15,10 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_rollout_trace::InferenceTraceContext;
 use futures::StreamExt;
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use crate::client_common::Prompt;
 use crate::responses_metadata::CodexResponsesMetadata;
@@ -45,6 +46,10 @@ use codex_protocol::protocol::ThreadSource;
 use codex_tools::ToolSpec;
 
 const WARMUP_PROMPT: &str = "What is 1+1? Reply with only the single digit. Do not use tools.";
+
+#[cfg(test)]
+#[path = "account_window_warmup_request_tests.rs"]
+mod tests;
 
 pub(crate) fn warmup_prompt(model_info: &ModelInfo) -> Prompt {
     Prompt {
@@ -136,6 +141,12 @@ fn warmup_tool_specs(model_info: &ModelInfo) -> Arc<[ToolSpec]> {
     }
 }
 
+/// Quota observations and server acceptance captured from one maintenance stream.
+pub(crate) struct WarmupStreamEvidence<'a> {
+    pub(crate) observed_limits: &'a Arc<tokio::sync::Mutex<Option<RateLimitSnapshot>>>,
+    pub(crate) accepted: &'a AtomicBool,
+}
+
 pub(crate) async fn stream_warmup_turn(
     client: &ModelClient,
     prompt: &Prompt,
@@ -143,8 +154,12 @@ pub(crate) async fn stream_warmup_turn(
     session_telemetry: &SessionTelemetry,
     effort: Option<ReasoningEffort>,
     responses_metadata: &CodexResponsesMetadata,
-    observed_limits: &Arc<tokio::sync::Mutex<Option<RateLimitSnapshot>>>,
+    evidence: WarmupStreamEvidence<'_>,
 ) -> anyhow::Result<Option<RateLimitSnapshot>> {
+    let WarmupStreamEvidence {
+        observed_limits,
+        accepted,
+    } = evidence;
     let mut session = client.new_session();
     let mut stream = session
         .stream(
@@ -158,26 +173,48 @@ pub(crate) async fn stream_warmup_turn(
             &InferenceTraceContext::disabled(),
         )
         .await?;
+    // Opening a WebSocket stream only schedules the request. Wait for response evidence;
+    // handshake metadata and quota snapshots can arrive before an explicit rejection.
     let mut observed = None;
     while let Some(event) = stream.next().await {
         match event? {
-            ResponseEvent::RateLimits(snapshot)
+            ResponseEvent::RateLimits(snapshot) => {
                 if snapshot
                     .limit_id
                     .as_deref()
-                    .is_none_or(|limit_id| limit_id == "codex") =>
-            {
-                let preferred = prefer_rate_limit_snapshot(observed.clone(), snapshot);
-                observed = Some(preferred.clone());
-                *observed_limits.lock().await = Some(preferred);
+                    .is_none_or(|limit_id| limit_id == "codex")
+                {
+                    let preferred = prefer_rate_limit_snapshot(observed.clone(), snapshot);
+                    observed = Some(preferred.clone());
+                    *observed_limits.lock().await = Some(preferred);
+                }
             }
             // Do not abort on the first tool call. Current ChatGPT models are
             // code_mode_only and often emit `exec` immediately; dropping the
             // stream there cancels the in-flight Responses turn before
             // Completed, so the 5h window never starts (ma.7: High sol
             // finished in ~3s with get_primary=0).
-            ResponseEvent::Completed { .. } => return Ok(observed),
-            _ => {}
+            ResponseEvent::Completed { .. } => {
+                accepted.store(true, Ordering::Relaxed);
+                return Ok(observed);
+            }
+            ResponseEvent::Created { .. }
+            | ResponseEvent::OutputItemDone(_)
+            | ResponseEvent::OutputItemAdded(_)
+            | ResponseEvent::OutputTextDelta(_)
+            | ResponseEvent::ToolCallInputDelta { .. }
+            | ResponseEvent::ReasoningSummaryDelta { .. }
+            | ResponseEvent::ReasoningSummaryDone { .. }
+            | ResponseEvent::ReasoningContentDelta { .. }
+            | ResponseEvent::ReasoningSummaryPartAdded { .. } => {
+                accepted.store(true, Ordering::Relaxed);
+            }
+            ResponseEvent::SafetyBuffering(_)
+            | ResponseEvent::ServerModel(_)
+            | ResponseEvent::ModelVerifications(_)
+            | ResponseEvent::TurnModerationMetadata(_)
+            | ResponseEvent::ServerReasoningIncluded(_)
+            | ResponseEvent::ModelsEtag(_) => {}
         }
     }
     Err(anyhow::anyhow!(

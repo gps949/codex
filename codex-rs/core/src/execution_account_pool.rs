@@ -130,8 +130,8 @@ impl ExecutionAccountPoolHandle {
         self.inner.window_warmup_task_running()
     }
 
-    pub fn request_window_warmup_pass_now(&self, config: &Config) {
-        self.inner.request_window_warmup_pass_now(config.clone());
+    pub fn request_window_warmup_pass_now(&self, config: &Config) -> bool {
+        self.inner.request_window_warmup_pass_now(config.clone())
     }
 
     pub async fn force_activate_automatic(
