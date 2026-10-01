@@ -685,6 +685,7 @@ enum AccountSubcommand {
             --show-profile when you need the acct-… id.\n\n\
             Example:\n  codex account pool\n  codex account pool --show-profile"
     )]
+    #[command(visible_alias = "status")]
     Pool {
         /// Include the opaque local profile id column (acct-…).
         #[arg(long = "show-profile")]
@@ -710,6 +711,7 @@ enum AccountConfigSubcommand {
     /// Set whether to return to the preferred account when its cooldown expires.
     SetReturnToPreferred {
         /// Enable or disable return-to-preferred behavior.
+        #[arg(action = clap::ArgAction::Set, required = true)]
         enabled: bool,
     },
 
@@ -717,6 +719,42 @@ enum AccountConfigSubcommand {
     SetPreemptiveSwitchPercent {
         /// Usage percentage that triggers preemptive rotation.
         percent: f64,
+    },
+
+    /// Enable tiny standby requests that start quota windows earlier (default: true).
+    SetWindowWarmup {
+        #[arg(action = clap::ArgAction::Set, required = true)]
+        enabled: bool,
+    },
+
+    /// Set standby warmup cadence in minutes (minimum: 5).
+    SetWindowWarmupIntervalMinutes {
+        #[arg(value_parser = clap::value_parser!(u64).range(5..=1440))]
+        minutes: u64,
+    },
+
+    /// Safely wait and continue after the whole pool exhausts (default: true).
+    SetResumeAfterReset {
+        #[arg(action = clap::ArgAction::Set, required = true)]
+        enabled: bool,
+    },
+
+    /// Set maximum reset wait in minutes (0 disables waiting; default: 360).
+    SetMaxResetWaitMinutes {
+        #[arg(value_parser = clap::value_parser!(u64).range(0..=1440))]
+        minutes: u64,
+    },
+
+    /// Automatically redeem earned reset credits only when explicitly enabled.
+    SetAutoResetCredits {
+        #[arg(value_parser = ["never", "when_pool_exhausted"])]
+        mode: String,
+    },
+
+    /// Save reset credits if a natural reset is within this many minutes (0–1440; default: 60).
+    SetAutoResetCreditMinWaitMinutes {
+        #[arg(value_parser = clap::value_parser!(i64).range(0..=1440))]
+        minutes: i64,
     },
 }
 
@@ -1882,6 +1920,54 @@ async fn cli_main(
                         account_cmd::run_account_config_set_preemptive_switch_percent(
                             account_cli.config_overrides,
                             percent,
+                        )
+                        .await;
+                    }
+                    AccountConfigSubcommand::SetWindowWarmup { enabled } => {
+                        account_config::run_account_config_set(
+                            account_cli.config_overrides,
+                            "window_warmup",
+                            toml::Value::Boolean(enabled),
+                        )
+                        .await;
+                    }
+                    AccountConfigSubcommand::SetResumeAfterReset { enabled } => {
+                        account_config::run_account_config_set(
+                            account_cli.config_overrides,
+                            "resume_after_reset",
+                            toml::Value::Boolean(enabled),
+                        )
+                        .await;
+                    }
+                    AccountConfigSubcommand::SetMaxResetWaitMinutes { minutes } => {
+                        account_config::run_account_config_set(
+                            account_cli.config_overrides,
+                            "max_reset_wait_minutes",
+                            toml::Value::Integer(minutes as i64),
+                        )
+                        .await;
+                    }
+                    AccountConfigSubcommand::SetWindowWarmupIntervalMinutes { minutes } => {
+                        account_config::run_account_config_set(
+                            account_cli.config_overrides,
+                            "window_warmup_interval_minutes",
+                            toml::Value::Integer(minutes as i64),
+                        )
+                        .await;
+                    }
+                    AccountConfigSubcommand::SetAutoResetCredits { mode } => {
+                        account_config::run_account_config_set(
+                            account_cli.config_overrides,
+                            "auto_reset_credits",
+                            toml::Value::String(mode),
+                        )
+                        .await;
+                    }
+                    AccountConfigSubcommand::SetAutoResetCreditMinWaitMinutes { minutes } => {
+                        account_config::run_account_config_set(
+                            account_cli.config_overrides,
+                            "auto_reset_credit_min_wait_minutes",
+                            toml::Value::Integer(minutes),
                         )
                         .await;
                     }

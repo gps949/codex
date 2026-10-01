@@ -119,3 +119,74 @@ fn account_set_resolves_labels_and_list_hides_profile_by_default() {
         "{list_with_profile_stdout}"
     );
 }
+
+#[test]
+fn account_config_controls_preserve_comments_and_disable_early_rotation() {
+    let home = TempDir::new().unwrap();
+    let config_path = home.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "# Personal settings\n[account_pool]\n# Keep this note\npreemptive_switch_percent = 95.0\nreturn_to_preferred = false\n",
+    ).unwrap();
+    for args in [
+        vec!["set-preemptive-switch-percent", "0"],
+        vec!["set-window-warmup", "false"],
+        vec!["set-resume-after-reset", "true"],
+        vec!["set-max-reset-wait-minutes", "120"],
+        vec!["set-auto-reset-credits", "when_pool_exhausted"],
+    ] {
+        let output = Command::new(cargo_bin("codex").unwrap())
+            .env("CODEX_HOME", home.path())
+            .args(["account", "config"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let saved = std::fs::read_to_string(&config_path).unwrap();
+    assert!(saved.contains("# Personal settings"));
+    assert!(saved.contains("# Keep this note"));
+    let config: toml::Value = toml::from_str(&saved).unwrap();
+    assert_eq!(
+        config["account_pool"].clone(),
+        toml::Value::Table(toml::toml! {
+            preemptive_switch_percent = 0.0
+            return_to_preferred = false
+            window_warmup = false
+            resume_after_reset = true
+            max_reset_wait_minutes = 120
+            auto_reset_credits = "when_pool_exhausted"
+        })
+    );
+    let show = Command::new(cargo_bin("codex").unwrap())
+        .env("CODEX_HOME", home.path())
+        .args(["account", "config", "show"])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let text = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        text.contains("preemptive_switch_percent=disabled"),
+        "{text}"
+    );
+    assert!(text.contains("window_warmup=false"), "{text}");
+    assert!(text.contains("max_reset_wait_minutes=120"), "{text}");
+    let before = std::fs::read(&config_path).unwrap();
+    for args in [
+        ["set-preemptive-switch-percent", "NaN"],
+        ["set-max-reset-wait-minutes", "1441"],
+    ] {
+        let invalid = Command::new(cargo_bin("codex").unwrap())
+            .env("CODEX_HOME", home.path())
+            .args(["account", "config"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!invalid.status.success());
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+    }
+}

@@ -231,7 +231,9 @@ pub(crate) async fn run_account_set(
                     .unwrap_or_default(),
                 if profile.disabled { ", disabled" } else { "" },
             );
-            eprintln!("Running Codex processes pick up the change on their next restart.");
+            eprintln!(
+                "Running sessions adopt changes at their next refresh; command-line overrides take precedence."
+            );
             std::process::exit(0);
         }
         Err(error) => {
@@ -462,6 +464,11 @@ pub(crate) async fn run_account_pool(
     show_profile: bool,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
+    if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
+        eprintln!("Account pool is paused after logout. Enrolled accounts are retained.");
+        eprintln!("Resume: codex account use <label>\nInspect accounts: codex account list");
+        std::process::exit(0);
+    }
     let auth_manager =
         match AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await {
             Ok(manager) => manager,
@@ -587,12 +594,33 @@ pub(crate) async fn run_account_config_show(cli_config_overrides: CliConfigOverr
         None => println!("preemptive_switch_percent=disabled"),
     }
     println!(
-        "auto_reset_credits={:?}",
-        pool.auto_reset_credits.unwrap_or_default()
+        "auto_reset_credits={}",
+        match pool.effective_auto_reset_credits() {
+            codex_config::AutoResetCredits::Never => "never",
+            codex_config::AutoResetCredits::WhenPoolExhausted => "when_pool_exhausted",
+        }
     );
-    if let Some(minutes) = pool.auto_reset_credit_min_wait_minutes {
-        println!("auto_reset_credit_min_wait_minutes={minutes}");
-    }
+    println!(
+        "auto_reset_credit_min_wait_minutes={}",
+        pool.effective_reset_credit_min_wait_minutes()
+    );
+    println!("window_warmup={}", pool.effective_window_warmup());
+    println!(
+        "window_warmup_interval_minutes={}",
+        pool.effective_window_warmup_interval().as_secs() / 60
+    );
+    println!(
+        "resume_after_reset={}",
+        !pool.effective_reset_wait().is_zero()
+    );
+    println!(
+        "max_reset_wait_minutes={}",
+        pool.effective_reset_wait().as_secs() / 60
+    );
+    println!(
+        "\nWarmup uses a tiny request to start standby quota windows. Reset credits are opt-in."
+    );
+    println!("Settings: codex account config --help");
     std::process::exit(0);
 }
 
@@ -616,7 +644,9 @@ pub(crate) async fn run_account_config_set_rotation_strategy(
                 "Updated rotation_strategy to {} in config.toml.",
                 format_rotation_strategy(pool.effective_rotation_strategy())
             );
-            eprintln!("Running Codex processes pick up the change on their next restart.");
+            eprintln!(
+                "Running sessions adopt changes at their next refresh; command-line overrides take precedence."
+            );
             std::process::exit(0);
         }
         Err(error) => {
@@ -639,7 +669,9 @@ pub(crate) async fn run_account_config_set_return_to_preferred(
                 "Updated return_to_preferred to {} in config.toml.",
                 pool.effective_return_to_preferred()
             );
-            eprintln!("Running Codex processes pick up the change on their next restart.");
+            eprintln!(
+                "Running sessions adopt changes at their next refresh; command-line overrides take precedence."
+            );
             std::process::exit(0);
         }
         Err(error) => {
@@ -654,12 +686,12 @@ pub(crate) async fn run_account_config_set_preemptive_switch_percent(
     percent: f64,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        eprintln!("Expected a finite percentage from 0 to 100; use 0 to disable early rotation.");
+        std::process::exit(1);
+    }
     match patch_account_pool_config(&config.codex_home, |pool| {
-        pool.preemptive_switch_percent = if percent > 0.0 && percent < 100.0 {
-            Some(percent)
-        } else {
-            None
-        };
+        pool.preemptive_switch_percent = Some(percent);
     }) {
         Ok(pool) => {
             match pool.effective_preemptive_switch_percent() {
@@ -668,7 +700,9 @@ pub(crate) async fn run_account_config_set_preemptive_switch_percent(
                 }
                 None => eprintln!("Disabled preemptive switching in config.toml."),
             }
-            eprintln!("Running Codex processes pick up the change on their next restart.");
+            eprintln!(
+                "Running sessions adopt changes at their next refresh; command-line overrides take precedence."
+            );
             std::process::exit(0);
         }
         Err(error) => {
@@ -761,7 +795,7 @@ fn resolve_profile_id_or_exit(store: &AccountProfileStore, selector: &str) -> Ac
     }
 }
 
-async fn load_config_or_exit(cli_config_overrides: CliConfigOverrides) -> Config {
+pub(crate) async fn load_config_or_exit(cli_config_overrides: CliConfigOverrides) -> Config {
     let cli_overrides = match cli_config_overrides.parse_overrides() {
         Ok(overrides) => overrides,
         Err(error) => {
