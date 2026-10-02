@@ -6,7 +6,11 @@ import type { AccountPoolAvailability } from "./AccountPoolAvailability";
 import type { AccountPoolRateLimits } from "./AccountPoolRateLimits";
 import type { AccountPoolWindowWarmup } from "./AccountPoolWindowWarmup";
 
-export type AccountPoolAccount = { profileId: string, label: string | null, priority: number, isActive: boolean, availability: AccountPoolAvailability, planType: PlanType | null, email: string | null, rateLimits: AccountPoolRateLimits,
+export type AccountPoolAccount = { profileId: string, label: string | null, priority: number, isActive: boolean, availability: AccountPoolAvailability,
+/**
+ * Backend evidence of a natural reset, independent of the scheduler retry deadline.
+ */
+backendResetsAt: number | null, planType: PlanType | null, email: string | null, rateLimits: AccountPoolRateLimits,
 /**
  * Latest identity-preserving 5h-window warmup observation for standby accounts.
  */

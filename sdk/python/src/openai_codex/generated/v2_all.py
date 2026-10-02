@@ -109,7 +109,21 @@ class AccountPoolRateLimits(BaseModel):
     )
     observed_at: Annotated[int | None, Field(alias="observedAt")] = None
     primary: AccountPoolRateLimitWindow | None = None
+    primary_observed_at: Annotated[
+        int | None,
+        Field(
+            alias="primaryObservedAt",
+            description="Time of accepted primary evidence; null stays unknown rather than borrowing the watermark.",
+        ),
+    ] = None
     secondary: AccountPoolRateLimitWindow | None = None
+    secondary_observed_at: Annotated[
+        int | None,
+        Field(
+            alias="secondaryObservedAt",
+            description="Time of accepted secondary evidence; omitted windows keep their previous time.",
+        ),
+    ] = None
 
 
 class AccountPoolWarmupDebugAccount(BaseModel):
@@ -10474,6 +10488,13 @@ class AccountPoolAccount(BaseModel):
         populate_by_name=True,
     )
     availability: AccountPoolAvailability
+    backend_resets_at: Annotated[
+        int | None,
+        Field(
+            alias="backendResetsAt",
+            description="Backend evidence of a natural reset, independent of the scheduler retry deadline.",
+        ),
+    ] = None
     email: str | None = None
     is_active: Annotated[bool, Field(alias="isActive")]
     label: str | None = None

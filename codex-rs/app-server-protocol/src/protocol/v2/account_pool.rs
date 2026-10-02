@@ -55,6 +55,10 @@ pub struct AccountPoolAccount {
     pub priority: u32,
     pub is_active: bool,
     pub availability: AccountPoolAvailability,
+    /// Backend evidence of a natural reset, independent of the scheduler retry deadline.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub backend_resets_at: Option<i64>,
     pub plan_type: Option<PlanType>,
     pub email: Option<String>,
     pub rate_limits: AccountPoolRateLimits,
@@ -121,6 +125,14 @@ pub struct AccountPoolRateLimits {
     pub secondary: Option<AccountPoolRateLimitWindow>,
     #[ts(type = "number | null")]
     pub observed_at: Option<i64>,
+    /// Time of accepted primary evidence; null stays unknown rather than borrowing the watermark.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub primary_observed_at: Option<i64>,
+    /// Time of accepted secondary evidence; omitted windows keep their previous time.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub secondary_observed_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

@@ -6,6 +6,15 @@
         "availability": {
           "$ref": "#/definitions/AccountPoolAvailability"
         },
+        "backendResetsAt": {
+          "default": null,
+          "description": "Backend evidence of a natural reset, independent of the scheduler retry deadline.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "email": {
           "type": [
             "string",
@@ -181,6 +190,15 @@
             }
           ]
         },
+        "primaryObservedAt": {
+          "default": null,
+          "description": "Time of accepted primary evidence; null stays unknown rather than borrowing the watermark.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "secondary": {
           "anyOf": [
             {
@@ -189,6 +207,15 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "secondaryObservedAt": {
+          "default": null,
+          "description": "Time of accepted secondary evidence; omitted windows keep their previous time.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
           ]
         }
       },
