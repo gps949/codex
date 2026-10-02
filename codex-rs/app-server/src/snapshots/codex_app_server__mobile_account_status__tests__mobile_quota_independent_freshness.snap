@@ -1,0 +1,28 @@
+---
+source: app-server/src/mobile_account_status_tests.rs
+expression: "format!(\"{}\\n\\n{}\", list_at(&pool, 1, now).unwrap(), detail_at(&pool, \"Work\", now).unwrap())"
+---
+Accounts · 1/1
+Cached quota
+
+Work · Current
+Select: /account use @secret-w
+Primary: 37% used · 5m old
+Reset: passed · awaiting refresh
+Secondary: 62% used · 3d old
+Reset: unknown
+
+Each window retains its last accepted observation.
+Details: /account show <label|@selector>
+Controls: /account help
+
+Work · Current
+Cached quota
+Select: /account use @secret-w
+Primary: 37% used
+Reset: passed · awaiting refresh
+Observed: 01-01 11:55 UTC · 5m old
+Secondary: 62% used
+Reset: unknown
+Observed: 12-29 12:00 UTC · 3d old
+Cached values remain if refresh fails.

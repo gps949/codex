@@ -168,54 +168,62 @@ pub(crate) fn page_accounts(
 }
 
 pub(crate) fn list(pool: &AccountPoolReadResponse, page: usize) -> Result<String, String> {
+    list_at(pool, page, Utc::now())
+}
+
+fn list_at(
+    pool: &AccountPoolReadResponse,
+    page: usize,
+    now: DateTime<Utc>,
+) -> Result<String, String> {
     const PAGE_SIZE: usize = 4;
     let pages = pool.accounts.len().div_ceil(PAGE_SIZE).max(1);
     let accounts = page_accounts(pool, page)?;
-    let now = Utc::now();
-    let mut lines = vec![format!("Accounts · {page}/{pages}")];
+    let mut lines = vec![format!("Accounts · {page}/{pages}"), "Cached quota".into()];
     for account in accounts {
         let name = label(account);
-        let state = availability(account);
+        let state = availability(account, now);
         let current = if account.is_active { " · Current" } else { "" };
         lines.push(format!("\n{name}{current}{state}"));
         lines.push(selection_control(pool, account));
-        let cached = if account
-            .rate_limits
-            .observed_at
-            .is_none_or(|time| chrono::Utc::now().timestamp().saturating_sub(time) > 120)
-        {
-            " · cached"
-        } else {
-            ""
-        };
         for (name, window, primary) in [
             ("Primary", account.rate_limits.primary.as_ref(), true),
             ("Secondary", account.rate_limits.secondary.as_ref(), false),
         ] {
+            let observed_at = if primary {
+                account.rate_limits.primary_observed_at
+            } else {
+                account.rate_limits.secondary_observed_at
+            };
             lines.push(format!(
-                "{name}: {} used · reset {}",
+                "{name}: {} used · {}\nReset: {}",
                 usage(window),
+                observation_age(observed_at, now),
                 reset_label(window, primary, now)
             ));
         }
-        lines.push(format!(
-            "Snapshot: {}{cached}",
-            timestamp(account.rate_limits.observed_at)
-        ));
     }
     if page < pages {
         lines.push(format!("\nNext: /account list {}", page + 1));
     }
-    lines.push("\nMissing windows may retain older cached observations.\nDetails: /account show <label|@selector>\nControls: /account help".into());
+    lines.push("\nEach window retains its last accepted observation.\nDetails: /account show <label|@selector>\nControls: /account help".into());
     Ok(lines.join("\n"))
 }
 
 pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<String, String> {
+    detail_at(pool, selector, Utc::now())
+}
+
+fn detail_at(
+    pool: &AccountPoolReadResponse,
+    selector: &str,
+    now: DateTime<Utc>,
+) -> Result<String, String> {
     let account = resolve(pool, selector)?;
     let name = label(account);
-    let state = availability(account);
+    let state = availability(account, now);
     let current = if account.is_active { " · Current" } else { "" };
-    let mut lines = vec![format!("{name}{current}{state}")];
+    let mut lines = vec![format!("{name}{current}{state}"), "Cached quota".into()];
     if let Some(email) = account.email.as_deref() {
         lines.push(format!("Email: {}", compact_label(email, 80)));
     }
@@ -226,21 +234,23 @@ pub(crate) fn detail(pool: &AccountPoolReadResponse, selector: &str) -> Result<S
         ));
     }
     lines.push(selection_control(pool, account));
-    let now = Utc::now();
     for (name, window, primary) in [
         ("Primary", account.rate_limits.primary.as_ref(), true),
         ("Secondary", account.rate_limits.secondary.as_ref(), false),
     ] {
+        let observed_at = if primary {
+            account.rate_limits.primary_observed_at
+        } else {
+            account.rate_limits.secondary_observed_at
+        };
         lines.push(format!(
-            "{name}: {} used\nReset: {}",
+            "{name}: {} used\nReset: {}\nObserved: {} · {}",
             usage(window),
-            reset_label(window, primary, now)
+            reset_label(window, primary, now),
+            timestamp(observed_at),
+            observation_age(observed_at, now),
         ));
     }
-    lines.push(format!(
-        "Checked: {}",
-        timestamp(account.rate_limits.observed_at)
-    ));
     if let Some(warmup) = &account.window_warmup {
         let observation = codex_login::WindowWarmupObservation {
             outcome: match warmup.outcome {
@@ -415,18 +425,18 @@ fn usage(window: Option<&AccountPoolRateLimitWindow>) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn availability(account: &AccountPoolAccount) -> String {
+fn availability(account: &AccountPoolAccount, now: DateTime<Utc>) -> String {
     match &account.availability {
         AccountPoolAvailability::Available => String::new(),
         AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
             Some(resets_at) => match DateTime::<Utc>::from_timestamp(*resets_at, 0) {
-                Some(reset) => format!(
-                    " · Cooling down {}",
-                    format_relative_reset(reset, Utc::now())
-                ),
-                None => " · Cooling down".into(),
+                Some(reset) if reset > now => {
+                    format!(" · Retry {}", format_relative_reset(reset, now))
+                }
+                Some(_) => " · Retry ready".into(),
+                None => " · Quota unavailable".into(),
             },
-            None => " · Cooling down".into(),
+            None => " · Quota unavailable".into(),
         },
         AccountPoolAvailability::Disabled => " · Disabled".into(),
         AccountPoolAvailability::AuthenticationUnavailable { .. } => " · Login required".into(),
@@ -448,8 +458,27 @@ fn reset_label(
         .resets_at
         .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
     {
+        Some(reset) if reset <= now => "passed · awaiting refresh".into(),
         Some(reset) => format_relative_reset(reset, now),
         None => "unknown".into(),
+    }
+}
+
+fn observation_age(value: Option<i64>, now: DateTime<Utc>) -> String {
+    let Some(observed_at) =
+        value.and_then(|value| DateTime::<Utc>::from_timestamp(value, /*nsecs*/ 0))
+    else {
+        return "age unknown".into();
+    };
+    if observed_at > now {
+        return "clock skew".into();
+    }
+    let minutes = now.signed_duration_since(observed_at).num_minutes();
+    match minutes {
+        0 => "< 1m old".into(),
+        1..=59 => format!("{minutes}m old"),
+        60..=1439 => format!("{}h old", minutes / 60),
+        _ => format!("{}d old", minutes / 1440),
     }
 }
 

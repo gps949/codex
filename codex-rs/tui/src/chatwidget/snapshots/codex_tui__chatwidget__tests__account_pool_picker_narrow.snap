@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3668
 expression: "render_bottom_popup(&chat, 45)"
 ---
   Account pool
@@ -16,9 +17,10 @@ expression: "render_bottom_popup(&chat, 45)"
                              60% weekly left,
                              reset 3d 21h 2m
                              · plan ? ·
-                             priority  0 ·
-                             quota observed
-                             1d ago ·
+                             priority  0 · 5h
+                             cached 1d ago ·
+                             weekly cached 1d
+                             ago ·
                              primary@example.
                              com
   Retry Backup label         cooling down ·

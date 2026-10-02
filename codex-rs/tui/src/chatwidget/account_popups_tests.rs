@@ -30,8 +30,13 @@ async fn account_pool_picker_aligns_mixed_quota_columns() {
                 resets_at: Some(now - 60),
             }),
             observed_at: None,
+
+            primary_observed_at: None,
+            secondary_observed_at: None,
         },
         window_warmup: None,
+
+        backend_resets_at: None,
     };
     chat.open_account_pool_picker(Ok(AccountPoolReadResponse {
         enabled: true,
@@ -55,6 +60,9 @@ async fn account_pool_picker_aligns_mixed_quota_columns() {
                         resets_at: Some(now + 3 * 24 * 60 * 60 + 21 * 60 * 60 + 2 * 60),
                     }),
                     observed_at: None,
+
+                    primary_observed_at: None,
+                    secondary_observed_at: None,
                 },
                 ..active.clone()
             },
@@ -85,6 +93,9 @@ async fn account_pool_picker_aligns_mixed_quota_columns() {
                     }),
                     secondary: None,
                     observed_at: None,
+
+                    primary_observed_at: None,
+                    secondary_observed_at: None,
                 },
                 ..active
             },
@@ -145,6 +156,8 @@ async fn account_picker_starts_on_active_account_and_skips_disabled_profile() {
         email: None,
         rate_limits: AccountPoolRateLimits::default(),
         window_warmup: None,
+
+        backend_resets_at: None,
     };
     let pool = AccountPoolReadResponse {
         enabled: true,
@@ -215,6 +228,8 @@ async fn exhausted_profile_requires_the_labeled_retry_action() {
             email: None,
             rate_limits: AccountPoolRateLimits::default(),
             window_warmup: None,
+
+            backend_resets_at: None,
         }],
     }));
     let rendered = crate::chatwidget::tests::render_bottom_popup(&chat, /*width*/ 80);
@@ -247,6 +262,8 @@ async fn pool_quota_observations_keep_identity_and_only_activation_requires_refr
             email: Some("member@example.com".into()),
             rate_limits: AccountPoolRateLimits::default(),
             window_warmup: None,
+
+            backend_resets_at: None,
         }],
     };
     assert!(chat.on_account_pool_updated(&update));
@@ -373,6 +390,8 @@ fn account_display_name_prefers_label_over_email_and_profile_id() {
         email: Some("primary@example.com".to_string()),
         rate_limits: AccountPoolRateLimits::default(),
         window_warmup: None,
+
+        backend_resets_at: None,
     };
     assert_eq!(account_display_name(&with_email), "Team plan".to_string());
 
@@ -397,6 +416,29 @@ fn account_display_name_prefers_label_over_email_and_profile_id() {
 }
 
 #[test]
+fn account_description_marks_each_windows_actual_cache_age() {
+    let now = Utc::now();
+    let account: AccountPoolAccount = serde_json::from_value(serde_json::json!({
+        "profileId": "fixture", "label": "Work", "priority": 0, "isActive": true,
+        "availability": {"type": "available"}, "rateLimits": {
+            "primary": {"usedPercent": 10.0, "resetsAt": null},
+            "secondary": {"usedPercent": 20.0, "resetsAt": null},
+            "observedAt": now.timestamp(),
+            "primaryObservedAt": now.timestamp() - 1800,
+            "secondaryObservedAt": now.timestamp() - 2 * 86400,
+        }
+    }))
+    .unwrap();
+    let text = account_description(&account, now)
+        .into_iter()
+        .map(|span| span.content)
+        .collect::<String>();
+    assert!(text.contains("5h cached 30m ago"));
+    assert!(text.contains("weekly cached 2d ago"));
+    insta::assert_snapshot!(text, @"ready ·  90% 5h left ·  80% weekly left · plan ? · priority 0 · 5h cached 30m ago · weekly cached 2d ago");
+}
+
+#[test]
 fn idle_warmup_description_distinguishes_unconfirmed_completion_from_failure() {
     let now = DateTime::from_timestamp(/*secs*/ 1_800_000_000, /*nsecs*/ 0).unwrap();
     let account = AccountPoolAccount {
@@ -414,6 +456,9 @@ fn idle_warmup_description_distinguishes_unconfirmed_completion_from_failure() {
             }),
             secondary: None,
             observed_at: None,
+
+            primary_observed_at: None,
+            secondary_observed_at: None,
         },
         window_warmup: Some(AccountPoolWindowWarmup {
             outcome: AccountPoolWindowWarmupOutcome::Succeeded,
@@ -422,6 +467,8 @@ fn idle_warmup_description_distinguishes_unconfirmed_completion_from_failure() {
             attempted_at: now.timestamp(),
             retry_after: Some(now.timestamp() + 300),
         }),
+
+        backend_resets_at: None,
     };
     let description = account_description(&account, now);
     let succeeded = description
@@ -485,6 +532,9 @@ fn started_five_hour_window_hides_warmup_failure() {
             }),
             secondary: None,
             observed_at: None,
+
+            primary_observed_at: None,
+            secondary_observed_at: None,
         },
         window_warmup: Some(AccountPoolWindowWarmup {
             outcome: AccountPoolWindowWarmupOutcome::Failed,
@@ -493,6 +543,8 @@ fn started_five_hour_window_hides_warmup_failure() {
             attempted_at: now.timestamp(),
             retry_after: Some(now.timestamp() + 60),
         }),
+
+        backend_resets_at: None,
     };
     let description = account_description(&account, now);
     assert!(
@@ -521,6 +573,9 @@ fn active_account_hides_leftover_warmup_failure() {
             }),
             secondary: None,
             observed_at: None,
+
+            primary_observed_at: None,
+            secondary_observed_at: None,
         },
         window_warmup: Some(AccountPoolWindowWarmup {
             outcome: AccountPoolWindowWarmupOutcome::Failed,
@@ -529,6 +584,8 @@ fn active_account_hides_leftover_warmup_failure() {
             attempted_at: now.timestamp(),
             retry_after: Some(now.timestamp() + 60),
         }),
+
+        backend_resets_at: None,
     };
     let description = account_description(&account, now);
     assert!(

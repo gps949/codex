@@ -23,14 +23,16 @@ fn mobile_account_compact_views_show_selectors_and_unknown_quota() {
         .resets_at = None;
     insta::assert_snapshot!(list(&pool, 1).unwrap(), @"
     Accounts · 1/1
+    Cached quota
 
     Work · Current
     Select: /account use @secret-w
-    Primary: 37% used · reset unknown
-    Secondary: unknown used · reset unknown
-    Snapshot: unknown · cached
+    Primary: 37% used · age unknown
+    Reset: unknown
+    Secondary: unknown used · age unknown
+    Reset: unknown
 
-    Missing windows may retain older cached observations.
+    Each window retains its last accepted observation.
     Details: /account show <label|@selector>
     Controls: /account help
     ");
@@ -62,9 +64,9 @@ fn mobile_account_list_shows_reset_times_and_cooldown_retry() {
         .unwrap()
         .resets_at = Some(0);
     let text = list(&pool, 1).unwrap();
-    assert!(text.contains("Primary: 37% used · reset due"));
+    assert!(text.contains("Reset: passed · awaiting refresh"));
     assert!(text.contains("Retry: /account retry @secret-w"));
-    assert!(text.contains("Snapshot: unknown · cached"));
+    assert!(text.contains("Primary: 37% used · age unknown"));
     insta::assert_snapshot!("mobile_account_list_with_reset_and_retry", text);
 }
 
@@ -121,8 +123,42 @@ fn mobile_account_detail_reports_relative_reset_and_observation_time() {
     assert!(text.contains("Reset: in "));
     assert!(text.contains("Secondary: unknown used"));
     assert!(text.contains("Reset: unknown"));
-    assert!(text.contains("Checked: unknown"));
+    assert!(text.contains("Observed: unknown · age unknown"));
     assert!(text.contains("Cached values remain if refresh fails."));
+}
+
+#[test]
+fn mobile_quota_windows_show_independent_observation_ages() {
+    let now = DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut pool = pool();
+    pool.accounts[0].rate_limits.observed_at = Some(now.timestamp());
+    pool.accounts[0].rate_limits.primary_observed_at = Some(now.timestamp() - 300);
+    pool.accounts[0].rate_limits.secondary_observed_at = Some(now.timestamp() - 3 * 86400);
+    pool.accounts[0]
+        .rate_limits
+        .primary
+        .as_mut()
+        .unwrap()
+        .resets_at = Some(now.timestamp() - 60);
+    pool.accounts[0].rate_limits.secondary = Some(AccountPoolRateLimitWindow {
+        used_percent: 62.0,
+        resets_at: None,
+    });
+    insta::assert_snapshot!(
+        "mobile_quota_independent_freshness",
+        format!(
+            "{}\n\n{}",
+            list_at(&pool, /*page*/ 1, now).unwrap(),
+            detail_at(&pool, "Work", now).unwrap()
+        )
+    );
+    assert_eq!(
+        observation_age(Some(now.timestamp() + 60), now),
+        "clock skew"
+    );
+    assert_eq!(observation_age(Some(i64::MAX), now), "age unknown");
 }
 
 #[test]

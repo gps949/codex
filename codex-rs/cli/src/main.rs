@@ -598,7 +598,9 @@ enum AccountSubcommand {
 
     /// List configured account profiles and their scheduler state.
     #[command(
-        after_help = "By default the opaque profile id column is omitted. Pass\n\
+        after_help = "Quota values are cached observations; this command does not query the backend.\n\
+            Refresh from mobile /account or the accountPool/read API.\n\n\
+            By default the opaque profile id column is omitted. Pass\n\
             --show-profile when you need the acct-… id for scripting.\n\n\
             Example:\n  codex account list\n  codex account list --show-profile"
     )]
@@ -679,7 +681,7 @@ enum AccountSubcommand {
         keep_credentials: bool,
     },
 
-    /// Show the live multi-account scheduler state (availability, cooldowns, active profile).
+    /// Show cached multi-account scheduler and quota observations.
     #[command(
         after_help = "By default the opaque profile id column is omitted. Pass\n\
             --show-profile when you need the acct-… id.\n\n\

@@ -4,13 +4,15 @@ assertion_line: 55
 expression: text
 ---
 Accounts · 1/1
+Cached quota
 
-Work · Current · Cooling down
+Work · Current · Quota unavailable
 Retry: /account retry @secret-w (probes quota)
-Primary: 37% used · reset due
-Secondary: unknown used · reset unknown
-Snapshot: unknown · cached
+Primary: 37% used · age unknown
+Reset: passed · awaiting refresh
+Secondary: unknown used · age unknown
+Reset: unknown
 
-Missing windows may retain older cached observations.
+Each window retains its last accepted observation.
 Details: /account show <label|@selector>
 Controls: /account help

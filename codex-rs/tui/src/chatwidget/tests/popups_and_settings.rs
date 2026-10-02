@@ -3627,8 +3627,12 @@ async fn account_pool_picker_snapshot() {
                         resets_at: Some(now + 3 * 24 * 60 * 60 + 21 * 60 * 60 + 2 * 60),
                     }),
                     observed_at: Some(now - 24 * 60 * 60),
+                    primary_observed_at: Some(now - 24 * 60 * 60),
+                    secondary_observed_at: Some(now - 24 * 60 * 60),
                 },
                 window_warmup: None,
+
+                backend_resets_at: None,
             },
             AccountPoolAccount {
                 profile_id: "backup-acct".to_string(),
@@ -3640,6 +3644,8 @@ async fn account_pool_picker_snapshot() {
                 email: Some("backup@example.com".to_string()),
                 rate_limits: AccountPoolRateLimits::default(),
                 window_warmup: None,
+
+                backend_resets_at: None,
             },
             AccountPoolAccount {
                 profile_id: "paused-acct".to_string(),
@@ -3651,6 +3657,8 @@ async fn account_pool_picker_snapshot() {
                 email: None,
                 rate_limits: AccountPoolRateLimits::default(),
                 window_warmup: None,
+
+                backend_resets_at: None,
             },
         ],
     }));

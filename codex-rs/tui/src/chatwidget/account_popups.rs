@@ -291,12 +291,17 @@ fn account_description_parts(
         AccountPoolAvailability::Available => "ready".green(),
         AccountPoolAvailability::Exhausted { resets_at } => match resets_at {
             Some(resets_at) => {
+                let deadline_label = if account.backend_resets_at.is_some() {
+                    "reset"
+                } else {
+                    "retry"
+                };
                 let remaining_seconds = (*resets_at).saturating_sub(now.timestamp());
                 if remaining_seconds <= 0 {
-                    "cooling down, reset now".dim()
+                    format!("cooling down, {deadline_label} now").dim()
                 } else {
                     format!(
-                        "cooling down, reset in {}",
+                        "cooling down, {deadline_label} in {}",
                         format_reset_countdown(remaining_seconds as u64)
                     )
                     .dim()
@@ -331,7 +336,24 @@ fn account_description_parts(
         parts.push(vec!["plan ?".dim()]);
     }
     parts.push(vec!["priority ".dim(), account.priority.to_string().dim()]);
-    if let Some(observed_at) = account.rate_limits.observed_at {
+    for (name, window, observed_at) in [
+        (
+            "5h",
+            &account.rate_limits.primary,
+            account.rate_limits.primary_observed_at,
+        ),
+        (
+            "weekly",
+            &account.rate_limits.secondary,
+            account.rate_limits.secondary_observed_at,
+        ),
+    ] {
+        if window.is_none() {
+            continue;
+        }
+        let Some(observed_at) = observed_at else {
+            continue;
+        };
         let age_minutes = now.timestamp().saturating_sub(observed_at) / 60;
         if age_minutes >= 15 {
             let age = if age_minutes >= 24 * 60 {
@@ -341,7 +363,7 @@ fn account_description_parts(
             } else {
                 format!("{age_minutes}m")
             };
-            parts.push(vec![format!("quota observed {age} ago").dim()]);
+            parts.push(vec![format!("{name} cached {age} ago").dim()]);
         }
     }
 

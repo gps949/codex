@@ -24,6 +24,8 @@ use crate::account_config::format_rotation_strategy;
 use crate::account_config::parse_rotation_strategy;
 use crate::account_config::patch_account_pool_config;
 
+mod quota_display;
+
 const DEFAULT_PRIORITY_STEP: u32 = 10;
 
 pub(crate) async fn run_account_add(
@@ -490,6 +492,8 @@ pub(crate) async fn run_account_pool(
         std::process::exit(0);
     }
 
+    eprintln!("Cached quota observations; this command does not refresh backend quota.");
+    eprintln!("Refresh quota observations in the mobile account view or with accountPool/read.");
     let rotation = format_rotation_strategy(config.account_pool.effective_rotation_strategy());
     let return_to_preferred = config.account_pool.effective_return_to_preferred();
     let preemptive = config
@@ -501,19 +505,25 @@ pub(crate) async fn run_account_pool(
         "rotation_strategy={rotation}\treturn_to_preferred={return_to_preferred}\tpreemptive_switch={preemptive}"
     );
     if show_profile {
-        println!("ACTIVE\tPRIORITY\tPROFILE\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL");
+        println!(
+            "ACTIVE\tPRIORITY\tPROFILE\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL\tPRIMARY_OBSERVED\tSECONDARY_OBSERVED\tPRIMARY_RESET\tSECONDARY_RESET"
+        );
     } else {
-        println!("ACTIVE\tPRIORITY\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL");
+        println!(
+            "ACTIVE\tPRIORITY\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL\tPRIMARY_OBSERVED\tSECONDARY_OBSERVED\tPRIMARY_RESET\tSECONDARY_RESET"
+        );
     }
+    let now = Utc::now();
     for snapshot in pool_handle.snapshots() {
         let (plan, email) = load_profile_identity(&config, &snapshot.profile).await;
         let availability = match &snapshot.availability {
             codex_login::AccountAvailability::Available => "available".to_string(),
             codex_login::AccountAvailability::Exhausted { resets_at } => match resets_at {
-                Some(until) if *until > Utc::now() => {
-                    format!("cooling down {}", format_relative_reset(*until, Utc::now()))
+                Some(until) if *until > now => {
+                    format!("retry {}", format_relative_reset(*until, now))
                 }
-                _ => "available".to_string(),
+                Some(_) => "retry ready".to_string(),
+                None => "quota unavailable".to_string(),
             },
             codex_login::AccountAvailability::AuthenticationUnavailable { .. } => {
                 "auth unavailable".to_string()
@@ -529,8 +539,33 @@ pub(crate) async fn run_account_pool(
         let secondary = snapshot
             .rate_limits
             .secondary
+            .as_ref()
             .map(|window| format!("{:.0}", window.used_percent))
             .unwrap_or_else(|| "-".to_string());
+        let primary_observed = quota_display::observed_at(
+            snapshot
+                .rate_limits
+                .primary_observed_at()
+                .map(|at| at.timestamp()),
+            now,
+        );
+        let secondary_observed = quota_display::observed_at(
+            snapshot
+                .rate_limits
+                .secondary_observed_at()
+                .map(|at| at.timestamp()),
+            now,
+        );
+        let primary_reset = quota_display::reset(
+            snapshot.rate_limits.primary.as_ref(),
+            quota_display::QuotaWindow::Primary,
+            now,
+        );
+        let secondary_reset = quota_display::reset(
+            snapshot.rate_limits.secondary.as_ref(),
+            quota_display::QuotaWindow::Secondary,
+            now,
+        );
         let warmup = snapshot
             .window_warmup
             .as_ref()
@@ -543,13 +578,13 @@ pub(crate) async fn run_account_pool(
                         .primary
                         .as_ref()
                         .map(|window| window.used_percent),
-                    Utc::now(),
+                    now,
                 )
             })
             .unwrap_or_else(|| "-".to_string());
         if show_profile {
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{primary_observed}\t{secondary_observed}\t{primary_reset}\t{secondary_reset}",
                 if snapshot.is_active { "*" } else { "" },
                 snapshot.profile.priority,
                 snapshot.profile.id,
@@ -563,7 +598,7 @@ pub(crate) async fn run_account_pool(
             );
         } else {
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{primary_observed}\t{secondary_observed}\t{primary_reset}\t{secondary_reset}",
                 if snapshot.is_active { "*" } else { "" },
                 snapshot.profile.priority,
                 availability,

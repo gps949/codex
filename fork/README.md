@@ -75,11 +75,13 @@ Codex normally switches at **95% observed usage** when another account is eligib
 
 A model-specific limit keeps the account available for other models; follow the backend's switch-model message. If an account does not include the requested use, Codex tries another eligible account and records a short cooldown. Such entitlement errors do not justify spending reset credits. Workspace-wide backend limits can still affect several seats even when their observed percentages differ.
 
-**Reset credits** are saved by default. Automatic redemption is opt-in and only considered after the whole pool is exhausted, when the next natural reset is farther away than the configured threshold. If the last failed account has no credit, other exhausted accounts are checked until one recovers; an ambiguous redemption stops the pass. A manual redemption uses a limited credit for that account; refreshing quota or selecting it with `--force` does not create new quota.
+**Reset credits** are saved by default. Automatic redemption is opt-in and only considered after the whole pool is exhausted, when the next backend-confirmed natural reset is farther away than the configured threshold or no natural reset is known. A local retry deadline is only a time to probe again; it does not prove a free reset. If the last failed account has no credit, other exhausted accounts are checked until one recovers; an ambiguous redemption stops the pass. A manual redemption uses a limited credit for that account; refreshing quota or selecting it with `--force` does not create new quota.
 
 When all accounts run out, Codex can **wait and continue safely** after quota recovers. The default maximum wait is six hours. The original host process must remain running; stopping it ends the wait. You can cancel at any time. Visible partial output and unresolved tool results can require reconciliation instead of automatic continuation.
 
 Mobile percentages labeled **Used** and CLI `5H%` / `WEEK%` show usage. TUI labels ending in **left** show the remaining percentage. Primary is usually a rolling 5-hour window and secondary is usually weekly; either window can limit an account. Compare each account's windows separately: adding percentages across plans does not produce a meaningful pool balance. Unknown or cached values remain observations; a failed refresh does not mean an account has 0% usage.
+
+Primary and secondary observations have independent ages. Refreshing one window does not make the other window fresh. `codex account status` reads cached observations and reports their times and resets; it does not contact the quota backend. Mobile `/account` and the `accountPool/read` API can refresh quota metadata. During remote use, meaningful standby changes publish a bounded pool summary; timestamp-only refreshes do not repeat it.
 
 ## Understand standby warmup
 
@@ -125,7 +127,7 @@ auto_reset_credit_min_wait_minutes = 60
 | `preemptive_switch_percent`          | Early rotation threshold. Set `0` to disable early rotation; hard-limit failover stays enabled.                              |
 | `window_warmup_interval_minutes`     | Cadence for background warmup passes; values below 5 are clamped to 5.                                                       |
 | `resume_after_reset`                 | Enable cancellable waiting for an exhausted pooled turn.                                                                     |
-| `max_reset_wait_minutes`             | Maximum wait for one turn, capped at 1440 minutes; `0` disables waiting.                                                     |
+| `max_reset_wait_minutes`             | Cumulative waiting allowance for one turn across retries and sampling steps, capped at 1440 minutes; `0` disables waiting.   |
 | `auto_reset_credits`                 | `never` saves credits; `when_pool_exhausted` enables the rule described above.                                               |
 | `auto_reset_credit_min_wait_minutes` | Skip automatic redemption when a natural reset is within this many minutes.                                                  |
 
