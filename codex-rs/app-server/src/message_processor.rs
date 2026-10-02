@@ -949,13 +949,17 @@ impl MessageProcessor {
                     outbound_initialized,
                 )
                 .await?;
+            // Deferred outbound initialization still establishes the client identity here.
+            // Register it for later verified pool updates even when lib.rs marks it ready.
+            if let Some(client_name) = session.app_server_client_name() {
+                self.account_processor
+                    .register_remote_client(connection_id, client_name)
+                    .await;
+            }
             if connection_initialized {
                 self.connection_initialized(connection_id, session.request_attestation())
                     .await;
                 if let Some(client_name) = session.app_server_client_name() {
-                    self.account_processor
-                        .register_remote_client(connection_id, client_name)
-                        .await;
                     self.account_processor
                         .notify_remote_client_account_pool(connection_id, Some(client_name))
                         .await;

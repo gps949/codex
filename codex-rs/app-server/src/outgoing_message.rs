@@ -752,6 +752,40 @@ impl OutgoingMessageSender {
             .await;
     }
 
+    /// Reserves capacity before checking the request-bound identity, with no await before enqueue.
+    pub(crate) async fn send_server_notification_checked(
+        &self,
+        connection_ids: &[ConnectionId],
+        notification: ServerNotification,
+        is_current: impl Fn() -> bool + Send,
+    ) -> bool {
+        let message = timestamped_server_notification(notification);
+        if connection_ids.is_empty() {
+            let Ok(permit) = self.sender.reserve().await else {
+                return false;
+            };
+            if !is_current() {
+                return false;
+            }
+            permit.send(OutgoingEnvelope::Broadcast { message });
+        } else {
+            for connection_id in connection_ids {
+                let Ok(permit) = self.sender.reserve().await else {
+                    return false;
+                };
+                if !is_current() {
+                    return false;
+                }
+                permit.send(OutgoingEnvelope::ToConnection {
+                    connection_id: *connection_id,
+                    message: message.clone(),
+                    write_complete_tx: None,
+                });
+            }
+        }
+        true
+    }
+
     pub(crate) fn try_send_server_notification(&self, notification: ServerNotification) {
         if let Err(error) = self.sender.try_send(OutgoingEnvelope::Broadcast {
             message: timestamped_server_notification(notification),
