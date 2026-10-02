@@ -83,11 +83,20 @@ jobs:
         env:
           RUST_MIN_STACK: "8388608"
           NEXTEST_PROFILE: default
+        # Build the selected packages together to unify shared dependency features.
+        # Package and binary filters preserve the existing test coverage.
         run: |
-          cargo nextest run --no-fail-fast -p codex-login -p codex-config -p codex-history -p codex-app-server-protocol
-          cargo nextest run --no-fail-fast -p codex-models-manager -E 'test(warmup)'
-          cargo nextest run --no-fail-fast -p codex-core -E 'test(account_failover) or test(failover) or test(account_transition) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration) or test(account_window_warmup) or test(execution_auth) or test(account_pool_strategy) or test(account_pool_recovery) or test(reset_credit) or test(captured_maintenance) or test(model_specific_limit) or test(durable_)'
-          cargo nextest run --no-fail-fast -p codex-tui -E 'test(account) or test(warmup) or test(selection_row_layout)'
-          cargo nextest run --no-fail-fast -p codex-cli --test account_selection
-          cargo nextest run --no-fail-fast -p codex-cli --bin codex -E 'test(doctor::updates) or test(quota_observations)'
-          cargo nextest run --no-fail-fast -p codex-app-server -E 'test(account_pool) or test(mobile_account) or test(mobile_quota) or test(pool_warnings) or test(pool_warning) or test(guarded_pool_notification) or test(status_overlay) or test(workspace_routing) or test(rate_limit_reset) or test(rate_limits_identity) or test(native_status) or test(mobile_warmup) or test(get_account_rate_limits) or test(login_survives_same_owner_token_refresh)'
+          cargo nextest run --no-fail-fast \
+            -p codex-login -p codex-config -p codex-history -p codex-app-server-protocol \
+            -p codex-models-manager -p codex-core -p codex-tui -p codex-cli -p codex-app-server \
+            -E '
+              package(=codex-login) or
+              package(=codex-config) or
+              package(=codex-history) or
+              package(=codex-app-server-protocol) or
+              (package(=codex-models-manager) and test(warmup)) or
+              (package(=codex-core) and (test(account_failover) or test(failover) or test(account_transition) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration) or test(account_window_warmup) or test(execution_auth) or test(account_pool_strategy) or test(account_pool_recovery) or test(reset_credit) or test(captured_maintenance) or test(model_specific_limit) or test(durable_))) or
+              (package(=codex-tui) and (test(account) or test(warmup) or test(selection_row_layout))) or
+              (package(=codex-cli) and ((kind(test) and binary(=account_selection)) or (kind(bin) and binary(=codex) and (test(doctor::updates) or test(quota_observations))))) or
+              (package(=codex-app-server) and (test(account_pool) or test(mobile_account) or test(mobile_quota) or test(pool_warnings) or test(pool_warning) or test(guarded_pool_notification) or test(status_overlay) or test(workspace_routing) or test(rate_limit_reset) or test(rate_limits_identity) or test(native_status) or test(mobile_warmup) or test(get_account_rate_limits) or test(login_survives_same_owner_token_refresh)))
+            '
