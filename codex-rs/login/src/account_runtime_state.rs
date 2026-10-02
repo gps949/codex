@@ -46,6 +46,9 @@ pub struct AccountRuntimeProfileState {
     /// are retried rather than becoming an accidental permanent local ban.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exhausted_until: Option<DateTime<Utc>>,
+    /// A natural reset reported by the backend; old records without this remain unverified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_resets_at: Option<DateTime<Utc>>,
     /// Entitlement refusals cannot be repaired by spending earned reset credits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_credit_excluded_until: Option<DateTime<Utc>>,
@@ -124,6 +127,7 @@ impl AccountRuntimeStateStore {
                         .is_some_and(|reset| reset <= &now)
                     {
                         profile.exhausted_until = None;
+                        profile.backend_resets_at = None;
                     }
                     if profile
                         .preemptive_rotation_until
@@ -131,6 +135,9 @@ impl AccountRuntimeStateStore {
                     {
                         profile.preemptive_rotation_until = None;
                     }
+                    profile.backend_resets_at = profile
+                        .backend_resets_at
+                        .filter(|reset| *reset > now && profile.exhausted_until.is_some());
                     profile
                 })
                 .collect(),
@@ -231,6 +238,7 @@ impl AccountRuntimeStateStore {
                 return Ok(());
             }
             profile.exhausted_until = None;
+            profile.backend_resets_at = None;
             profile.preemptive_rotation_until = None;
             profile.quota_reset_at = Some(reset_at);
             profile.rate_limits = AccountRateLimits {
@@ -250,6 +258,8 @@ impl AccountRuntimeStateStore {
                     ..AccountRateLimits::default()
                 },
                 window_warmup: None,
+
+                backend_resets_at: None,
             });
         }
         self.save_unlocked(&state)
@@ -321,6 +331,8 @@ impl AccountRuntimeStateStore {
                 quota_reset_at: None,
                 rate_limits: AccountRateLimits::default(),
                 window_warmup: Some(observation),
+
+                backend_resets_at: None,
             });
         }
         self.save_unlocked(&state)
@@ -391,6 +403,7 @@ impl AccountRuntimeStateStore {
             }
             if force {
                 profile.exhausted_until = None;
+                profile.backend_resets_at = None;
             }
             profile.preemptive_rotation_until = None;
         }
@@ -406,7 +419,7 @@ impl AccountRuntimeStateStore {
     pub fn record_rate_limits(
         &self,
         profile_id: &AccountProfileId,
-        limits: AccountRateLimits,
+        mut limits: AccountRateLimits,
     ) -> Result<(), AccountRuntimeStateError> {
         let _lock = crate::account_file::lock(&self.codex_home)?;
         let profiles = crate::AccountProfileStore::new(self.codex_home.clone());
@@ -428,6 +441,9 @@ impl AccountRuntimeStateStore {
             if profile.quota_reset_at.is_some() && limits.observed_at <= profile.quota_reset_at {
                 return Ok(());
             }
+            if let Some(reset_at) = profile.quota_reset_at {
+                limits.discard_windows_before(reset_at);
+            }
             profile.rate_limits =
                 crate::account_pool::merge_rate_limits_monotonic(&profile.rate_limits, limits);
         } else {
@@ -439,6 +455,8 @@ impl AccountRuntimeStateStore {
                 quota_reset_at: None,
                 rate_limits: limits,
                 window_warmup: None,
+
+                backend_resets_at: None,
             });
         }
         self.save_unlocked(&state)
@@ -481,6 +499,7 @@ fn runtime_state_from_snapshots(snapshots: &[AccountPoolSnapshot]) -> AccountRun
                     } if reset > &now => Some(*reset),
                     _ => None,
                 },
+                backend_resets_at: snapshot.backend_resets_at.filter(|reset| *reset > now),
                 preemptive_rotation_until: snapshot
                     .preemptive_rotation_until
                     .filter(|reset| *reset > now),
@@ -556,6 +575,8 @@ mod tests {
                     quota_reset_at: None,
                     rate_limits: AccountRateLimits::default(),
                     window_warmup: None,
+
+                    backend_resets_at: None,
                 }],
             })
             .expect("save state");
@@ -581,6 +602,8 @@ mod tests {
                 quota_reset_at: None,
                 rate_limits: AccountRateLimits::default(),
                 window_warmup: None,
+
+                backend_resets_at: None,
             }],
         };
         store.save(&state).expect("save state");

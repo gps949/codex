@@ -101,7 +101,7 @@ impl WindowWarmupObservation {
 }
 
 fn quota_is_fresh(rate_limits: &AccountRateLimits, now: DateTime<Utc>) -> bool {
-    rate_limits.observed_at.is_some_and(|observed| {
+    rate_limits.primary_observed_at().is_some_and(|observed| {
         observed <= now && now - observed < chrono::Duration::minutes(QUOTA_FRESH_MINUTES)
     })
 }
@@ -138,13 +138,14 @@ pub(super) fn standby_needs_window_warmup(account: &ManagedAccount, now: DateTim
     }) {
         return false;
     }
-    if quota_is_fresh(&account.rate_limits, now)
-        && (account.rate_limits.primary.as_ref().is_some_and(|window| {
+    if (quota_is_fresh(&account.rate_limits, now)
+        && account.rate_limits.primary.as_ref().is_some_and(|window| {
             window
                 .window_minutes
                 .is_some_and(|minutes| minutes != FIVE_HOUR_WINDOW_MINUTES)
                 && window.resets_at.is_none_or(|reset| reset > now)
-        }) || super::has_fresh_exhausted_window(&account.rate_limits, &now))
+        }))
+        || super::has_fresh_exhausted_window(&account.rate_limits, &now)
     {
         return false;
     }

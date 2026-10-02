@@ -75,6 +75,7 @@ impl AccountPool {
                     }
                     _ => None,
                 },
+                backend_resets_at: account.backend_resets_at,
                 preemptive_rotation_until: account.preemptive_rotation_until,
                 quota_reset_at: account.quota_reset_at,
                 rate_limits: account.rate_limits.clone(),
@@ -98,6 +99,12 @@ impl AccountPool {
                         result.exhausted_until = incoming.exhausted_until;
                     }
                     let old_preemptive = old.and_then(|profile| profile.preemptive_rotation_until);
+                    let old_backend_reset = old.and_then(|profile| profile.backend_resets_at);
+                    if local.backend_resets_at != old_backend_reset {
+                        result.backend_resets_at = local.backend_resets_at;
+                    } else if incoming.backend_resets_at != old_backend_reset {
+                        result.backend_resets_at = incoming.backend_resets_at;
+                    }
                     if local.preemptive_rotation_until != old_preemptive {
                         result.preemptive_rotation_until = local.preemptive_rotation_until;
                     } else if incoming.preemptive_rotation_until != old_preemptive {
@@ -114,6 +121,7 @@ impl AccountPool {
                 {
                     // An explicit selection from another process may clear or set cooldown.
                     result.exhausted_until = incoming.exhausted_until;
+                    result.backend_resets_at = incoming.backend_resets_at;
                     result.preemptive_rotation_until = incoming.preemptive_rotation_until;
                 }
             }
@@ -122,24 +130,34 @@ impl AccountPool {
                 result.rate_limits = match incoming.quota_reset_at.cmp(&local.quota_reset_at) {
                     std::cmp::Ordering::Greater => {
                         result.exhausted_until = incoming.exhausted_until;
+                        result.backend_resets_at = incoming.backend_resets_at;
                         result.preemptive_rotation_until = incoming.preemptive_rotation_until;
                         result.window_warmup = incoming.window_warmup.clone();
                         incoming.rate_limits.clone()
                     }
                     std::cmp::Ordering::Less => {
                         result.exhausted_until = local.exhausted_until;
+                        result.backend_resets_at = local.backend_resets_at;
                         result.preemptive_rotation_until = local.preemptive_rotation_until;
                         result.window_warmup = local.window_warmup.clone();
                         local.rate_limits.clone()
                     }
-                    std::cmp::Ordering::Equal => merge_rate_limits_monotonic(
-                        &local.rate_limits,
-                        incoming.rate_limits.clone(),
-                    ),
+                    std::cmp::Ordering::Equal => {
+                        let mut local_limits = local.rate_limits.clone();
+                        let mut incoming_limits = incoming.rate_limits.clone();
+                        if let Some(reset_at) = result.quota_reset_at {
+                            local_limits.discard_windows_before(reset_at);
+                            incoming_limits.discard_windows_before(reset_at);
+                        }
+                        merge_rate_limits_monotonic(&local_limits, incoming_limits)
+                    }
                 };
             }
             if let Some(observation) = result.window_warmup.as_mut() {
                 observation.infer_legacy_phase();
+            }
+            if let Some(reset_at) = result.quota_reset_at {
+                result.rate_limits.discard_windows_before(reset_at);
             }
             if result.window_warmup.as_ref().is_some_and(|observation| {
                 result
@@ -157,6 +175,20 @@ impl AccountPool {
             result.preemptive_rotation_until = result
                 .preemptive_rotation_until
                 .filter(|reset| *reset > now && result.exhausted_until.is_none());
+            result.backend_resets_at = result
+                .backend_resets_at
+                .filter(|reset| *reset > now && result.exhausted_until.is_some());
+            if matches!(
+                account.availability,
+                AccountAvailability::Disabled
+                    | AccountAvailability::AuthenticationUnavailable { .. }
+            ) {
+                result.backend_resets_at = None;
+            }
+            if account.backend_resets_at != result.backend_resets_at {
+                account.backend_resets_at = result.backend_resets_at;
+                changed = true;
+            }
             if account.preemptive_rotation_until != result.preemptive_rotation_until {
                 account.preemptive_rotation_until = result.preemptive_rotation_until;
                 changed = true;

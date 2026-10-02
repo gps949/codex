@@ -29,6 +29,37 @@ use crate::WindowWarmupObservation;
 use crate::WindowWarmupOutcome;
 use crate::save_auth;
 
+#[test]
+fn startup_restore_keeps_reprobe_timing_distinct_from_backend_evidence() {
+    let retry = Utc::now() + Duration::minutes(10);
+    for backend_reset in [None, Some(Utc::now() + Duration::minutes(5))] {
+        let pool = AccountPool::new();
+        let id = AccountProfileId::new("fixture").unwrap();
+        pool.register(
+            AccountProfile::new(id.clone(), "fixture".into(), 0, None),
+            AuthManager::from_auth_for_testing(
+                crate::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            ),
+        )
+        .unwrap();
+        let state: AccountRuntimeState = serde_json::from_value(serde_json::json!({
+            "profiles": [{"profile_id": "fixture", "exhausted_until": retry,
+                "backend_resets_at": backend_reset, "rate_limits": {"primary": null, "secondary": null, "observed_at": null}}]
+        })).unwrap();
+        restore_runtime_state(&pool, &state).unwrap();
+        let snapshot = pool.snapshots().remove(0);
+        assert_eq!(
+            (snapshot.availability, snapshot.backend_resets_at),
+            (
+                AccountAvailability::Exhausted {
+                    resets_at: Some(retry)
+                },
+                backend_reset,
+            )
+        );
+    }
+}
+
 async fn test_auth_manager(home: &Path) -> std::sync::Arc<AuthManager> {
     AuthManager::shared(
         home.to_path_buf(),
@@ -136,6 +167,8 @@ async fn restoring_a_fully_cooling_down_pool_succeeds() {
                 quota_reset_at: None,
                 rate_limits: Default::default(),
                 window_warmup: None,
+
+                backend_resets_at: None,
             },
             AccountRuntimeProfileState {
                 reset_credit_excluded_until: None,
@@ -145,6 +178,8 @@ async fn restoring_a_fully_cooling_down_pool_succeeds() {
                 quota_reset_at: None,
                 rate_limits: Default::default(),
                 window_warmup: None,
+
+                backend_resets_at: None,
             },
         ],
     };
@@ -322,6 +357,11 @@ async fn two_pools_merge_quota_observations_and_force_selection() {
     pools[0].mark_exhausted(&lease, Some(reset)).unwrap();
     store.synchronize_pool(&pools[0], &mut previous[0]).unwrap();
     let limits = crate::AccountRateLimits {
+        primary: Some(crate::AccountRateLimitWindow {
+            used_percent: 10.0,
+            resets_at: Some(reset),
+            window_minutes: Some(300),
+        }),
         observed_at: Some(Utc::now()),
         ..Default::default()
     };
@@ -544,6 +584,8 @@ async fn restore_runtime_state_keeps_warmup_retry_deadline() {
                     quota_reset_at: None,
                     rate_limits: Default::default(),
                     window_warmup: None,
+
+                    backend_resets_at: None,
                 },
                 AccountRuntimeProfileState {
                     reset_credit_excluded_until: None,
@@ -553,6 +595,8 @@ async fn restore_runtime_state_keeps_warmup_retry_deadline() {
                     quota_reset_at: None,
                     rate_limits: idle_primary_limits(),
                     window_warmup: Some(failed_warmup(retry_after)),
+
+                    backend_resets_at: None,
                 },
             ],
         },

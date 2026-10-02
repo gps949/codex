@@ -56,6 +56,8 @@ fn automatic_selection_prefers_headroom_and_retains_a_depleted_last_probe() {
                     primary,
                     secondary,
                     observed_at: Some(now),
+
+                    window_observed_at: None,
                 },
             )
             .expect("record fresh exhausted quota");
@@ -220,6 +222,8 @@ fn late_same_window_quota_cannot_replace_usage_or_omit_weekly_quota() {
             window_minutes: Some(10080),
         }),
         observed_at: Some(now),
+
+        window_observed_at: None,
     };
     let incoming = AccountRateLimits {
         primary: Some(AccountRateLimitWindow {
@@ -232,14 +236,133 @@ fn late_same_window_quota_cannot_replace_usage_or_omit_weekly_quota() {
         }),
         secondary: None,
         observed_at: Some(now + Duration::seconds(1)),
+
+        window_observed_at: None,
     };
     assert_eq!(
         merge_rate_limits_monotonic(&existing, incoming),
         AccountRateLimits {
             observed_at: Some(now + Duration::seconds(1)),
+            window_observed_at: Some(AccountWindowObservationTimes {
+                primary: Some(now + Duration::seconds(1)),
+                secondary: Some(now),
+            }),
             ..existing.clone()
         }
     );
+}
+
+#[test]
+fn cached_exhaustion_does_not_become_fresh_after_other_window_observation() {
+    let now = Utc::now();
+    let existing = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 100.0,
+            resets_at: Some(now + Duration::hours(1)),
+            window_minutes: Some(300),
+        }),
+        observed_at: Some(now - Duration::hours(2)),
+        ..AccountRateLimits::default()
+    };
+    let incoming = AccountRateLimits {
+        secondary: Some(AccountRateLimitWindow {
+            used_percent: 20.0,
+            resets_at: Some(now + Duration::days(2)),
+            window_minutes: Some(10080),
+        }),
+        observed_at: Some(now),
+        ..AccountRateLimits::default()
+    };
+    let merged = merge_rate_limits_monotonic(&existing, incoming);
+    assert!(!has_fresh_exhausted_window(&merged, &now));
+}
+
+#[test]
+fn later_primary_observation_does_not_discard_a_newer_secondary_window() {
+    let now = Utc::now();
+    let existing = AccountRateLimits {
+        secondary: Some(AccountRateLimitWindow {
+            used_percent: 70.0,
+            resets_at: Some(now + Duration::days(2)),
+            window_minutes: Some(10080),
+        }),
+        observed_at: Some(now - Duration::hours(2)),
+        ..AccountRateLimits::default()
+    };
+    let primary = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 30.0,
+            resets_at: Some(now + Duration::hours(1)),
+            window_minutes: Some(300),
+        }),
+        observed_at: Some(now),
+        ..AccountRateLimits::default()
+    };
+    let primary = merge_rate_limits_monotonic(&existing, primary);
+    let secondary = AccountRateLimits {
+        secondary: Some(AccountRateLimitWindow {
+            used_percent: 85.0,
+            ..existing.secondary.unwrap()
+        }),
+        observed_at: Some(now - Duration::minutes(1)),
+        ..AccountRateLimits::default()
+    };
+    let merged = merge_rate_limits_monotonic(&primary, secondary);
+    let mut expected = primary;
+    expected.secondary.as_mut().unwrap().used_percent = 85.0;
+    assert_eq!(merged.secondary, expected.secondary);
+}
+
+#[test]
+fn reset_epoch_rejects_old_windows_inside_newer_partial_snapshots() {
+    let now = Utc::now();
+    let (pool, first, _) = scheduling_pool(AccountPoolRotationStrategy::FillFirst);
+    pool.apply_quota_reset(&first, now - Duration::seconds(10))
+        .unwrap();
+    let mixed = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 100.0,
+            resets_at: Some(now + Duration::hours(1)),
+            window_minutes: Some(300),
+        }),
+        secondary: Some(AccountRateLimitWindow {
+            used_percent: 20.0,
+            resets_at: Some(now + Duration::days(2)),
+            window_minutes: Some(10080),
+        }),
+        observed_at: Some(now),
+        window_observed_at: Some(AccountWindowObservationTimes {
+            primary: Some(now - Duration::minutes(1)),
+            secondary: Some(now),
+        }),
+    };
+    pool.update_rate_limits(&first, mixed.clone()).unwrap();
+    let actual = pool
+        .snapshots()
+        .into_iter()
+        .find(|account| account.profile.id == first)
+        .unwrap()
+        .rate_limits;
+    assert_eq!((actual.primary, actual.secondary), (None, mixed.secondary));
+}
+
+#[test]
+fn empty_quota_reply_does_not_refresh_or_change_an_existing_observation() {
+    let now = Utc::now();
+    let existing = AccountRateLimits {
+        primary: Some(AccountRateLimitWindow {
+            used_percent: 10.0,
+            resets_at: None,
+            window_minutes: Some(300),
+        }),
+        observed_at: Some(now - Duration::hours(1)),
+        ..AccountRateLimits::default()
+    };
+    let empty = AccountRateLimits {
+        observed_at: Some(now),
+        ..AccountRateLimits::default()
+    };
+    assert_eq!(merge_rate_limits_monotonic(&existing, empty), existing);
 }
 
 #[test]
@@ -260,6 +383,8 @@ fn quota_failure_preserves_known_windows_when_error_metadata_is_partial() {
                 window_minutes: Some(10080),
             }),
             observed_at: Some(now - Duration::hours(2)),
+
+            window_observed_at: None,
         };
         pool.update_rate_limits(&first, existing.clone())
             .expect("cache both windows");
@@ -284,6 +409,11 @@ fn quota_failure_preserves_known_windows_when_error_metadata_is_partial() {
             } else {
                 existing.observed_at
             },
+
+            window_observed_at: primary_used.map(|_| AccountWindowObservationTimes {
+                primary: Some(now),
+                secondary: existing.observed_at,
+            }),
         };
         pool.mark_exhausted_with_rate_limits(&lease, Some(now + Duration::hours(1)), incoming)
             .expect("process quota rejection");
@@ -317,6 +447,8 @@ fn quota_failure_preserves_known_windows_when_error_metadata_is_partial() {
                     }),
                     secondary: None,
                     observed_at: Some(now - Duration::minutes(1)),
+
+                    window_observed_at: None,
                 },
             )
             .expect("process a delayed pre-rejection observation");
@@ -402,13 +534,7 @@ fn late_observation_of_an_older_window_preserves_the_current_window() {
         observed_at: Some(now + Duration::seconds(1)),
         ..AccountRateLimits::default()
     };
-    assert_eq!(
-        merge_rate_limits_monotonic(&existing, incoming),
-        AccountRateLimits {
-            observed_at: Some(now + Duration::seconds(1)),
-            ..existing
-        }
-    );
+    assert_eq!(merge_rate_limits_monotonic(&existing, incoming), existing);
 }
 
 #[test]
@@ -422,6 +548,8 @@ fn fresh_timed_observation_replaces_stale_untimed_usage_and_window_shape() {
         }),
         secondary: None,
         observed_at: Some(now - Duration::minutes(31)),
+
+        window_observed_at: None,
     };
     let idle = AccountRateLimits {
         primary: Some(AccountRateLimitWindow {
@@ -431,6 +559,8 @@ fn fresh_timed_observation_replaces_stale_untimed_usage_and_window_shape() {
         }),
         secondary: None,
         observed_at: Some(now),
+
+        window_observed_at: None,
     };
     assert_eq!(merge_rate_limits_monotonic(&existing, idle.clone()), idle);
     let changed = AccountRateLimits {
@@ -460,6 +590,8 @@ fn positive_primary_usage_can_confirm_a_tentative_idle_reset_without_losing_week
             window_minutes: Some(10080),
         }),
         observed_at: Some(now - Duration::seconds(2)),
+
+        window_observed_at: None,
     };
     let confirmed = AccountRateLimits {
         primary: Some(AccountRateLimitWindow {
@@ -469,6 +601,8 @@ fn positive_primary_usage_can_confirm_a_tentative_idle_reset_without_losing_week
         }),
         secondary: idle.secondary.clone(),
         observed_at: Some(now),
+
+        window_observed_at: None,
     };
     assert_eq!(
         merge_rate_limits_monotonic(&idle, confirmed.clone()),

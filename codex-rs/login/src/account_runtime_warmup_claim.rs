@@ -64,6 +64,8 @@ impl AccountRuntimeStateStore {
                 quota_reset_at: None,
                 rate_limits: AccountRateLimits::default(),
                 window_warmup: Some(observation),
+
+                backend_resets_at: None,
             });
         }
         self.save_unlocked(&state)?;

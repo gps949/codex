@@ -456,7 +456,15 @@ fn restore_runtime_state(
             continue;
         }
         if let Ok(lease) = pool.activate(&profile_state.profile_id) {
-            let _ = pool.mark_exhausted(&lease, Some(reset_at))?;
+            let recovery = match profile_state.backend_resets_at {
+                Some(backend_reset) => crate::AccountQuotaRecovery::BackendReset {
+                    resets_at: backend_reset,
+                    retry_at: reset_at,
+                },
+                None => crate::AccountQuotaRecovery::Reprobe { retry_at: reset_at },
+            };
+            let _ =
+                pool.mark_exhausted_for_recovery(&lease, recovery, /*rate_limits*/ None)?;
         }
     }
 
