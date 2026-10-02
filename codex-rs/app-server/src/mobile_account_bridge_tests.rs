@@ -356,3 +356,229 @@ async fn mobile_account_reply_stays_on_requesting_connection() {
         .clone()
     );
 }
+
+#[tokio::test]
+async fn pool_warnings_target_registered_mobile_connections_and_deduplicate_observations() {
+    let (tx, mut rx) = mpsc::channel(16);
+    let outgoing =
+        OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
+    for (id, name) in [
+        (1, "codex_chatgpt_ios_remote"),
+        (2, "codex_chatgpt_android_remote"),
+        (3, "codex-tui"),
+    ] {
+        outgoing
+            .remote_clients
+            .register(ConnectionId(id), name.into())
+            .await;
+    }
+    let mut pool = popup_pool();
+    pool.accounts
+        .iter_mut()
+        .find(|account| account.profile_id == "backup-profile")
+        .unwrap()
+        .rate_limits = serde_json::from_value(json!({
+        "primary": {"usedPercent": 23.0, "resetsAt": 1900000000}, "observedAt": 1800000000
+    }))
+    .unwrap();
+    outgoing
+        .remote_clients
+        .push_pool_update_checked(&outgoing, &pool, || true)
+        .await;
+    let mut recipients = Vec::new();
+    while let Ok(envelope) = rx.try_recv() {
+        let OutgoingEnvelope::ToConnection {
+            connection_id,
+            message: OutgoingMessage::AppServerNotification(envelope),
+            ..
+        } = envelope
+        else {
+            panic!("targeted warning expected");
+        };
+        let ServerNotification::Warning(warning) = envelope.notification else {
+            panic!("pool summary warning expected");
+        };
+        assert_eq!(warning.thread_id, None);
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(warning.message, @"Pool · 2/5 ready | Work · Current · Ready | Backup · Ready · Primary 23% used | +3 more · /account");
+        }
+        recipients.push(connection_id);
+    }
+    recipients.sort_by_key(|connection| connection.0);
+    assert_eq!(recipients, vec![ConnectionId(1), ConnectionId(2)]);
+    for account in &mut pool.accounts {
+        account.rate_limits.observed_at = Some(1800000060);
+        if let Some(window) = account.rate_limits.primary.as_mut() {
+            *window = serde_json::from_value(json!({
+                "usedPercent": window.used_percent, "resetsAt": window.resets_at,
+                "observedAt": 1800000060
+            }))
+            .unwrap();
+        }
+    }
+    outgoing
+        .remote_clients
+        .push_pool_update_checked(&outgoing, &pool, || true)
+        .await;
+    assert!(rx.try_recv().is_err());
+    pool.accounts
+        .iter_mut()
+        .find(|account| account.profile_id == "backup-profile")
+        .unwrap()
+        .rate_limits
+        .primary
+        .as_mut()
+        .unwrap()
+        .resets_at = Some(1900000060);
+    outgoing
+        .remote_clients
+        .push_pool_update_checked(&outgoing, &pool, || true)
+        .await;
+    assert!(
+        rx.try_recv().is_err(),
+        "hidden reset metadata must not repeat an identical summary"
+    );
+    pool.accounts
+        .iter_mut()
+        .find(|account| account.profile_id == "backup-profile")
+        .unwrap()
+        .rate_limits
+        .primary
+        .as_mut()
+        .unwrap()
+        .used_percent = 62.0;
+    outgoing
+        .remote_clients
+        .push_pool_update_checked(&outgoing, &pool, || true)
+        .await;
+    for _ in 0..2 {
+        let OutgoingEnvelope::ToConnection {
+            message: OutgoingMessage::AppServerNotification(envelope),
+            ..
+        } = rx.recv().await.unwrap()
+        else {
+            panic!("targeted warning expected");
+        };
+        let ServerNotification::Warning(warning) = envelope.notification else {
+            panic!("warning expected");
+        };
+        assert!(warning.message.contains("Primary 62% used"));
+    }
+    outgoing.remote_clients.unregister(ConnectionId(2)).await;
+    outgoing
+        .remote_clients
+        .register(ConnectionId(2), "codex_chatgpt_android_remote".into())
+        .await;
+    outgoing
+        .remote_clients
+        .push_pool_update_checked(&outgoing, &pool, || true)
+        .await;
+    let OutgoingEnvelope::ToConnection { connection_id, .. } = rx.recv().await.unwrap() else {
+        panic!("targeted warning expected");
+    };
+    assert_eq!(connection_id, ConnectionId(2));
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn guarded_pool_notification_rechecks_identity_after_queue_backpressure() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    for connection_ids in [vec![], vec![ConnectionId(1)]] {
+        let (tx, mut rx) = mpsc::channel(1);
+        let outgoing =
+            OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
+        let notification =
+            ServerNotification::Warning(codex_app_server_protocol::WarningNotification {
+                thread_id: None,
+                message: "fixture".into(),
+            });
+        outgoing
+            .send_server_notification(notification.clone())
+            .await;
+        let current = AtomicBool::new(true);
+        let pending =
+            outgoing.send_server_notification_checked(&connection_ids, notification, || {
+                current.load(Ordering::SeqCst)
+            });
+        tokio::pin!(pending);
+        assert!(matches!(
+            futures::poll!(&mut pending),
+            std::task::Poll::Pending
+        ));
+        current.store(false, Ordering::SeqCst);
+        let _ = rx.recv().await.unwrap();
+        assert!(!pending.await);
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn pool_warnings_ignore_changes_absent_from_the_displayed_summary() {
+    let (tx, mut rx) = mpsc::channel(4);
+    let outgoing =
+        OutgoingMessageSender::new(tx, codex_analytics::AnalyticsEventsClient::disabled());
+    outgoing
+        .remote_clients
+        .register(ConnectionId(1), "codex_chatgpt_ios_remote".into())
+        .await;
+    let mut pool = popup_pool();
+    outgoing
+        .remote_clients
+        .push_pool_update_checked(&outgoing, &pool, || true)
+        .await;
+    let _ = rx.recv().await.unwrap();
+    let previous_summary = pool_warning_summary(&pool, SummaryPurpose::Display);
+    let hidden = pool
+        .accounts
+        .iter_mut()
+        .find(|account| account.profile_id == "travel-profile")
+        .unwrap();
+    hidden.availability = codex_app_server_protocol::AccountPoolAvailability::Exhausted {
+        resets_at: Some(1900000060),
+    };
+    hidden.rate_limits = serde_json::from_value(json!({"primary": {"usedPercent": 42.0}})).unwrap();
+    assert_eq!(
+        pool_warning_summary(&pool, SummaryPurpose::Display),
+        previous_summary
+    );
+    outgoing
+        .remote_clients
+        .push_pool_update_checked(&outgoing, &pool, || true)
+        .await;
+    assert!(
+        rx.try_recv().is_err(),
+        "identical summaries must not repeat a mobile warning"
+    );
+
+    pool.accounts
+        .iter_mut()
+        .find(|account| account.profile_id == "travel-profile")
+        .unwrap()
+        .availability = codex_app_server_protocol::AccountPoolAvailability::Available;
+    outgoing
+        .remote_clients
+        .push_pool_update_checked(&outgoing, &pool, || true)
+        .await;
+    assert!(
+        rx.try_recv().is_ok(),
+        "hidden availability changes still update the ready count"
+    );
+}
+
+#[test]
+fn pool_warning_summary_is_bounded_without_inventing_missing_quota_windows() {
+    let mut pool = popup_pool();
+    for account in &mut pool.accounts {
+        account.label = Some("Long account name ".repeat(100));
+        account.rate_limits = serde_json::from_value(json!({
+            "primary": {"usedPercent": 25.0, "resetsAt": 1900000000}
+        }))
+        .unwrap();
+    }
+    let summary = pool_warning_summary(&pool, SummaryPurpose::Display);
+    assert!(summary.chars().count() <= 280);
+    assert!(summary.ends_with("/account"));
+    assert!(!summary.contains("Secondary"));
+    insta::assert_snapshot!(summary, @"Pool · 2/5 ready | Long account nam… · Current · Ready · Primary 25% used | Long account nam… · Ready · Primary 25% used | +3 more · /account"); // codespell:ignore nam
+}

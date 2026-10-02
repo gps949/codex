@@ -9,6 +9,9 @@
 //! - `account/rateLimits/read` (`rateLimits.limitName` overlay for the status panel)
 
 use std::collections::HashMap;
+use std::hash::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -254,15 +257,25 @@ async fn emit_item_lifecycle(
 
 #[derive(Default)]
 pub(crate) struct RemoteClientRegistry {
-    clients: Mutex<HashMap<ConnectionId, String>>,
+    clients: Mutex<HashMap<ConnectionId, Option<u64>>>,
     pub(crate) caption: Mutex<Option<String>>,
 }
 
 impl RemoteClientRegistry {
     pub(crate) async fn register(&self, connection_id: ConnectionId, client_name: String) {
         if is_chatgpt_remote_client(Some(client_name.as_str())) {
-            self.clients.lock().await.insert(connection_id, client_name);
+            self.clients.lock().await.entry(connection_id).or_default();
         }
+    }
+
+    pub(crate) async fn push_pool_update_checked(
+        &self,
+        outgoing: &OutgoingMessageSender,
+        pool: &AccountPoolReadResponse,
+        is_current: impl Fn() -> bool + Send,
+    ) {
+        let connection_ids: Vec<_> = self.clients.lock().await.keys().copied().collect();
+        push_account_pool_warning(outgoing, &connection_ids, pool, is_current).await;
     }
 
     pub(crate) async fn unregister(&self, connection_id: ConnectionId) {
@@ -368,17 +381,137 @@ pub(crate) async fn push_account_pool_warning(
     outgoing: &OutgoingMessageSender,
     connection_ids: &[ConnectionId],
     pool: &AccountPoolReadResponse,
+    is_current: impl Fn() -> bool + Send,
 ) {
-    if connection_ids.is_empty() || !pool.enabled {
+    if connection_ids.is_empty() {
+        return;
+    }
+    if !pool.enabled {
+        let mut clients = outgoing.remote_clients.clients.lock().await;
+        for connection_id in connection_ids {
+            if let Some(previous) = clients.get_mut(connection_id) {
+                *previous = None;
+            }
+        }
+        return;
+    }
+    let mut hasher = DefaultHasher::new();
+    pool.active_profile_id.hash(&mut hasher);
+    pool_warning_summary(pool, SummaryPurpose::Deduplication).hash(&mut hasher);
+    let fingerprint = hasher.finish();
+    let connection_ids: Vec<_> = {
+        let mut clients = outgoing.remote_clients.clients.lock().await;
+        connection_ids
+            .iter()
+            .filter_map(|connection_id| {
+                let previous = clients.get_mut(connection_id)?;
+                if *previous == Some(fingerprint) {
+                    return None;
+                }
+                *previous = Some(fingerprint);
+                Some(*connection_id)
+            })
+            .collect()
+    };
+    if connection_ids.is_empty() {
         return;
     }
     let notification = ServerNotification::Warning(WarningNotification {
         thread_id: None,
-        message: crate::mobile_account_status::account_caption(pool),
+        message: pool_warning_summary(pool, SummaryPurpose::Display),
     });
-    outgoing
-        .send_server_notification_to_connections(connection_ids, notification)
-        .await;
+    if !outgoing
+        .send_server_notification_checked(&connection_ids, notification, is_current)
+        .await
+    {
+        let mut clients = outgoing.remote_clients.clients.lock().await;
+        for connection_id in &connection_ids {
+            if let Some(previous) = clients.get_mut(connection_id)
+                && *previous == Some(fingerprint)
+            {
+                *previous = None;
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum SummaryPurpose {
+    Display,
+    Deduplication,
+}
+
+fn pool_warning_summary(pool: &AccountPoolReadResponse, purpose: SummaryPurpose) -> String {
+    let ready = pool
+        .accounts
+        .iter()
+        .filter(|account| {
+            matches!(
+                account.availability,
+                codex_app_server_protocol::AccountPoolAvailability::Available
+            )
+        })
+        .count();
+    let mut accounts: Vec<_> = pool.accounts.iter().collect();
+    accounts.sort_by_key(|account| {
+        (
+            Some(account.profile_id.as_str()) != pool.active_profile_id.as_deref(),
+            account.priority,
+            &account.profile_id,
+        )
+    });
+    let mut entries = vec![format!("Pool · {ready}/{} ready", accounts.len())];
+    for account in accounts.iter().take(2) {
+        let name = crate::mobile_account_status::compact_label(
+            &crate::mobile_account_status::label(account),
+            /*max*/ 16,
+        );
+        let current = if Some(account.profile_id.as_str()) == pool.active_profile_id.as_deref() {
+            " · Current"
+        } else {
+            ""
+        };
+        let state = match account.availability {
+            codex_app_server_protocol::AccountPoolAvailability::Available => "Ready",
+            codex_app_server_protocol::AccountPoolAvailability::Exhausted { .. } => "Cooling down",
+            codex_app_server_protocol::AccountPoolAvailability::AuthenticationUnavailable {
+                ..
+            } => "Login required",
+            codex_app_server_protocol::AccountPoolAvailability::Disabled => "Disabled",
+        };
+        let mut entry = format!("{name}{current} · {state}");
+        if purpose == SummaryPurpose::Deduplication && !current.is_empty() {
+            entries.push(entry);
+            continue;
+        }
+        for (name, window) in [
+            ("Primary", &account.rate_limits.primary),
+            ("Secondary", &account.rate_limits.secondary),
+        ] {
+            if let Some(window) = window
+                .as_ref()
+                .filter(|window| window.used_percent.is_finite())
+            {
+                let used = window.used_percent.clamp(0.0, 100.0).round() as i32;
+                entry.push_str(&format!(" · {name} {used}% used"));
+            }
+        }
+        entries.push(entry);
+    }
+    if accounts.is_empty() {
+        entries.push("Account pool is empty".into());
+    } else if pool.active_profile_id.is_none() {
+        entries.insert(1, "No current account".into());
+    }
+    if accounts.len() > 2 {
+        entries.push(format!("+{} more", accounts.len() - 2));
+    }
+    // Limit presentation independently of pool size; fingerprints retain only one
+    // word per live mobile connection and ignore observation timestamps.
+    format!(
+        "{} · /account",
+        crate::mobile_account_status::compact_label(&entries.join(" | "), /*max*/ 268)
+    )
 }
 
 #[cfg(test)]
@@ -463,6 +596,8 @@ mod tests {
                 email: None,
                 rate_limits: AccountPoolRateLimits::default(),
                 window_warmup: None,
+
+                backend_resets_at: None,
             }],
         };
         let snapshot: codex_app_server_protocol::RateLimitSnapshot = serde_json::from_value(serde_json::json!({
@@ -545,6 +680,8 @@ mod tests {
                 email: None,
                 rate_limits: AccountPoolRateLimits::default(),
                 window_warmup: None,
+
+                backend_resets_at: None,
             }],
         };
         let mut response = GetWorkspaceMessagesResponse {
