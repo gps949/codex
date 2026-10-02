@@ -93,24 +93,15 @@ impl AccountProfile {
     }
 }
 
-/// One rate-limit window reported for an account.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AccountRateLimitWindow {
-    pub used_percent: f64,
-    pub resets_at: Option<DateTime<Utc>>,
-    /// Rolling window length in minutes when the backend reports it (5h primary is `300`).
-    #[serde(default)]
-    pub window_minutes: Option<i64>,
-}
-
-/// Cached rate-limit information used for scheduling and UI. Real request failures remain
-/// authoritative when the cached snapshot disagrees with the backend.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct AccountRateLimits {
-    pub primary: Option<AccountRateLimitWindow>,
-    pub secondary: Option<AccountRateLimitWindow>,
-    pub observed_at: Option<DateTime<Utc>>,
-}
+#[path = "account_quota_observations.rs"]
+mod observations;
+pub use observations::AccountRateLimitWindow;
+pub use observations::AccountRateLimits;
+pub use observations::AccountWindowObservationTimes;
+#[path = "account_quota_recovery.rs"]
+mod recovery;
+pub use recovery::AccountQuotaRecovery;
+use recovery::BackendResetEvidence;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum AccountAvailability {
@@ -151,6 +142,9 @@ impl AccountAvailability {
 pub struct AccountPoolSnapshot {
     pub profile: AccountProfile,
     pub availability: AccountAvailability,
+    /// Backend-confirmed natural reset, distinct from a local scheduling or probe deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_resets_at: Option<DateTime<Utc>>,
     pub rate_limits: AccountRateLimits,
     pub is_active: bool,
     /// Latest identity-preserving 5h-window warmup observation for this profile, if any.
@@ -277,6 +271,7 @@ struct ManagedAccount {
     profile: AccountProfile,
     auth_manager: Arc<AuthManager>,
     availability: AccountAvailability,
+    backend_resets_at: Option<DateTime<Utc>>,
     rate_limits: AccountRateLimits,
     last_active_generation: Option<u64>,
     window_warmup: Option<WindowWarmupObservation>,
@@ -325,7 +320,7 @@ mod shared_state;
 #[path = "account_pool_quota.rs"]
 mod quota;
 use quota::has_fresh_exhausted_window;
-pub(crate) use quota::merge_rate_limits_monotonic;
+pub use quota::merge_rate_limits_monotonic;
 
 #[path = "account_pool_warmup.rs"]
 mod window_warmup;
@@ -378,6 +373,7 @@ impl AccountPool {
                 profile,
                 auth_manager,
                 availability,
+                backend_resets_at: None,
                 rate_limits: AccountRateLimits::default(),
                 last_active_generation: None,
                 window_warmup: None,
@@ -567,6 +563,7 @@ impl AccountPool {
                 .ok_or_else(|| AccountPoolError::UnknownProfile(selected_id.clone()))?;
             if !account.availability.is_eligible(&now) {
                 account.availability = AccountAvailability::Available;
+                account.backend_resets_at = None;
                 true
             } else {
                 false
@@ -610,6 +607,7 @@ impl AccountPool {
             };
             if forced {
                 account.availability = AccountAvailability::Available;
+                account.backend_resets_at = None;
             }
             account.preemptive_rotation_until.take().is_some() || forced
         };
@@ -777,11 +775,14 @@ impl AccountPool {
         lease: &AccountLease,
         resets_at: Option<DateTime<Utc>>,
     ) -> Result<AccountAvailabilityMutation, AccountPoolError> {
-        self.mark_unavailable_from_lease(
-            lease,
-            AccountAvailability::Exhausted { resets_at },
-            /*rate_limits*/ None,
-        )
+        let recovery = match resets_at {
+            Some(resets_at) => AccountQuotaRecovery::BackendReset {
+                resets_at,
+                retry_at: resets_at,
+            },
+            None => AccountQuotaRecovery::Unscheduled,
+        };
+        self.mark_exhausted_for_recovery(lease, recovery, /*rate_limits*/ None)
     }
 
     /// Records the rate-limit snapshot and exhaustion from one lease atomically.
@@ -791,11 +792,14 @@ impl AccountPool {
         resets_at: Option<DateTime<Utc>>,
         rate_limits: AccountRateLimits,
     ) -> Result<AccountAvailabilityMutation, AccountPoolError> {
-        self.mark_unavailable_from_lease(
-            lease,
-            AccountAvailability::Exhausted { resets_at },
-            Some(rate_limits),
-        )
+        let recovery = match resets_at {
+            Some(resets_at) => AccountQuotaRecovery::BackendReset {
+                resets_at,
+                retry_at: resets_at,
+            },
+            None => AccountQuotaRecovery::Unscheduled,
+        };
+        self.mark_exhausted_for_recovery(lease, recovery, Some(rate_limits))
     }
 
     /// Marks a permanently failed authentication profile unavailable after its own normal token
@@ -811,6 +815,7 @@ impl AccountPool {
                 reason: reason.into(),
             },
             /*rate_limits*/ None,
+            BackendResetEvidence::Unknown,
         )
     }
 
@@ -835,6 +840,7 @@ impl AccountPool {
             return Ok(false);
         }
         account.availability = AccountAvailability::Available;
+        account.backend_resets_at = None;
         drop(state);
         self.notify_change();
         Ok(true)
@@ -858,6 +864,7 @@ impl AccountPool {
         let availability_changed = account.availability != new_availability
             || account.preemptive_rotation_until.take().is_some();
         account.availability = new_availability;
+        account.backend_resets_at = None;
         if disabled {
             account.last_active_generation = None;
         }
@@ -906,6 +913,7 @@ impl AccountPool {
             return Ok(());
         }
         account.quota_reset_at = Some(reset_at);
+        account.backend_resets_at = None;
         account.rate_limits = AccountRateLimits {
             observed_at: Some(reset_at),
             ..AccountRateLimits::default()
@@ -925,7 +933,7 @@ impl AccountPool {
     pub fn update_rate_limits(
         &self,
         profile_id: &AccountProfileId,
-        rate_limits: AccountRateLimits,
+        mut rate_limits: AccountRateLimits,
     ) -> Result<(), AccountPoolError> {
         let mut state = self.lock_state();
         let account = state
@@ -934,6 +942,9 @@ impl AccountPool {
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
         if account.quota_reset_at.is_some() && rate_limits.observed_at <= account.quota_reset_at {
             return Ok(());
+        }
+        if let Some(reset_at) = account.quota_reset_at {
+            rate_limits.discard_windows_before(reset_at);
         }
         let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
         let mut changed = account.rate_limits != merged;
@@ -952,7 +963,7 @@ impl AccountPool {
     pub fn update_rate_limits_from_lease(
         &self,
         lease: &AccountLease,
-        rate_limits: AccountRateLimits,
+        mut rate_limits: AccountRateLimits,
     ) -> Result<(), AccountPoolError> {
         let mut state = self.lock_state();
         let account = state
@@ -964,6 +975,9 @@ impl AccountPool {
         }
         if account.quota_reset_at.is_some() && rate_limits.observed_at <= account.quota_reset_at {
             return Ok(());
+        }
+        if let Some(reset_at) = account.quota_reset_at {
+            rate_limits.discard_windows_before(reset_at);
         }
         let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
         let mut changed = account.rate_limits != merged;
@@ -986,6 +1000,7 @@ impl AccountPool {
             .map(|account| AccountPoolSnapshot {
                 profile: account.profile.clone(),
                 availability: account.availability.clone(),
+                backend_resets_at: account.backend_resets_at,
                 rate_limits: account.rate_limits.clone(),
                 is_active: active_profile.as_ref() == Some(&account.profile.id),
                 window_warmup: account.window_warmup.clone(),
@@ -1011,6 +1026,7 @@ impl AccountPool {
         lease: &AccountLease,
         availability: AccountAvailability,
         rate_limits: Option<AccountRateLimits>,
+        reset_evidence: BackendResetEvidence,
     ) -> Result<AccountAvailabilityMutation, AccountPoolError> {
         let mut state = self.lock_state();
         let refreshed = refresh_expired_exhaustion(&mut state);
@@ -1072,7 +1088,22 @@ impl AccountPool {
             },
             (_, observed) => observed,
         };
+        let backend_resets_at =
+            if matches!(merged_availability, AccountAvailability::Exhausted { .. }) {
+                let previous = account
+                    .backend_resets_at
+                    .filter(|reset| *reset > Utc::now());
+                match reset_evidence {
+                    BackendResetEvidence::Known(reset) => {
+                        previous.max((reset > Utc::now()).then_some(reset))
+                    }
+                    BackendResetEvidence::Unknown => previous,
+                }
+            } else {
+                None
+            };
         let availability_changed = account.availability != merged_availability
+            || account.backend_resets_at != backend_resets_at
             || account.preemptive_rotation_until.take().is_some();
         // A bare refusal is authoritative for availability, not a new quota observation.
         // Partial observations keep their ordering timestamp so delayed data cannot replace them.
@@ -1084,7 +1115,12 @@ impl AccountPool {
                     .chain(limits.secondary.iter())
                     .any(|window| window.used_percent.is_finite() && window.used_percent >= 0.0)
             })
-            .map(|limits| merge_rate_limits_monotonic(&account.rate_limits, limits));
+            .map(|mut limits| {
+                if let Some(reset_at) = account.quota_reset_at {
+                    limits.discard_windows_before(reset_at);
+                }
+                merge_rate_limits_monotonic(&account.rate_limits, limits)
+            });
         let rate_limits_changed = rate_limits
             .as_ref()
             .is_some_and(|rate_limits| account.rate_limits != *rate_limits);
@@ -1100,6 +1136,7 @@ impl AccountPool {
             account.rate_limits = rate_limits;
         }
         account.availability = merged_availability;
+        account.backend_resets_at = backend_resets_at;
 
         if state.active_profile.as_ref() != Some(&lease.profile.id) {
             let active = active_lease(&state);
@@ -1172,6 +1209,7 @@ fn refresh_expired_exhaustion(state: &mut AccountPoolState) -> bool {
             changed = true;
         }
         if account.availability.refresh_for_time(&now) {
+            account.backend_resets_at = None;
             if active_profile.as_ref() == Some(&account.profile.id) {
                 // The profile is still the sticky active identity. Keep a generation guard so a
                 // later usage-limit / auth failure from its live lease is not treated as stale.
@@ -2070,6 +2108,8 @@ mod tests {
             }),
             secondary: None,
             observed_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+
+            window_observed_at: None,
         };
         let incoming = AccountRateLimits {
             primary: Some(AccountRateLimitWindow {
@@ -2079,6 +2119,8 @@ mod tests {
             }),
             secondary: None,
             observed_at: Some(Utc::now()),
+
+            window_observed_at: None,
         };
         let merged = merge_rate_limits_monotonic(&existing, incoming);
         assert_eq!(
@@ -2847,6 +2889,11 @@ mod tests {
         pool.update_rate_limits(
             &first.id,
             AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 10.0,
+                    resets_at: None,
+                    window_minutes: Some(300),
+                }),
                 observed_at: Some(Utc::now()),
                 ..AccountRateLimits::default()
             },
