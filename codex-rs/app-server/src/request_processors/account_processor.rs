@@ -1164,9 +1164,19 @@ impl AccountRequestProcessor {
         let include_token = params.include_token.unwrap_or(false);
         let do_refresh = params.refresh_token.unwrap_or(false);
 
-        // Pool credentials live under per-profile homes and are presented through ExternalAuth.
-        // Install before reading auth so pool-only setups are not reported as logged out.
-        let _ = self.get_account_pool_response().await?;
+        // Install configured pool credentials before reading auth. An ordinary login
+        // has no pool to install: waiting for its in-flight cloud requirements here
+        // would prevent this request from refreshing the credentials used by that load.
+        let profiles = codex_login::AccountProfileStore::new(self.config.codex_home.to_path_buf());
+        if profiles
+            .manifest_path()
+            .try_exists()
+            .unwrap_or(/*default*/ true)
+            || !self.execution_account_pool.snapshots().is_empty()
+            || codex_login::AccountPoolRuntime::is_home_suspended(&self.config.codex_home)
+        {
+            let _ = self.get_account_pool_response().await?;
+        }
 
         self.refresh_token_if_requested(do_refresh).await;
 

@@ -107,6 +107,20 @@ async fn account_read_reports_chatgpt_when_only_pool_profile_has_credentials() -
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 
+    // Legacy auth status must also install a pool when it is the first account RPC.
+    let status_id = mcp
+        .send_get_auth_status_request(GetAuthStatusParams {
+            include_token: Some(false),
+            refresh_token: Some(false),
+        })
+        .await?;
+    let status: GetAuthStatusResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(status_id)).await??;
+    assert_eq!(
+        status.auth_method,
+        Some(codex_app_server_protocol::AuthMode::Chatgpt)
+    );
+
     let get_id = mcp
         .send_get_account_request(GetAccountParams {
             refresh_token: false,
@@ -134,19 +148,6 @@ async fn account_read_reports_chatgpt_when_only_pool_profile_has_credentials() -
     let pool = account.account_pool.expect("account pool snapshot");
     assert!(pool.enabled);
     assert_eq!(pool.active_profile_id.as_deref(), Some("selected-acct"));
-
-    let status_id = mcp
-        .send_get_auth_status_request(GetAuthStatusParams {
-            include_token: Some(false),
-            refresh_token: Some(false),
-        })
-        .await?;
-    let status: GetAuthStatusResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(status_id)).await??;
-    assert_eq!(
-        status.auth_method,
-        Some(codex_app_server_protocol::AuthMode::Chatgpt)
-    );
 
     Ok(())
 }

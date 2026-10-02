@@ -2248,13 +2248,19 @@ async fn login_survives_same_owner_token_refresh(
             .chatgpt_account_id(WORKSPACE_ID_DEVICE),
     )?;
     mock_oauth_token(&backend, &id_token).await;
+    let refresh_started = Arc::new(Notify::new());
+    let refresh_signal = Arc::clone(&refresh_started);
+    let refresh_reply = json!({
+        "id_token": id_token,
+        "access_token": "refreshed-access-token",
+        "refresh_token": "refreshed-refresh-token",
+    });
     Mock::given(method("POST"))
         .and(path("/oauth/refresh"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id_token": id_token,
-            "access_token": "refreshed-access-token",
-            "refresh_token": "refreshed-refresh-token",
-        })))
+        .respond_with(move |_: &wiremock::Request| {
+            refresh_signal.notify_one();
+            ResponseTemplate::new(200).set_body_json(refresh_reply.clone())
+        })
         .expect(1)
         .mount(&backend)
         .await;
@@ -2289,7 +2295,15 @@ async fn login_survives_same_owner_token_refresh(
                         LoginRefreshTrigger::AuthStatus => 200,
                         LoginRefreshTrigger::UnauthorizedConfig => 401,
                     })
-                    .set_delay(Duration::from_secs(/*secs*/ 2))
+                    .set_delay(Duration::from_secs(match refresh_trigger {
+                        LoginRefreshTrigger::AuthStatus
+                            if request_path == "/backend-api/wham/config/bundle" =>
+                        {
+                            5
+                        }
+                        LoginRefreshTrigger::AuthStatus
+                        | LoginRefreshTrigger::UnauthorizedConfig => 2,
+                    }))
                     .set_body_json(response.clone())
                 })
                 .with_priority(1)
@@ -2338,6 +2352,8 @@ async fn login_survives_same_owner_token_refresh(
                     refresh_token: Some(true),
                 })
                 .await?;
+            // A refresh must start before the pending requirements response completes.
+            timeout(Duration::from_secs(/*secs*/ 2), refresh_started.notified()).await?;
             let refreshed: GetAuthStatusResponse =
                 timeout(DEFAULT_READ_TIMEOUT, server.read_response(request)).await??;
             assert_eq!(

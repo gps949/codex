@@ -384,7 +384,15 @@ impl TestAppServer {
     ) -> anyhow::Result<JSONRPCMessage> {
         let params = Some(serde_json::to_value(params)?);
         let request_id = self.send_request("initialize", params).await?;
-        let message = self.read_jsonrpc_message().await?;
+        // Match production clients: retain startup events that precede this response.
+        let expected_id = RequestId::Integer(request_id);
+        let message = self
+            .read_stream_until_message(|message| match message {
+                JSONRPCMessage::Response(response) => response.id == expected_id,
+                JSONRPCMessage::Error(error) => error.id == expected_id,
+                JSONRPCMessage::Request(_) | JSONRPCMessage::Notification(_) => false,
+            })
+            .await?;
         match message {
             JSONRPCMessage::Response(response) => {
                 if response.id != RequestId::Integer(request_id) {
