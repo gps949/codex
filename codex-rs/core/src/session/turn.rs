@@ -2003,7 +2003,12 @@ async fn run_sampling_request(
                                 turn_context.turn_timing_state.record_sampling_retry();
                                 continue;
                             }
-                            let max_wait = turn_context.config.account_pool.effective_reset_wait();
+                            let wait_budget = turn_context.extension_data.get_or_init(|| {
+                                crate::account_pool_recovery::RecoveryWaitBudget::new(
+                                    turn_context.config.account_pool.effective_reset_wait(),
+                                )
+                            });
+                            let max_wait = wait_budget.remaining();
                             if crate::account_pool_recovery::can_continue(retry_mode)
                                 && !max_wait.is_zero()
                                 && let Some(reset) = crate::failover_turn::earliest_exhausted_reset(
@@ -2015,13 +2020,13 @@ async fn run_sampling_request(
                             {
                                 sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
                                     message: format!(
-                                        "All Codex accounts are cooling down. Waiting for quota recovery (earliest reset: {}). Cancel to stop waiting.",
+                                        "All Codex accounts are cooling down. Waiting to retry (earliest check: {}). Cancel to stop waiting.",
                                         reset.format("%Y-%m-%d %H:%M UTC"),
                                     ),
                                 })).await;
                                 let recovered = crate::account_pool_recovery::wait_for_recovery(
                                     execution_auth.as_ref(),
-                                    max_wait,
+                                    &wait_budget,
                                     &cancellation_token,
                                 )
                                 .or_cancel(&preempt)
@@ -2045,7 +2050,7 @@ async fn run_sampling_request(
                                         )
                                         .await?;
                                     sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
-                                        message: "Codex account quota recovered. The turn continues automatically.".into(),
+                                        message: "A Codex account became available for retry. The turn continues automatically.".into(),
                                     })).await;
                                     turn_context.turn_timing_state.record_sampling_retry();
                                     continue;

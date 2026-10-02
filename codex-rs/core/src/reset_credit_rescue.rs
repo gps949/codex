@@ -90,7 +90,7 @@ pub(crate) async fn try_reset_credit_rescue(
     let earliest_reset = snapshots
         .iter()
         .filter_map(|snapshot| match &snapshot.availability {
-            AccountAvailability::Exhausted { resets_at } => *resets_at,
+            AccountAvailability::Exhausted { .. } => snapshot.backend_resets_at,
             AccountAvailability::Available
             | AccountAvailability::AuthenticationUnavailable { .. }
             | AccountAvailability::Disabled => None,
@@ -225,9 +225,9 @@ pub(crate) async fn try_reset_credit_rescue(
             continue;
         };
         let reset_key = match failed_snapshot.availability {
-            AccountAvailability::Exhausted { resets_at } => {
-                resets_at.map(|reset| reset.timestamp() / 60)
-            }
+            AccountAvailability::Exhausted { .. } => failed_snapshot
+                .backend_resets_at
+                .map(|reset| reset.timestamp() / 60),
             AccountAvailability::Available
             | AccountAvailability::AuthenticationUnavailable { .. }
             | AccountAvailability::Disabled => continue,

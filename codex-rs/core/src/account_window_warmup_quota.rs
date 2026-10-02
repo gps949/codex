@@ -45,7 +45,7 @@ pub(super) fn account_primary_started(limits: &AccountRateLimits) -> bool {
             && window.window_minutes.is_none_or(|minutes| minutes == 300)
             && match window.resets_at {
                 Some(reset) => reset > now && reset <= now + chrono::Duration::minutes(305),
-                None => limits.observed_at.is_some_and(|observed| {
+                None => limits.primary_observed_at().is_some_and(|observed| {
                     observed <= now && now - observed < chrono::Duration::minutes(30)
                 }),
             }
@@ -101,61 +101,10 @@ pub(super) fn merge_account_rate_limits_monotonic(
     existing: Option<&AccountRateLimits>,
     incoming: AccountRateLimits,
 ) -> AccountRateLimits {
-    let Some(existing) = existing else {
-        return incoming;
-    };
-    if matches!((existing.observed_at, incoming.observed_at), (Some(previous), Some(current)) if current < previous)
-    {
-        return existing.clone();
+    match existing {
+        Some(existing) => codex_login::merge_rate_limits_monotonic(existing, incoming),
+        None => incoming,
     }
-    AccountRateLimits {
-        primary: merge_window(existing.primary.as_ref(), incoming.primary),
-        secondary: merge_window(existing.secondary.as_ref(), incoming.secondary),
-        observed_at: incoming.observed_at.or(existing.observed_at),
-    }
-}
-
-fn merge_window(
-    existing: Option<&AccountRateLimitWindow>,
-    incoming: Option<AccountRateLimitWindow>,
-) -> Option<AccountRateLimitWindow> {
-    let Some(existing) = existing else {
-        return incoming;
-    };
-    let Some(mut incoming) = incoming else {
-        return Some(existing.clone());
-    };
-    if !incoming.used_percent.is_finite() || incoming.used_percent < 0.0 {
-        return Some(existing.clone());
-    }
-    if matches!((existing.window_minutes, incoming.window_minutes), (Some(previous), Some(current)) if previous != current)
-    {
-        return Some(existing.clone());
-    }
-    let now = Utc::now();
-    if existing.used_percent <= 0.0
-        && incoming.used_percent.is_finite()
-        && incoming.used_percent > 0.0
-        && existing.window_minutes.is_none_or(|minutes| minutes == 300)
-        && incoming.window_minutes.is_none_or(|minutes| minutes == 300)
-        && matches!((existing.resets_at, incoming.resets_at),
-            (Some(previous), Some(current)) if current > now
-                && current <= now + chrono::Duration::minutes(305)
-                && previous <= now + chrono::Duration::minutes(305)
-                && previous - current <= chrono::Duration::minutes(5))
-    {
-        return Some(incoming);
-    }
-    match (existing.resets_at, incoming.resets_at) {
-        (Some(previous), Some(current)) if current < previous => return Some(existing.clone()),
-        (Some(previous), Some(current)) if current > previous => return Some(incoming),
-        (Some(previous), _) if previous <= Utc::now() => return Some(incoming),
-        (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) | (None, None) => {}
-    }
-    incoming.used_percent = incoming.used_percent.max(existing.used_percent);
-    incoming.resets_at = incoming.resets_at.or(existing.resets_at);
-    incoming.window_minutes = incoming.window_minutes.or(existing.window_minutes);
-    Some(incoming)
 }
 
 pub(super) struct WarmupQuotaProbe {
@@ -272,5 +221,7 @@ pub(super) fn convert_rate_limits(snapshot: &RateLimitSnapshot) -> AccountRateLi
         primary: snapshot.primary.as_ref().map(convert),
         secondary: snapshot.secondary.as_ref().map(convert),
         observed_at: Some(Utc::now()),
+
+        window_observed_at: None,
     }
 }

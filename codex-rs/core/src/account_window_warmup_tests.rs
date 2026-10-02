@@ -100,6 +100,8 @@ fn merge_account_rate_limits_monotonic_keeps_started_primary() {
         }),
         secondary: None,
         observed_at: Some(Utc::now() - chrono::Duration::seconds(30)),
+
+        window_observed_at: None,
     };
     let incoming = AccountRateLimits {
         primary: Some(AccountRateLimitWindow {
@@ -109,6 +111,8 @@ fn merge_account_rate_limits_monotonic_keeps_started_primary() {
         }),
         secondary: None,
         observed_at: Some(Utc::now()),
+
+        window_observed_at: None,
     };
     let merged = merge_account_rate_limits_monotonic(Some(&existing), incoming);
     assert_eq!(
@@ -263,6 +267,8 @@ async fn warmup_request_fixture_with_sse(
             }),
             secondary: None,
             observed_at: Some(Utc::now()),
+
+            window_observed_at: None,
         },
     )?;
 
@@ -847,6 +853,8 @@ async fn warmup_refreshes_expired_quota_before_generating() -> anyhow::Result<()
             }),
             secondary: None,
             observed_at: Some(Utc::now() - chrono::Duration::hours(5)),
+
+            window_observed_at: None,
         },
     )?;
     let reset_at = Utc::now().timestamp() + 17000;

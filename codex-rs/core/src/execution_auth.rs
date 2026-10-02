@@ -631,21 +631,21 @@ impl ExecutionAuth {
     pub(crate) fn failover_after_quota_exhausted(
         &self,
         failed_lease: &ExecutionAuthLease,
-        resets_at: Option<DateTime<Utc>>,
+        recovery: codex_login::AccountQuotaRecovery,
     ) -> std::io::Result<AccountAvailabilityMutation> {
         let (Some(pool), Some(account_lease)) =
             (self.account_pool(), failed_lease.account.as_ref())
         else {
             return Ok(AccountAvailabilityMutation::PoolExhausted);
         };
-        pool.mark_exhausted(account_lease, resets_at)
+        pool.mark_exhausted_for_recovery(account_lease, recovery, /*rate_limits*/ None)
             .map_err(std::io::Error::other)
     }
 
     pub(crate) fn failover_after_usage_limit(
         &self,
         failed_lease: &ExecutionAuthLease,
-        resets_at: DateTime<Utc>,
+        recovery: codex_login::AccountQuotaRecovery,
         snapshot: Option<&RateLimitSnapshot>,
     ) -> std::io::Result<AccountAvailabilityMutation> {
         let (Some(pool), Some(account_lease)) =
@@ -653,20 +653,16 @@ impl ExecutionAuth {
         else {
             return Ok(AccountAvailabilityMutation::PoolExhausted);
         };
-        match snapshot.filter(|snapshot| {
-            snapshot
-                .limit_id
-                .as_deref()
-                .is_none_or(|limit_id| limit_id == "codex")
-        }) {
-            Some(snapshot) => pool.mark_exhausted_with_rate_limits(
-                account_lease,
-                Some(resets_at),
-                convert_rate_limits(snapshot),
-            ),
-            None => pool.mark_exhausted(account_lease, Some(resets_at)),
-        }
-        .map_err(std::io::Error::other)
+        let limits = snapshot
+            .filter(|snapshot| {
+                snapshot
+                    .limit_id
+                    .as_deref()
+                    .is_none_or(|limit_id| limit_id == "codex")
+            })
+            .map(convert_rate_limits);
+        pool.mark_exhausted_for_recovery(account_lease, recovery, limits)
+            .map_err(std::io::Error::other)
     }
 
     pub(crate) fn failover_after_auth_unavailable(
@@ -773,6 +769,8 @@ fn convert_rate_limits(snapshot: &RateLimitSnapshot) -> AccountRateLimits {
         primary: snapshot.primary.as_ref().map(convert_rate_limit_window),
         secondary: snapshot.secondary.as_ref().map(convert_rate_limit_window),
         observed_at: Some(Utc::now()),
+
+        window_observed_at: None,
     }
 }
 

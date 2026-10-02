@@ -88,6 +88,8 @@ async fn preemptive_parking_retains_quota_until_all_crossed_windows_reset() -> a
             window_minutes: Some(10080),
         }),
         observed_at: Some(now),
+
+        window_observed_at: None,
     };
     let saved_limits = expected_limits.clone();
     let mut builder = test_codex()

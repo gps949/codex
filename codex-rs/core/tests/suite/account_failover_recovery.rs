@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use codex_config::AutoResetCredits;
 use codex_core::ExecutionAccountPoolHandle;
 use codex_core::StartThreadOptions;
@@ -5,6 +7,7 @@ use codex_core::TurnInputRequest;
 use codex_login::CodexAuth;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::responses::ResponsesRequest;
@@ -106,7 +109,7 @@ async fn account_pool_waits_and_continues_after_external_quota_recovery() -> any
         }]))
         .await?;
     wait_for_event(&fixture.codex, |event| {
-        matches!(event, EventMsg::Warning(warning) if warning.message.contains("Waiting for quota recovery"))
+        matches!(event, EventMsg::Warning(warning) if warning.message.contains("Waiting to retry"))
     }).await;
     let handle = ExecutionAccountPoolHandle::shared(fixture.thread_manager.auth_manager());
     let profile = codex_login::AccountProfileId::new("backup-acct")?;
@@ -124,24 +127,180 @@ async fn account_pool_waits_and_continues_after_external_quota_recovery() -> any
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn repeated_refusal_after_a_tool_uses_the_turns_remaining_wait_budget() -> anyhow::Result<()>
+{
+    let server = MockServer::start().await;
+    let reset = chrono::Utc::now().timestamp() + 50;
+    let exhausted = ResponseTemplate::new(/*status*/ 429).set_body_json(json!({"error": {
+        "type": "usage_limit_reached", "message": "still exhausted", "resets_at": reset
+    }}));
+    let call_id = "recovery-budget-plan-call";
+    let requests = mount_response_sequence(
+        &server,
+        vec![
+            exhausted.clone(),
+            responses::sse_response(sse(vec![
+                ev_response_created("recovery-tool-response"),
+                ev_function_call(
+                    call_id,
+                    "update_plan",
+                    &json!({
+                        "plan": [{"step": "Run once", "status": "completed"}],
+                    })
+                    .to_string(),
+                ),
+                ev_completed("recovery-tool-response"),
+            ])),
+            exhausted,
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .without_auth()
+        .with_pre_build_hook(write_backup_only_account_pool_fixture)
+        .with_config(|config| {
+            config.update_plan_enabled = true;
+            config.account_pool.max_reset_wait_minutes = Some(1);
+            config.account_pool.window_warmup = Some(false);
+        });
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "continue safely within one wait allowance".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::Warning(warning) if warning.message.contains("Waiting to retry"))
+    }).await;
+
+    // Advance only the recovery wait; keep HTTP and credential I/O on real time.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(35)).await;
+    tokio::time::resume();
+    let handle = ExecutionAccountPoolHandle::shared(fixture.thread_manager.auth_manager());
+    handle
+        .activate(
+            &codex_login::AccountProfileId::new("backup-acct")?,
+            /*force*/ true,
+        )
+        .await?;
+    let events = tokio::time::timeout(Duration::from_secs(10), collect_turn_events(&fixture.codex))
+        .await??;
+
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                EventMsg::Error(error) => error.codex_error_info.clone(),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![CodexErrorInfo::UsageLimitExceeded],
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        EventMsg::Warning(warning) if warning.message.contains("became available for retry")
+    )));
+    assert!(
+        !events.iter().any(|event| matches!(event,
+            EventMsg::Warning(warning) if warning.message.contains("Waiting to retry")
+        )),
+        "the next reset is outside the remaining allowance"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EventMsg::PlanUpdate(_)))
+            .count(),
+        1
+    );
+    let requests = requests.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[2]
+            .input()
+            .iter()
+            .filter(|item| {
+                item["type"].as_str() == Some("function_call_output")
+                    && item["call_id"].as_str() == Some(call_id)
+            })
+            .count(),
+        1,
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_recovery_wait_does_not_resume_after_an_account_becomes_available()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let requests = mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(/*status*/ 429).set_body_json(json!({"error": {
+                "type": "usage_limit_reached", "message": "wait for recovery",
+                "resets_at": chrono::Utc::now().timestamp() + 50,
+            }})),
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .without_auth()
+        .with_pre_build_hook(write_backup_only_account_pool_fixture)
+        .with_config(|config| {
+            config.account_pool.max_reset_wait_minutes = Some(1);
+            config.account_pool.window_warmup = Some(false);
+        });
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "cancel while the pool is exhausted".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::Warning(warning) if warning.message.contains("Waiting to retry"))
+    }).await;
+    fixture.codex.submit(Op::Interrupt).await?;
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::TurnAborted(_))
+    })
+    .await;
+    let handle = ExecutionAccountPoolHandle::shared(fixture.thread_manager.auth_manager());
+    handle
+        .activate(
+            &codex_login::AccountProfileId::new("backup-acct")?,
+            /*force*/ true,
+        )
+        .await?;
+
+    assert_eq!(requests.requests().len(), 1);
+    Ok(())
+}
+
+enum ResetTiming {
+    Known { minutes: i64 },
+    Unknown,
+}
+
 async fn run_reset_credit_case(
     mode: AutoResetCredits,
-    reset_after_minutes: i64,
+    reset_timing: ResetTiming,
     consume_response: ResponseTemplate,
 ) -> anyhow::Result<(usize, usize)> {
     let server = MockServer::start().await;
+    let mut error = json!({"type": "usage_limit_reached", "message": "single profile exhausted"});
+    if let ResetTiming::Known { minutes } = reset_timing {
+        error["resets_at"] =
+            json!((chrono::Utc::now() + chrono::Duration::minutes(minutes)).timestamp());
+    }
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
         .and(header("authorization", "Bearer access-backup"))
-        .respond_with(ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
-            "error": {
-                "type": "usage_limit_reached",
-                "message": "single profile exhausted",
-                "resets_at": (chrono::Utc::now()
-                    + chrono::Duration::minutes(reset_after_minutes))
-                    .timestamp(),
-            }
-        })))
+        .respond_with(ResponseTemplate::new(/*status*/ 429).set_body_json(json!({"error": error})))
         .expect(/*requests*/ 1)
         .mount(&server)
         .await;
@@ -718,7 +877,9 @@ async fn reset_credit_default_and_near_reset_make_no_consume_request() -> anyhow
         assert_eq!(
             run_reset_credit_case(
                 mode,
-                reset_after_minutes,
+                ResetTiming::Known {
+                    minutes: reset_after_minutes
+                },
                 ResponseTemplate::new(/*status*/ 200)
                     .set_body_json(json!({"code": "reset", "windows_reset": 2})),
             )
@@ -734,7 +895,7 @@ async fn reset_credit_non_reset_response_never_reports_success() -> anyhow::Resu
     assert_eq!(
         run_reset_credit_case(
             AutoResetCredits::WhenPoolExhausted,
-            /*reset_after_minutes*/ 240,
+            ResetTiming::Known { minutes: 240 },
             ResponseTemplate::new(/*status*/ 200)
                 .set_body_json(json!({"code": "no_credit", "windows_reset": 0})),
         )
@@ -756,7 +917,7 @@ async fn reset_credit_http_failure_and_timeout_never_report_success() -> anyhow:
         assert_eq!(
             run_reset_credit_case(
                 AutoResetCredits::WhenPoolExhausted,
-                /*reset_after_minutes*/ 240,
+                ResetTiming::Known { minutes: 240 },
                 consume_response,
             )
             .await?,
@@ -953,5 +1114,25 @@ async fn reset_credit_rescue_skips_entitlement_seat_after_another_seat_exhausts(
         ],
     );
     server.verify().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_backend_reset_does_not_treat_reprobe_as_free_recovery() -> anyhow::Result<()> {
+    for (mode, expected) in [
+        (AutoResetCredits::Never, (0, 0)),
+        (AutoResetCredits::WhenPoolExhausted, (1, 0)),
+    ] {
+        assert_eq!(
+            run_reset_credit_case(
+                mode,
+                ResetTiming::Unknown,
+                ResponseTemplate::new(/*status*/ 200)
+                    .set_body_json(json!({"code": "no_credit", "windows_reset": 0})),
+            )
+            .await?,
+            expected
+        );
+    }
     Ok(())
 }

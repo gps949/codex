@@ -3,6 +3,7 @@ use chrono::Duration;
 use chrono::Utc;
 use codex_login::AccountAvailabilityMutation;
 use codex_login::AccountProfileId;
+use codex_login::AccountQuotaRecovery;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 
@@ -90,9 +91,16 @@ impl FailoverCoordinator {
                     );
                 }
                 let reset_at = quota_reset_or_reprobe(limit.resets_at.as_ref());
+                let recovery = match limit.resets_at {
+                    Some(resets_at) => AccountQuotaRecovery::BackendReset {
+                        resets_at,
+                        retry_at: reset_at,
+                    },
+                    None => AccountQuotaRecovery::Reprobe { retry_at: reset_at },
+                };
                 let mutation = execution_auth.failover_after_usage_limit(
                     failed_lease,
-                    reset_at,
+                    recovery,
                     limit.rate_limits.as_deref(),
                 )?;
                 Ok(Self::finish_mutation(
@@ -105,8 +113,10 @@ impl FailoverCoordinator {
                 // SSE/API quota rejections carry no reset timestamp; park the account on the
                 // conservative reprobe delay so recovery stays automatic.
                 let reset_at = quota_reset_or_reprobe(/*resets_at*/ None);
-                let mutation =
-                    execution_auth.failover_after_quota_exhausted(failed_lease, Some(reset_at))?;
+                let mutation = execution_auth.failover_after_quota_exhausted(
+                    failed_lease,
+                    AccountQuotaRecovery::Reprobe { retry_at: reset_at },
+                )?;
                 Ok(Self::finish_mutation(
                     failed_lease,
                     mutation,
@@ -115,8 +125,10 @@ impl FailoverCoordinator {
             }
             CodexErrorDetails::UsageNotIncluded => {
                 let reset_at = quota_reset_or_reprobe(/*resets_at*/ None);
-                let mutation =
-                    execution_auth.failover_after_quota_exhausted(failed_lease, Some(reset_at))?;
+                let mutation = execution_auth.failover_after_quota_exhausted(
+                    failed_lease,
+                    AccountQuotaRecovery::Reprobe { retry_at: reset_at },
+                )?;
                 if !matches!(
                     mutation,
                     AccountAvailabilityMutation::StaleIgnored { .. }

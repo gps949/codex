@@ -259,6 +259,8 @@ fn primary_usage_without_reset_must_be_recent_to_skip_preflight() {
         }),
         secondary: None,
         observed_at: Some(Utc::now() - chrono::Duration::hours(6)),
+
+        window_observed_at: None,
     };
     assert!(!account_primary_started(&limits));
     limits.observed_at = Some(Utc::now());
