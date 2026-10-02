@@ -97,6 +97,8 @@ pub(super) async fn refresh(
                         primary: snapshot.primary.as_ref().map(window),
                         secondary: snapshot.secondary.as_ref().map(window),
                         observed_at: Some(observed_at),
+
+                        window_observed_at: None,
                     })
                 };
                 let limits = tokio::time::timeout(Duration::from_secs(3), request)

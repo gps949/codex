@@ -434,6 +434,8 @@ async fn account_pool_quota_only_updates_publish_stable_quota_without_identity_r
             }),
             secondary: None,
             observed_at: Some(chrono::Utc::now()),
+
+            window_observed_at: None,
         },
     )?;
     timeout(

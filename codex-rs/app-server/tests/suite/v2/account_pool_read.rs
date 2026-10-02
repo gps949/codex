@@ -715,3 +715,6 @@ async fn account_pool_mobile_quota_read_during_switch_rejects_stale_values() -> 
 
 #[path = "account_pool_identity_tests.rs"]
 mod identity_tests;
+
+#[path = "account_pool_remote_sync_tests.rs"]
+mod remote_sync_tests;

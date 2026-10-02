@@ -162,6 +162,9 @@ impl AccountRequestProcessor {
         // Pool credentials must be installed before account state or routing reads auth.
         let _ = self.get_account_pool_response().await?;
         self.refresh_token_if_requested(params.refresh_token).await;
+        let owner_changes = self.auth_manager.auth_change_state_receiver();
+        let owner_generation = owner_changes.borrow().owner_generation;
+        let active = self.execution_account_pool.active_identity();
         let read = self
             .read_account(/*request*/ None)
             .await
@@ -169,11 +172,25 @@ impl AccountRequestProcessor {
                 AccountReadError::InvalidAccount(error) => invalid_request(error.to_string()),
                 AccountReadError::Routing(error) => internal_error(error.to_string()),
             })?;
-        let account_pool = Some(self.get_account_pool_response().await?);
+        let account_pool = self.get_account_pool_response().await?;
+        // Loading profile metadata can refresh standby credentials and await I/O after
+        // routing discovery has finished. Verify the original owner and execution lease
+        // again before a mobile caption can attach that pool snapshot to this account.
+        let current_owner_generation = owner_changes.borrow().owner_generation;
+        if current_owner_generation != owner_generation
+            || self.execution_account_pool.active_identity() != active
+            || account_pool.active_profile_id.as_deref()
+                != active.as_ref().map(|identity| identity.profile_id.as_str())
+            || account_pool.active_generation != active.as_ref().map(|identity| identity.generation)
+        {
+            return Err(internal_error(
+                WorkspaceRoutingError::AccountChanged.to_string(),
+            ));
+        }
         let mut response = GetAccountResponse {
             account: read.account_state.account.map(Account::from),
             requires_openai_auth: read.account_state.requires_openai_auth,
-            account_pool,
+            account_pool: Some(account_pool),
             workspace_routing: read.workspace_routing.map(|routing| {
                 codex_app_server_protocol::WorkspaceRouting {
                     chatgpt_account_id: routing.chatgpt_account_id,
@@ -230,6 +247,12 @@ impl AccountRequestProcessor {
                 }
                 Err(_) => return Err(WorkspaceRoutingError::RequirementsLoad.into()),
             };
+            // Requirements loading can refresh credentials for the same owner. Bind
+            // discovery and its cache to those credentials rather than the entry revision.
+            let routing_auth_state = *current_auth_changes.borrow();
+            if routing_auth_state.owner_generation != auth_state.owner_generation {
+                return Err(WorkspaceRoutingError::AccountChanged.into());
+            }
             let auth = self.auth_manager.auth_cached();
             let provider = create_model_provider(
                 config.model_provider.clone(),
@@ -259,7 +282,7 @@ impl AccountRequestProcessor {
                     .chatgpt_base_url
                     .clone();
                 let key = WorkspaceRoutingKey {
-                    auth_generation: auth_state.generation,
+                    auth_generation: routing_auth_state.generation,
                     chatgpt_account_id: account_id.clone(),
                     effective_chatgpt_base_url: config.chatgpt_base_url.clone(),
                     required_chatgpt_base_url: required_chatgpt_base_url.clone(),
@@ -299,7 +322,7 @@ impl AccountRequestProcessor {
                 } else {
                     let mut recovery = self.auth_manager.unauthorized_recovery();
                     let mut discovery_auth = auth.clone();
-                    let mut discovery_generation = auth_state.generation;
+                    let mut discovery_generation = routing_auth_state.generation;
                     let response = loop {
                         let client = BackendClient::from_auth(
                             &config.chatgpt_base_url,

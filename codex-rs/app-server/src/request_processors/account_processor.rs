@@ -216,7 +216,16 @@ impl AccountRequestProcessor {
         let Ok(pool) = self.get_account_pool_response().await else {
             return;
         };
-        push_account_pool_warning(&self.outgoing, &[connection_id], &pool).await;
+        let changes = self.auth_manager.auth_change_state_receiver();
+        let generation = changes.borrow().owner_generation;
+        push_account_pool_warning(&self.outgoing, &[connection_id], &pool, || {
+            let active = self.execution_account_pool.active_identity();
+            changes.borrow().owner_generation == generation
+                && active.as_ref().map(|identity| identity.profile_id.as_str())
+                    == pool.active_profile_id.as_deref()
+                && active.as_ref().map(|identity| identity.generation) == pool.active_generation
+        })
+        .await;
     }
 
     pub(crate) async fn login_account(
@@ -1269,6 +1278,8 @@ impl AccountRequestProcessor {
                             email: None,
                             rate_limits: account_pool_rate_limits(limits),
                             window_warmup: None,
+
+                            backend_resets_at: None,
                         }
                     })
                     .collect();
@@ -1331,6 +1342,7 @@ impl AccountRequestProcessor {
                 email,
                 rate_limits: account_pool_rate_limits(snapshot.rate_limits),
                 window_warmup: account_pool_window_warmup(snapshot.window_warmup),
+                backend_resets_at: snapshot.backend_resets_at.map(|reset| reset.timestamp()),
             });
         }
         let response = codex_app_server_protocol::AccountPoolReadResponse {
@@ -1673,6 +1685,8 @@ impl AccountRequestProcessor {
         client_name: Option<&str>,
     ) -> Result<GetWorkspaceMessagesResponse, JSONRPCErrorError> {
         let account_pool = self.get_account_pool_response().await?;
+        let auth_changes = self.auth_manager.auth_change_state_receiver();
+        let requested_owner_generation = auth_changes.borrow().owner_generation;
 
         let Some((auth, http_client_factory)) =
             self.auth_manager.auth_with_http_client_factory().await
@@ -1727,8 +1741,31 @@ impl AccountRequestProcessor {
             }
             Err(_) => return Err(internal_error("workspace messages fetch timed out")),
         };
+        let latest_pool = self.get_account_pool_response().await?;
+        let current_auth = self.auth_manager.auth().await;
+        let current_profile = self.execution_account_pool.active_identity();
+        if auth_changes.borrow().owner_generation != requested_owner_generation
+            || !current_auth.as_ref().is_some_and(|current| {
+                current.api_auth_mode() == auth.api_auth_mode()
+                    && current.get_account_id() == auth.get_account_id()
+                    && current.get_chatgpt_user_id() == auth.get_chatgpt_user_id()
+            })
+            || account_pool.enabled
+                && (latest_pool.active_profile_id != account_pool.active_profile_id
+                    || latest_pool.active_generation != account_pool.active_generation
+                    || current_profile
+                        .as_ref()
+                        .map(|identity| identity.profile_id.as_str())
+                        != account_pool.active_profile_id.as_deref()
+                    || current_profile.as_ref().map(|identity| identity.generation)
+                        != account_pool.active_generation)
+        {
+            return Err(internal_error(
+                "account changed while reading workspace messages; retry the request",
+            ));
+        }
         if is_chatgpt_remote_client(client_name) {
-            inject_workspace_messages_for_remote_client(&mut response, &account_pool);
+            inject_workspace_messages_for_remote_client(&mut response, &latest_pool);
         }
         Ok(response)
     }
@@ -1863,6 +1900,7 @@ async fn build_account_pool_read_response(
             email,
             rate_limits: account_pool_rate_limits(snapshot.rate_limits),
             window_warmup: account_pool_window_warmup(snapshot.window_warmup),
+            backend_resets_at: snapshot.backend_resets_at.map(|reset| reset.timestamp()),
         });
     }
     codex_app_server_protocol::AccountPoolReadResponse {
@@ -1923,10 +1961,16 @@ fn account_pool_availability(
 fn account_pool_rate_limits(
     limits: codex_login::AccountRateLimits,
 ) -> codex_app_server_protocol::AccountPoolRateLimits {
+    let primary_observed_at = limits.primary_observed_at().map(|value| value.timestamp());
+    let secondary_observed_at = limits
+        .secondary_observed_at()
+        .map(|value| value.timestamp());
     codex_app_server_protocol::AccountPoolRateLimits {
         primary: limits.primary.map(account_pool_rate_limit_window),
         secondary: limits.secondary.map(account_pool_rate_limit_window),
         observed_at: limits.observed_at.map(|value| value.timestamp()),
+        primary_observed_at,
+        secondary_observed_at,
     }
 }
 

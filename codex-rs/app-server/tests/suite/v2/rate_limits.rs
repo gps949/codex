@@ -425,6 +425,24 @@ async fn get_account_rate_limits_filters_banner_by_identity(
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
     let request_id = mcp.send_get_account_rate_limits_request().await?;
+    if account.is_some_and(|account| account != "workspace-a")
+        || user.is_some_and(|user| user != "user-a")
+    {
+        let error: JSONRPCError = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+        )
+        .await??;
+        assert_eq!(
+            (error.error.code, error.error.message),
+            (
+                INTERNAL_ERROR_CODE,
+                "account changed while reading rate limits; retry the request".into(),
+            ),
+        );
+        server.verify().await;
+        return Ok(());
+    }
     let received: GetAccountRateLimitsResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
     let snapshot = json!({
