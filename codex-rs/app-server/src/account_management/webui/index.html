@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Codex Accounts</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#subscriptions">Skip to accounts</a>
+    <main id="app">
+      <header class="page-header">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <p class="product">Codex</p>
+            <h1>Accounts</h1>
+          </div>
+        </div>
+        <div class="connection">
+          <span id="connection-state">Connecting</span
+          ><span id="metadata-age" class="muted"></span
+          ><button id="read-status" class="link" type="button">
+            Read status
+          </button>
+        </div>
+      </header>
+      <p id="notice" class="notice" role="status">
+        Connecting to your account manager…
+      </p>
+      <p id="global-error" class="message error" role="alert" hidden></p>
+      <section
+        id="pair-panel"
+        class="panel narrow"
+        aria-labelledby="pair-title"
+        hidden
+      >
+        <h2 id="pair-title">Pair this browser</h2>
+        <p>
+          Open the pairing URL printed by the account manager, or paste its
+          pairing code below.
+        </p>
+        <form id="pair-form">
+          <label for="pair-token">Pairing code</label>
+          <input
+            id="pair-token"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            required
+          />
+          <button class="primary" type="submit">Pair browser</button>
+        </form>
+        <p class="muted">
+          This tab keeps its management session in storage isolated to this
+          browser origin, including the port. Closing the tab or stopping the
+          manager ends the session. API keys are never kept in browser storage.
+        </p>
+      </section>
+      <div id="dashboard" hidden>
+        <section class="selection panel" aria-labelledby="selection-title">
+          <div>
+            <h2 id="selection-title">Current selection</h2>
+            <p id="selection-label" class="selection-label"></p>
+            <p id="selection-note" class="muted"></p>
+          </div>
+          <button id="automatic" type="button">Return to subscriptions</button>
+        </section>
+        <p id="paused-notice" class="message warning" hidden>
+          Subscription accounts are paused. Select a signed-in account to
+          resume. You can still edit accounts and repair logins here.
+        </p>
+        <div id="pending-reset" class="message warning reset-notice" hidden>
+          <p>
+            A reset credit operation has an unconfirmed outcome. Review it
+            before starting another reset.
+          </p>
+          <button id="review-reset" type="button">
+            Review reset operation
+          </button>
+        </div>
+        <section id="subscriptions" aria-labelledby="accounts-title">
+          <div class="section-heading">
+            <div>
+              <h2 id="accounts-title">
+                Subscription accounts
+                <span id="account-count" class="count"></span>
+              </h2>
+              <p class="muted">
+                Quota bars show used quota. Cached values update only when a
+                request or an explicit refresh checks the backend.
+              </p>
+            </div>
+            <div class="actions">
+              <button id="refresh-all" type="button">Refresh quota</button
+              ><button id="add-account" class="primary" type="button">
+                Add account
+              </button>
+            </div>
+          </div>
+          <div class="list-controls">
+            <div class="search">
+              <label for="account-search">Find an account</label
+              ><input
+                id="account-search"
+                type="search"
+                placeholder="Label, email, or profile ID"
+                autocomplete="off"
+              />
+            </div>
+            <div>
+              <label for="account-filter">Availability</label
+              ><select id="account-filter">
+                <option value="all">All accounts</option>
+                <option value="ready">Ready</option>
+                <option value="coolingDown">Cooling down</option>
+                <option value="needsLogin">Needs login</option>
+                <option value="disabled">Disabled</option>
+                <option value="paused">Paused</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="accounts-table">
+              <caption class="sr-only">
+                Enrolled subscription accounts and cached quota
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Account</th>
+                  <th scope="col">Availability</th>
+                  <th scope="col">Primary window</th>
+                  <th scope="col">Secondary window</th>
+                  <th scope="col">Manage</th>
+                </tr>
+              </thead>
+              <tbody id="account-rows"></tbody>
+            </table>
+          </div>
+          <div id="account-empty" class="empty" hidden>
+            <h3>No accounts to show</h3>
+            <p id="empty-message"></p>
+          </div>
+          <nav class="pagination" aria-label="Account pages">
+            <p id="page-label"></p>
+            <div class="actions">
+              <button id="previous-page" type="button">Previous</button
+              ><button id="next-page" type="button">Next</button>
+            </div>
+          </nav>
+        </section>
+        <section
+          id="login-section"
+          class="panel"
+          aria-labelledby="login-title"
+          hidden
+        >
+          <h2 id="login-title">Login activity</h2>
+          <p class="muted">
+            Complete verification in your browser. This page keeps track of the
+            result.
+          </p>
+          <div id="login-jobs" class="login-jobs"></div>
+        </section>
+        <section id="api-management" aria-labelledby="api-title" hidden>
+          <div class="section-heading">
+            <div>
+              <h2 id="api-title">API accounts</h2>
+              <p class="muted">
+                Separate from subscription quota. The provider must support the
+                Responses API; usage is billed by that provider.
+              </p>
+            </div>
+            <button id="add-api-account" type="button">Add API account</button>
+          </div>
+          <p id="api-billing" class="message warning" hidden></p>
+          <div id="api-accounts" class="api-accounts"></div>
+          <div class="panel settings-summary">
+            <div>
+              <h3>Paid API fallback</h3>
+              <p id="api-fallback-summary" class="muted"></p>
+            </div>
+            <button id="edit-api-fallback" type="button">
+              Configure fallback
+            </button>
+          </div>
+        </section>
+        <section
+          id="pool-settings"
+          class="panel settings-summary"
+          aria-labelledby="settings-title"
+        >
+          <div>
+            <h2 id="settings-title">Pool settings</h2>
+            <p id="settings-summary" class="muted"></p>
+          </div>
+          <button id="edit-settings" type="button">Edit pool settings</button>
+        </section>
+        <details id="activity" class="activity">
+          <summary>Recent results</summary>
+          <ol id="activity-list"></ol>
+        </details>
+        <footer>
+          <p>
+            Changes are shared with all clients using this Codex home. Requests
+            already in progress keep their current account.
+          </p>
+          <p id="poll-note">
+            Account metadata is read every 5 seconds while this page is visible.
+          </p>
+        </footer>
+      </div>
+      <noscript
+        ><p class="message error">
+          Enable JavaScript to manage accounts in this browser.
+        </p></noscript
+      >
+    </main>
+    <dialog
+      id="action-dialog"
+      aria-labelledby="dialog-title"
+      aria-describedby="dialog-description"
+    >
+      <form id="action-form">
+        <header class="dialog-header">
+          <h2 id="dialog-title" tabindex="-1"></h2>
+          <p id="dialog-description" class="muted"></p>
+        </header>
+        <fieldset id="dialog-fields"><div id="dialog-body"></div></fieldset>
+        <p id="dialog-result" class="message" role="status" hidden></p>
+        <div class="dialog-footer">
+          <button id="dialog-cancel" type="button">Cancel</button
+          ><button id="dialog-submit" class="primary" type="submit">
+            Confirm
+          </button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>
