@@ -27,6 +27,7 @@ pub(super) async fn refresh(
     config: &Config,
     response: &mut AccountPoolReadResponse,
     scope: RefreshScope,
+    execution_pool: &codex_core::ExecutionAccountPoolHandle,
 ) {
     if !response.enabled || codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
         return;
@@ -37,6 +38,7 @@ pub(super) async fn refresh(
         return;
     };
     let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
+    let pool = execution_pool.account_pool();
     let jobs: Vec<_> = records
         .into_iter()
         .filter(|record| {
@@ -60,6 +62,7 @@ pub(super) async fn refresh(
             let mut auth_config = config.auth_config();
             auth_config.codex_home = record.profile.credential_home.clone();
             let base_url = config.chatgpt_base_url.clone();
+            let pool = pool.clone();
             async move {
                 let observed_at = Utc::now();
                 let request = async {
@@ -80,8 +83,27 @@ pub(super) async fn refresh(
                         return None;
                     }
                     let client = BackendClient::from_auth(base_url, &auth, factory);
-                    let snapshots = client.get_rate_limits_many().await.ok()?;
-                    let snapshot = snapshots.iter().find(|snapshot| {
+                    let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
+                    let probe = pool.as_ref().and_then(|pool| {
+                        store
+                            .capture_quota_probe(pool, &record.profile.id, &auth)
+                            .ok()
+                            .flatten()
+                    });
+                    let observed = client.get_rate_limits_with_reset_credits().await.ok()?;
+                    if let (Some(pool), Some(probe)) = (pool.as_ref(), probe) {
+                        let _ = store.reconcile_quota_probe(
+                            pool,
+                            probe,
+                            codex_login::AccountQuotaEvidence {
+                                rate_limits: &observed.rate_limits,
+                                ordinary_usage_allowed: observed.ordinary_usage_allowed,
+                                account_id: observed.account_id.as_deref(),
+                                user_id: observed.user_id.as_deref(),
+                            },
+                        );
+                    }
+                    let snapshot = observed.rate_limits.iter().find(|snapshot| {
                         snapshot.limit_id.as_deref().is_none_or(|id| id == "codex")
                     })?;
                     let window = |window: &codex_protocol::protocol::RateLimitWindow| {
@@ -144,6 +166,19 @@ pub(super) async fn refresh(
                 if cached.observed_at >= account.rate_limits.observed_at {
                     account.rate_limits = cached;
                 }
+            }
+        }
+    }
+    if let Some(pool) = pool {
+        for account in &mut response.accounts {
+            if let Some(snapshot) = pool
+                .snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.profile.id.as_str() == account.profile_id)
+            {
+                account.availability = super::account_pool_availability(snapshot.availability);
+                account.backend_resets_at = snapshot.backend_resets_at.map(|at| at.timestamp());
+                account.rate_limits = account_pool_rate_limits(snapshot.rate_limits);
             }
         }
     }

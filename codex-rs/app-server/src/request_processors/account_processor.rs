@@ -269,6 +269,7 @@ impl AccountRequestProcessor {
             &self.load_latest_config().await,
             &mut response,
             pool_quota::RefreshScope::All,
+            &self.execution_account_pool,
         )
         .await;
         Ok(Some(response.into()))
@@ -1268,10 +1269,11 @@ impl AccountRequestProcessor {
                     .into_iter()
                     .filter(|record| record.state == codex_login::AccountProfileState::Ready)
                     .map(|record| {
-                        let limits = saved
+                        let state = saved
                             .profiles
                             .iter()
-                            .find(|entry| entry.profile_id == record.profile.id)
+                            .find(|entry| entry.profile_id == record.profile.id);
+                        let limits = state
                             .map(|entry| entry.rate_limits.clone())
                             .unwrap_or_default();
                         codex_app_server_protocol::AccountPoolAccount {
@@ -1281,15 +1283,25 @@ impl AccountRequestProcessor {
                             is_active: false,
                             availability: if record.profile.disabled {
                                 codex_app_server_protocol::AccountPoolAvailability::Disabled
+                            } else if let Some(reset) = state
+                                .and_then(|entry| entry.exhausted_until)
+                                .filter(|reset| *reset > chrono::Utc::now())
+                            {
+                                codex_app_server_protocol::AccountPoolAvailability::Exhausted {
+                                    resets_at: Some(reset.timestamp()),
+                                }
                             } else {
                                 codex_app_server_protocol::AccountPoolAvailability::Available
                             },
                             plan_type: None,
                             email: None,
                             rate_limits: account_pool_rate_limits(limits),
-                            window_warmup: None,
-
-                            backend_resets_at: None,
+                            window_warmup: account_pool_window_warmup(
+                                state.and_then(|entry| entry.window_warmup.clone()),
+                            ),
+                            backend_resets_at: state
+                                .and_then(|entry| entry.backend_resets_at)
+                                .map(|reset| reset.timestamp()),
                         }
                     })
                     .collect();

@@ -96,7 +96,7 @@ impl AccountRequestProcessor {
                         .into_iter().map(|account| account.profile_id.clone()).collect()
                 };
                 // Reject invalid page numbers before performing any network probes.
-                pool_quota::refresh(&self.load_latest_config().await, &mut pool, pool_quota::RefreshScope::Profiles(profile_ids)).await;
+                pool_quota::refresh(&self.load_latest_config().await, &mut pool, pool_quota::RefreshScope::Profiles(profile_ids), &self.execution_account_pool).await;
                 if verb == "show" {
                     view::detail(&pool, value).map_err(invalid_request)
                 } else {

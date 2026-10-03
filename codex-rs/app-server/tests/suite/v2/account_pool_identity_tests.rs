@@ -3,8 +3,12 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+#[test_case::test_case(false; "available")]
+#[test_case::test_case(true; "cooldown_retained")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn account_pool_logout_preserves_profiles_and_explicit_use_resumes() -> Result<()> {
+async fn account_pool_logout_preserves_profiles_and_explicit_use_resumes(
+    cooling_down: bool,
+) -> Result<()> {
     use codex_app_server_protocol::LogoutAccountResponse;
     let home = TempDir::new()?;
     let backend = wiremock::MockServer::start().await;
@@ -33,6 +37,19 @@ async fn account_pool_logout_preserves_profiles_and_explicit_use_resumes() -> Re
     let logout = app.send_logout_account_request().await?;
     let _: LogoutAccountResponse = app.read_response(logout).await?;
     assert!(home.path().join(".account-pool-suspended").is_file());
+    let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+    if cooling_down {
+        let runtime = codex_login::AccountRuntimeStateStore::new(home.path().to_path_buf());
+        let mut state = runtime.load()?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.profile_id.as_str() == "selected-acct")
+            .expect("selected synthetic profile");
+        profile.exhausted_until = Some(reset);
+        profile.backend_resets_at = Some(reset);
+        runtime.save(&state)?;
+    }
     let read = app
         .send_raw_request("accountPool/read", /*params*/ None)
         .await?;
@@ -41,6 +58,25 @@ async fn account_pool_logout_preserves_profiles_and_explicit_use_resumes() -> Re
     assert!(paused.enabled);
     assert_eq!(paused.active_profile_id, None);
     assert!(paused.accounts.iter().all(|account| !account.is_active));
+    let account = paused
+        .accounts
+        .iter()
+        .find(|account| account.profile_id == "selected-acct")
+        .expect("paused synthetic account");
+    assert_eq!(
+        account.availability,
+        if cooling_down {
+            codex_app_server_protocol::AccountPoolAvailability::Exhausted {
+                resets_at: Some(reset.timestamp()),
+            }
+        } else {
+            codex_app_server_protocol::AccountPoolAvailability::Available
+        }
+    );
+    assert_eq!(
+        account.backend_resets_at,
+        cooling_down.then_some(reset.timestamp())
+    );
     drop(app);
     let mut app = TestAppServer::builder()
         .with_codex_home(home.path())
@@ -58,7 +94,7 @@ async fn account_pool_logout_preserves_profiles_and_explicit_use_resumes() -> Re
     let activate = app
         .send_raw_request(
             "accountPool/use",
-            Some(json!({"profileId": "selected-acct"})),
+            Some(json!({"profileId": "selected-acct", "force": cooling_down})),
         )
         .await?;
     let selected: codex_app_server_protocol::AccountPoolUseResponse =
