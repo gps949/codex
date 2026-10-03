@@ -17,7 +17,10 @@ use codex_login::AccountRuntimeStateStore;
 use codex_login::account_runtime_state::AccountQuotaEvidence;
 use codex_login::account_runtime_state::AccountQuotaProbe;
 use sha1::Digest;
+use tokio_util::sync::CancellationToken;
 
+use crate::account_pool_recovery::SpendingRecoveryCoverage;
+use crate::account_pool_recovery::coverage_for_spending;
 use crate::config::Config;
 use crate::execution_auth::ExecutionAuth;
 use crate::execution_auth::ExecutionAuthLease;
@@ -67,7 +70,11 @@ pub(crate) async fn try_reset_credit_rescue(
     execution_auth: &ExecutionAuth,
     failed_lease: &ExecutionAuthLease,
     config: &Config,
+    cancellation: &CancellationToken,
 ) -> Option<ResetCreditRescue> {
+    if cancellation.is_cancelled() {
+        return None;
+    }
     let pool = execution_auth.account_pool()?;
     if let Ok(lease) = pool.lease() {
         return Some(ResetCreditRescue {
@@ -116,10 +123,24 @@ pub(crate) async fn try_reset_credit_rescue(
         return None;
     }
 
+    match coverage_for_spending(execution_auth, config, cancellation).await {
+        SpendingRecoveryCoverage::Recovered => {
+            return pool.lease().ok().map(|lease| ResetCreditRescue {
+                profile_id: lease.profile().id.clone(),
+                redeemed_profile_id: None,
+            });
+        }
+        SpendingRecoveryCoverage::CompleteUnchanged => {}
+        SpendingRecoveryCoverage::Incomplete => return None,
+    }
     let leader = match execution_auth.begin_reset_credit_rescue_attempt(failed_lease)? {
         ResetCreditRescueAttempt::Leader(leader) => leader,
         ResetCreditRescueAttempt::Follower(follower) => {
-            follower.wait().await;
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return None,
+                _ = follower.wait() => {}
+            }
             return pool.lease().ok().map(|lease| ResetCreditRescue {
                 profile_id: lease.profile().id.clone(),
                 redeemed_profile_id: None,
@@ -134,23 +155,34 @@ pub(crate) async fn try_reset_credit_rescue(
     };
 
     let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
-    let _shared_lock = tokio::time::timeout(REDEEM_REQUEST_TIMEOUT, async {
+    let lock = tokio::time::timeout(REDEEM_REQUEST_TIMEOUT, async {
         loop {
             if let Some(lock) = store.try_lock_reset_credit()? {
                 return Ok::<_, std::io::Error>(lock);
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-    })
-    .await
-    .ok()?
-    .ok()?;
+    });
+    let _shared_lock = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return None,
+        result = lock => result.ok()?.ok()?,
+    };
     let deadline = tokio::time::Instant::now() + REDEEM_PASS_TIMEOUT;
     // The lock serializes spending, but another process may have restored any profile while
     // this process was waiting. Import the entire pool before choosing which credit to spend.
-    let shared = load_synced_credit_state(&store, &pool, deadline).await?;
+    let shared = load_synced_credit_state(&store, &pool, deadline, cancellation).await?;
     if let Ok(lease) = pool.lease() {
         return Some(ResetCreditRescue {
+            profile_id: lease.profile().id.clone(),
+            redeemed_profile_id: None,
+        });
+    }
+    // A restored or newly added seat must win even if it changed while the spending lock was held.
+    if coverage_for_spending(execution_auth, config, cancellation).await
+        != SpendingRecoveryCoverage::CompleteUnchanged
+    {
+        return pool.lease().ok().map(|lease| ResetCreditRescue {
             profile_id: lease.profile().id.clone(),
             redeemed_profile_id: None,
         });
@@ -176,14 +208,26 @@ pub(crate) async fn try_reset_credit_rescue(
         matches!(snapshot.availability, AccountAvailability::Exhausted { .. })
             && !excluded.contains(&snapshot.profile.id)
     }) {
-        if tokio::time::Instant::now() >= deadline {
+        if cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline {
             return None;
         }
         // Refresh every profile, including free recoveries and entitlement exclusions,
         // before the next candidate. A per-candidate epoch check misses a restored standby.
-        let shared = load_synced_credit_state(&store, &pool, deadline).await?;
+        let shared = load_synced_credit_state(&store, &pool, deadline, cancellation).await?;
         if let Ok(lease) = pool.lease() {
             return Some(ResetCreditRescue {
+                profile_id: lease.profile().id.clone(),
+                redeemed_profile_id: None,
+            });
+        }
+        let coverage = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return None,
+            _ = tokio::time::sleep_until(deadline) => return None,
+            coverage = coverage_for_spending(execution_auth, config, cancellation) => coverage,
+        };
+        if coverage != SpendingRecoveryCoverage::CompleteUnchanged {
+            return pool.lease().ok().map(|lease| ResetCreditRescue {
                 profile_id: lease.profile().id.clone(),
                 redeemed_profile_id: None,
             });
@@ -268,12 +312,17 @@ pub(crate) async fn try_reset_credit_rescue(
         )
         .ok()?;
 
-        let outcome = tokio::time::timeout_at(
-            deadline,
-            consume_reset_credit_for_profile(&pool, &profile_id, config, &request_id),
-        )
-        .await
-        .unwrap_or(ResetCreditOutcome::Unknown);
+        let outcome = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => ResetCreditOutcome::Unknown,
+            result = tokio::time::timeout_at(deadline,
+                consume_reset_credit_for_profile(&pool, &profile_id, config, &request_id, cancellation)) =>
+                result.unwrap_or(ResetCreditOutcome::Unknown),
+        };
+        // Keep the persisted request ID whenever a POST might already have escaped cancellation.
+        if cancellation.is_cancelled() {
+            return None;
+        }
         let (redeemed, applied) = match outcome {
             ResetCreditOutcome::Reset(probe) => (
                 true,
@@ -301,7 +350,17 @@ pub(crate) async fn try_reset_credit_rescue(
             ResetCreditOutcome::Unknown => return None,
         };
         if !applied {
-            return None;
+            // A concurrent refusal can correctly reject the old probe after the backend reset.
+            // Confirm a newer free recovery without erasing that refusal or sending another POST.
+            let coverage = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return None,
+                _ = tokio::time::sleep_until(deadline) => return None,
+                coverage = coverage_for_spending(execution_auth, config, cancellation) => coverage,
+            };
+            if coverage != SpendingRecoveryCoverage::Recovered {
+                return None;
+            }
         }
 
         let mut rescue = reactivate_redeemed_profile(&pool, profile_id.clone())?;
@@ -316,9 +375,10 @@ async fn load_synced_credit_state(
     store: &AccountRuntimeStateStore,
     pool: &AccountPool,
     deadline: tokio::time::Instant,
+    cancellation: &CancellationToken,
 ) -> Option<codex_login::AccountRuntimeState> {
     loop {
-        if tokio::time::Instant::now() >= deadline {
+        if cancellation.is_cancelled() || tokio::time::Instant::now() >= deadline {
             return None;
         }
         if store.try_synchronize(pool).ok()?
@@ -326,7 +386,11 @@ async fn load_synced_credit_state(
         {
             return Some(state);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return None,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
     }
 }
 
@@ -335,8 +399,11 @@ async fn consume_reset_credit_for_profile(
     profile_id: &AccountProfileId,
     config: &Config,
     redeem_request_id: &str,
+    cancellation: &CancellationToken,
 ) -> ResetCreditOutcome {
-    if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
+    if cancellation.is_cancelled()
+        || codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home)
+    {
         return ResetCreditOutcome::Unknown;
     }
     let Some(manager) = pool
@@ -383,7 +450,7 @@ async fn consume_reset_credit_for_profile(
     if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
         return ResetCreditOutcome::Unknown;
     }
-    if !still_owned() {
+    if cancellation.is_cancelled() || !still_owned() {
         return ResetCreditOutcome::Unknown;
     }
     let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
@@ -392,13 +459,14 @@ async fn consume_reset_credit_for_profile(
     };
     let client = codex_backend_client::Client::from_auth(base_url, &auth, factory);
 
-    let response = tokio::time::timeout(
-        REDEEM_REQUEST_TIMEOUT,
-        client.consume_rate_limit_reset_credit(redeem_request_id),
-    )
-    .await;
+    let response = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return ResetCreditOutcome::Unknown,
+        result = tokio::time::timeout(REDEEM_REQUEST_TIMEOUT,
+            client.consume_rate_limit_reset_credit(redeem_request_id)) => result,
+    };
     manager.reload().await;
-    if !still_owned() {
+    if cancellation.is_cancelled() || !still_owned() {
         return ResetCreditOutcome::Unknown;
     }
     match response {

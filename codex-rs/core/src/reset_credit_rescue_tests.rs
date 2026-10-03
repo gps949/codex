@@ -18,6 +18,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -41,11 +42,20 @@ struct CreditRescueFixture {
     reset: chrono::DateTime<Utc>,
 }
 
-async fn exhausted_credit_fixture(base_url: String) -> anyhow::Result<CreditRescueFixture> {
+async fn exhausted_credit_fixture(
+    base_url: String,
+    count: usize,
+) -> anyhow::Result<CreditRescueFixture> {
     use base64::Engine as _;
     let home = tempfile::tempdir()?;
     let profiles = codex_login::AccountProfileStore::new(home.path().to_path_buf());
-    for (name, priority) in [("primary", 0), ("standby", 10)] {
+    for index in 0..count {
+        let name = match index {
+            0 => "primary".to_string(),
+            1 => "standby".to_string(),
+            _ => format!("extra-{index}"),
+        };
+        let priority = index as u32 * 10;
         let profile = profiles.allocate_profile(Some(name.to_string()), priority)?;
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(
             &json!({"https://api.openai.com/auth": {
@@ -80,6 +90,9 @@ async fn exhausted_credit_fixture(base_url: String) -> anyhow::Result<CreditResc
     let standby_lease = pool.lease()?;
     let standby = standby_lease.profile().id.clone();
     pool.mark_exhausted(&standby_lease, Some(reset))?;
+    while let Ok(lease) = pool.lease() {
+        pool.mark_exhausted(&lease, Some(reset))?;
+    }
     codex_login::AccountRuntimeStateStore::new(config.codex_home.to_path_buf())
         .synchronize(&pool)?;
     Ok(CreditRescueFixture {
@@ -92,10 +105,31 @@ async fn exhausted_credit_fixture(base_url: String) -> anyhow::Result<CreditResc
     })
 }
 
+async fn mount_exhausted_usage(server: &MockServer, recovered: Option<&'static str>) {
+    Mock::given(method("GET")).and(path("/backend-api/wham/usage"))
+        .respond_with(move |request: &wiremock::Request| {
+            let bearer = request.headers.get("authorization").expect("bound token")
+                .to_str().expect("synthetic bearer");
+            let owner = bearer.strip_prefix("Bearer ").expect("bearer")
+                .strip_suffix("-access").expect("synthetic token");
+            let allowed = recovered == Some(owner);
+            let reset = (Utc::now() + Duration::hours(2)).timestamp();
+            ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+                "plan_type": "pro", "account_id": owner, "user_id": owner,
+                "rate_limit": {"allowed": allowed, "limit_reached": !allowed,
+                    "primary_window": {"used_percent": if allowed { 0 } else { 100 },
+                        "limit_window_seconds": 18000, "reset_after_seconds": 7200, "reset_at": reset},
+                    "secondary_window": {"used_percent": if allowed { 0 } else { 100 },
+                        "limit_window_seconds": 604800, "reset_after_seconds": 7200, "reset_at": reset}},
+            }))
+        }).mount(server).await;
+}
+
 #[tokio::test]
 async fn credit_lock_imports_another_profiles_shared_recovery_before_spending() -> anyhow::Result<()>
 {
     let server = MockServer::start().await;
+    mount_exhausted_usage(&server, /*recovered*/ None).await;
     Mock::given(method("POST"))
         .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
         .respond_with(
@@ -105,12 +139,19 @@ async fn credit_lock_imports_another_profiles_shared_recovery_before_spending() 
         .expect(/*requests*/ 0)
         .mount(&server)
         .await;
-    let fixture = exhausted_credit_fixture(format!("{}/backend-api", server.uri())).await?;
+    let fixture =
+        exhausted_credit_fixture(format!("{}/backend-api", server.uri()), /*count*/ 2).await?;
     let store = codex_login::AccountRuntimeStateStore::new(fixture.config.codex_home.to_path_buf());
     let lock = store
         .try_lock_reset_credit()?
         .expect("hold shared spending lock");
-    let rescue = try_reset_credit_rescue(&fixture.execution, &fixture.failed, &fixture.config);
+    let cancellation = CancellationToken::new();
+    let rescue = try_reset_credit_rescue(
+        &fixture.execution,
+        &fixture.failed,
+        &fixture.config,
+        &cancellation,
+    );
     tokio::pin!(rescue);
     assert!(futures::poll!(rescue.as_mut()).is_pending());
     store.record_quota_reset(&fixture.standby, Utc::now())?;
@@ -122,7 +163,16 @@ async fn credit_lock_imports_another_profiles_shared_recovery_before_spending() 
         (rescue.profile_id, rescue.redeemed_profile_id),
         (fixture.standby, None)
     );
-    assert_eq!(server.received_requests().await.expect("requests").len(), 0);
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .filter(|request| request.method == "POST")
+            .count(),
+        0
+    );
     Ok(())
 }
 
@@ -130,7 +180,9 @@ async fn credit_lock_imports_another_profiles_shared_recovery_before_spending() 
 async fn credit_response_cannot_erase_a_newer_refusal_with_the_same_reset_time()
 -> anyhow::Result<()> {
     let server = MockServer::start().await;
-    let fixture = exhausted_credit_fixture(format!("{}/backend-api", server.uri())).await?;
+    mount_exhausted_usage(&server, /*recovered*/ None).await;
+    let fixture =
+        exhausted_credit_fixture(format!("{}/backend-api", server.uri()), /*count*/ 2).await?;
     let pool = fixture.execution.account_pool().expect("pool");
     let failed = fixture
         .failed
@@ -154,8 +206,14 @@ async fn credit_response_cannot_erase_a_newer_refusal_with_the_same_reset_time()
         .expect(/*requests*/ 1)
         .mount(&server)
         .await;
-    let rescued =
-        try_reset_credit_rescue(&fixture.execution, &fixture.failed, &fixture.config).await;
+    let cancellation = CancellationToken::new();
+    let rescued = try_reset_credit_rescue(
+        &fixture.execution,
+        &fixture.failed,
+        &fixture.config,
+        &cancellation,
+    )
+    .await;
     assert!(
         rescued.is_none(),
         "rescue={:?}, snapshots={:?}",
@@ -181,6 +239,129 @@ async fn credit_response_cannot_erase_a_newer_refusal_with_the_same_reset_time()
         attempted, 1,
         "retain the ambiguous attempt instead of issuing another credit request"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn restored_fifth_subscription_prevents_automatic_credit_spending() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    mount_exhausted_usage(&server, Some("extra-4")).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(/*status*/ 500))
+        .expect(/*requests*/ 0)
+        .mount(&server)
+        .await;
+    let fixture =
+        exhausted_credit_fixture(format!("{}/backend-api", server.uri()), /*count*/ 5).await?;
+    let cancellation = CancellationToken::new();
+    let rescue = try_reset_credit_rescue(
+        &fixture.execution,
+        &fixture.failed,
+        &fixture.config,
+        &cancellation,
+    )
+    .await
+    .expect("free recovered subscription");
+    assert_eq!(rescue.redeemed_profile_id, None);
+    assert!(fixture.execution.active_lease().is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancellation_while_waiting_for_the_spending_lock_prevents_a_consume_post()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    mount_exhausted_usage(&server, /*recovered*/ None).await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200)
+                .set_body_json(json!({"code": "reset", "windows_reset": 2})),
+        )
+        .expect(/*requests*/ 0)
+        .mount(&server)
+        .await;
+    let fixture =
+        exhausted_credit_fixture(format!("{}/backend-api", server.uri()), /*count*/ 2).await?;
+    let cancellation = CancellationToken::new();
+    assert_eq!(
+        crate::account_pool_recovery::coverage_for_spending(
+            &fixture.execution,
+            &fixture.config,
+            &cancellation
+        )
+        .await,
+        crate::account_pool_recovery::SpendingRecoveryCoverage::CompleteUnchanged
+    );
+    let store = codex_login::AccountRuntimeStateStore::new(fixture.config.codex_home.to_path_buf());
+    let lock = store.try_lock_reset_credit()?.expect("hold spending lock");
+    let started = std::time::Instant::now();
+    let cancel_and_release = async {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        cancellation.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(lock);
+    };
+    let (rescue, ()) = tokio::join!(
+        try_reset_credit_rescue(
+            &fixture.execution,
+            &fixture.failed,
+            &fixture.config,
+            &cancellation
+        ),
+        cancel_and_release
+    );
+    assert!(rescue.is_none());
+    assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancellation_after_a_consume_post_retains_the_ambiguous_request_id() -> anyhow::Result<()>
+{
+    let server = MockServer::start().await;
+    mount_exhausted_usage(&server, /*recovered*/ None).await;
+    let posted = Arc::new(tokio::sync::Notify::new());
+    let seen = posted.clone();
+    Mock::given(method("POST"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
+        .respond_with(move |_request: &wiremock::Request| {
+            seen.notify_one();
+            ResponseTemplate::new(/*status*/ 200)
+                .set_body_json(json!({"code": "reset", "windows_reset": 2}))
+                .set_delay(std::time::Duration::from_millis(500))
+        })
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    let fixture =
+        exhausted_credit_fixture(format!("{}/backend-api", server.uri()), /*count*/ 2).await?;
+    let cancellation = CancellationToken::new();
+    let cancel = async {
+        tokio::time::timeout(std::time::Duration::from_secs(2), posted.notified())
+            .await
+            .expect("synthetic POST started");
+        cancellation.cancel();
+    };
+    let (rescue, ()) = tokio::join!(
+        try_reset_credit_rescue(
+            &fixture.execution,
+            &fixture.failed,
+            &fixture.config,
+            &cancellation
+        ),
+        cancel
+    );
+    assert!(rescue.is_none());
+    let records = std::fs::read_dir(&fixture.config.codex_home)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rate-limit-reset-credit-")
+        })
+        .count();
+    assert_eq!(records, 1);
     Ok(())
 }
 
@@ -356,7 +537,14 @@ async fn redemption_loads_the_target_profiles_maintenance_transport() -> anyhow:
         .manager
         .set_workspace_routing_resolver(Arc::downgrade(&owner));
     assert!(matches!(
-        consume_reset_credit_for_profile(&pool, &profile.id, &config, "profile-route").await,
+        consume_reset_credit_for_profile(
+            &pool,
+            &profile.id,
+            &config,
+            "profile-route",
+            &CancellationToken::new()
+        )
+        .await,
         super::ResetCreditOutcome::Reset(_),
     ));
     assert_eq!(
@@ -391,7 +579,14 @@ async fn redemption_does_not_spend_without_the_requirements_owner() -> anyhow::R
         .set_workspace_routing_resolver(Arc::downgrade(&owner));
     drop(owner);
     assert!(matches!(
-        consume_reset_credit_for_profile(&pool, &profile.id, &config, "missing-owner").await,
+        consume_reset_credit_for_profile(
+            &pool,
+            &profile.id,
+            &config,
+            "missing-owner",
+            &CancellationToken::new()
+        )
+        .await,
         super::ResetCreditOutcome::Unknown,
     ));
     assert_eq!(server.received_requests().await.expect("requests").len(), 0);
@@ -454,8 +649,14 @@ async fn ambiguous_redemption_keeps_unknown_outcome_for_untrusted_confirmation()
         )
         .await?;
         assert!(matches!(
-            consume_reset_credit_for_profile(&pool, &profile.id, &config, "same-ambiguous-id")
-                .await,
+            consume_reset_credit_for_profile(
+                &pool,
+                &profile.id,
+                &config,
+                "same-ambiguous-id",
+                &CancellationToken::new()
+            )
+            .await,
             super::ResetCreditOutcome::Unknown,
         ));
     }
@@ -491,7 +692,14 @@ async fn redemption_response_for_a_replaced_owner_cannot_recover_the_profile() -
         .await;
     let before = pool.snapshots();
     assert!(matches!(
-        consume_reset_credit_for_profile(&pool, &profile.id, &config, "old-owner-reset").await,
+        consume_reset_credit_for_profile(
+            &pool,
+            &profile.id,
+            &config,
+            "old-owner-reset",
+            &CancellationToken::new()
+        )
+        .await,
         super::ResetCreditOutcome::Unknown,
     ));
     assert_eq!(pool.snapshots(), before);
@@ -542,7 +750,14 @@ async fn ambiguous_redemption_verifies_the_bound_profile_before_recovery() -> an
     )
     .await?;
     let super::ResetCreditOutcome::AlreadyUsable(probe, observed) =
-        consume_reset_credit_for_profile(&pool, &profile.id, &config, "same-ambiguous-id").await
+        consume_reset_credit_for_profile(
+            &pool,
+            &profile.id,
+            &config,
+            "same-ambiguous-id",
+            &CancellationToken::new(),
+        )
+        .await
     else {
         anyhow::bail!("owner-matched backend confirmation must verify recovery");
     };
@@ -683,7 +898,14 @@ async fn redemption_uses_the_failed_profile_auth_on_the_real_backend_route() -> 
     .await?;
 
     assert!(matches!(
-        consume_reset_credit_for_profile(&pool, &failed.id, &config, "stable-request-id").await,
+        consume_reset_credit_for_profile(
+            &pool,
+            &failed.id,
+            &config,
+            "stable-request-id",
+            &CancellationToken::new()
+        )
+        .await,
         super::ResetCreditOutcome::Reset(_),
     ));
     let auth_headers = server

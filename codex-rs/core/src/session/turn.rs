@@ -230,47 +230,66 @@ pub(crate) async fn run_turn(
             ))
         })?;
     if execution_auth_mode.is_pooled() && execution_auth.active_lease().is_none() {
-        // Passive, authenticated metadata can recover externally replenished quota even when
-        // automatic waiting is disabled. This never performs inference or redeems a credit.
-        crate::account_pool_recovery::probe_for_recovery(
-            execution_auth.as_ref(),
-            turn_context.config.as_ref(),
-            &cancellation_token,
-        )
-        .await;
-        if execution_auth.active_lease().is_none()
-            && let Some(identity) = execution_auth.quota_rescue_identity()
-        {
-            crate::reset_credit_rescue::try_reset_credit_rescue(
-                execution_auth.as_ref(),
-                &identity,
-                turn_context.config.as_ref(),
+        let recovery_preempt = CancellationToken::new();
+        let _recovery_watch = sess
+            .input_queue
+            .watch_user_input(
+                &sess.active_turn,
+                &turn_context.sub_id,
+                recovery_preempt.clone(),
             )
-            .or_cancel(&cancellation_token)
-            .await?;
-        }
-        if execution_auth.active_lease().is_none()
-            && api_policy.fallback.is_some()
-            && !api_policy.max_subscription_wait.is_zero()
-        {
-            sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+            .await;
+        let recovery = async {
+            // Passive, authenticated metadata can recover externally replenished quota even when
+            // automatic waiting is disabled. This never performs inference or redeems a credit.
+            crate::account_pool_recovery::probe_for_recovery(
+                execution_auth.as_ref(),
+                turn_context.config.as_ref(),
+                &cancellation_token,
+            )
+            .await;
+            if execution_auth.active_lease().is_none()
+                && let Some(identity) = execution_auth.quota_rescue_identity()
+            {
+                crate::reset_credit_rescue::try_reset_credit_rescue(
+                    execution_auth.as_ref(),
+                    &identity,
+                    turn_context.config.as_ref(),
+                    &cancellation_token,
+                )
+                .or_cancel(&cancellation_token)
+                .await?;
+            }
+            if execution_auth.active_lease().is_none()
+                && api_policy.fallback.is_some()
+                && !api_policy.max_subscription_wait.is_zero()
+            {
+                sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
                 message: format!("Subscription accounts are exhausted. Waiting up to {} minutes for quota recovery before the configured paid API fallback; cancel to stop.", api_policy.max_subscription_wait.as_secs() / 60),
             })).await;
-        }
-        if let Some(target) = fallback_after_pool_exhaustion(
-            execution_auth.as_ref(),
-            turn_context.as_ref(),
-            &cancellation_token,
-        )
-        .await?
-        {
-            sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+            }
+            if let Some(target) = fallback_after_pool_exhaustion(
+                execution_auth.as_ref(),
+                turn_context.as_ref(),
+                &cancellation_token,
+            )
+            .await?
+            {
+                sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
                 message: format!("Using the configured API fallback ({}, {}). Usage is billed by that provider and this conversation is sent to it.", target.provider_id, target.model_info.slug),
             })).await;
-            let rebound = turn_context.with_api_target(&target)?;
-            rebound.extension_data.insert(target.as_ref().clone());
-            turn_context = Arc::new(rebound);
-            execution_auth_mode = ExecutionAuthMode::Stock;
+                let rebound = turn_context.with_api_target(&target)?;
+                rebound.extension_data.insert(target.as_ref().clone());
+                turn_context = Arc::new(rebound);
+                execution_auth_mode = ExecutionAuthMode::Stock;
+            }
+            Ok::<(), CodexErr>(())
+        };
+        tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+            _ = recovery_preempt.cancelled() => {}
+            result = recovery => result?,
         }
     }
     let multi_account_enabled = execution_auth_mode.multi_account_enabled();
@@ -1836,13 +1855,11 @@ async fn run_sampling_request(
     let mut step_context = step_context;
     let mut turn_context = Arc::clone(&step_context.turn);
     let preempt = step_context.preempt.clone().unwrap_or_default();
-    let _input_watch = if let Some(preempt) = &step_context.preempt {
-        sess.input_queue
-            .watch_user_input(&sess.active_turn, &turn_context.sub_id, preempt.clone())
-            .await
-    } else {
-        None
-    };
+    // Recovery can accept steering without enabling interruption of ordinary inference.
+    let _input_watch = sess
+        .input_queue
+        .watch_user_input(&sess.active_turn, &turn_context.sub_id, preempt.clone())
+        .await;
     let base_instructions = sess.get_prompt_base_instructions().await;
     let mut pooled_execution = execution_auth_mode.is_pooled();
     let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
@@ -1855,6 +1872,21 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
+    // Steering must return control to the input queue while dropping any unstarted rescue.
+    macro_rules! await_recovery {
+        ($future:expr, $retained_input:expr) => {
+            tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+                _ = preempt.cancelled() => return Ok((
+                    SamplingRequestResult { needs_follow_up: true, last_agent_message: None },
+                    $retained_input, step_context,
+                )),
+                value = $future => value,
+            }
+        };
+    }
+
     loop {
         // Retain the latest response ID for in-flight code-mode reviews until the next response.
         // After every pool account is cooling down, the next turn still reaches sampling.
@@ -1868,36 +1900,47 @@ async fn run_sampling_request(
         } {
             Ok(binding) => binding,
             Err(_) => {
-                if crate::account_pool_recovery::probe_for_recovery(
-                    execution_auth.as_ref(),
-                    turn_context.config.as_ref(),
-                    &cancellation_token,
-                )
-                .or_cancel(&preempt)
-                .await?
-                {
+                if await_recovery!(
+                    crate::account_pool_recovery::probe_for_recovery(
+                        execution_auth.as_ref(),
+                        turn_context.config.as_ref(),
+                        &cancellation_token,
+                    ),
+                    initial_input
+                        .take()
+                        .or_else(|| original_input.take())
+                        .unwrap_or_default()
+                ) {
                     continue;
                 }
                 if let Some(identity) = execution_auth.quota_rescue_identity()
-                    && crate::reset_credit_rescue::try_reset_credit_rescue(
-                        execution_auth.as_ref(),
-                        &identity,
-                        turn_context.config.as_ref(),
+                    && await_recovery!(
+                        crate::reset_credit_rescue::try_reset_credit_rescue(
+                            execution_auth.as_ref(),
+                            &identity,
+                            turn_context.config.as_ref(),
+                            &cancellation_token,
+                        ),
+                        initial_input
+                            .take()
+                            .or_else(|| original_input.take())
+                            .unwrap_or_default()
                     )
-                    .or_cancel(&cancellation_token)
-                    .await?
                     .is_some()
                 {
                     continue;
                 }
-                if let Some(target) = fallback_after_pool_exhaustion(
-                    execution_auth.as_ref(),
-                    turn_context.as_ref(),
-                    &cancellation_token,
-                )
-                .or_cancel(&preempt)
-                .await??
-                {
+                if let Some(target) = await_recovery!(
+                    fallback_after_pool_exhaustion(
+                        execution_auth.as_ref(),
+                        turn_context.as_ref(),
+                        &cancellation_token,
+                    ),
+                    initial_input
+                        .take()
+                        .or_else(|| original_input.take())
+                        .unwrap_or_default()
+                )? {
                     step_context = activate_api_target(
                         &sess,
                         &turn_context,
@@ -1910,6 +1953,21 @@ async fn run_sampling_request(
                     pooled_execution = false;
                     max_retries = target.provider.info().stream_max_retries();
                     retry_state = ResponsesStreamRetryState::default();
+                    continue;
+                }
+                if execution_auth.active_lease().is_some() {
+                    execution_auth.compatibility_auth_manager().reload().await;
+                    sess.services
+                        .model_client
+                        .replace_session_for_execution_identity_change(client_session);
+                    turn_context
+                        .extension_data
+                        .remove::<codex_api::ResponseId>();
+                    retry_state = ResponsesStreamRetryState::default();
+                    sess.refresh_mcp_if_dirty().await;
+                    step_context = sess
+                        .capture_step_context(Arc::clone(&turn_context), &cancellation_token)
+                        .await?;
                     continue;
                 }
                 sess.send_event(
@@ -2119,13 +2177,16 @@ async fn run_sampling_request(
                                 return Err(err);
                             }
                             if crate::account_pool_recovery::can_continue(retry_mode)
-                                && crate::account_pool_recovery::probe_for_recovery(
-                                    execution_auth.as_ref(),
-                                    turn_context.config.as_ref(),
-                                    &cancellation_token,
+                                && await_recovery!(
+                                    crate::account_pool_recovery::probe_for_recovery(
+                                        execution_auth.as_ref(),
+                                        turn_context.config.as_ref(),
+                                        &cancellation_token,
+                                    ),
+                                    original_input
+                                        .take()
+                                        .unwrap_or_else(|| prompt.input.clone())
                                 )
-                                .or_cancel(&preempt)
-                                .await?
                             {
                                 execution_auth.compatibility_auth_manager().reload().await;
                                 sess.services
@@ -2146,13 +2207,18 @@ async fn run_sampling_request(
                             }
                             // Opt-in last resort before failing the turn: redeem an earned
                             // rate-limit reset credit and continue on the reactivated account.
-                            if let Some(rescue) =
-                                crate::reset_credit_rescue::try_reset_credit_rescue(
-                                    execution_auth.as_ref(),
-                                    execution_lease,
-                                    turn_context.config.as_ref(),
+                            if crate::account_pool_recovery::can_continue(retry_mode)
+                                && let Some(rescue) = await_recovery!(
+                                    crate::reset_credit_rescue::try_reset_credit_rescue(
+                                        execution_auth.as_ref(),
+                                        execution_lease,
+                                        turn_context.config.as_ref(),
+                                        &cancellation_token,
+                                    ),
+                                    original_input
+                                        .take()
+                                        .unwrap_or_else(|| prompt.input.clone())
                                 )
-                                .await
                             {
                                 execution_auth.compatibility_auth_manager().reload().await;
                                 let safe_to_continue =
@@ -2233,14 +2299,19 @@ async fn run_sampling_request(
                                         reset.format("%Y-%m-%d %H:%M UTC"),
                                     ),
                                 })).await;
-                                let recovered = crate::account_pool_recovery::wait_for_recovery(
-                                    execution_auth.as_ref(),
-                                    turn_context.config.as_ref(),
-                                    &wait_budget,
-                                    &cancellation_token,
-                                )
-                                .or_cancel(&preempt)
-                                .await?;
+                                let recovered = await_recovery!(
+                                    async {
+                                        tokio::select! {
+                                            _ = crate::api_account_execution::wait_for_api_fallback_revocation(turn_context.as_ref()), if api_fallback_enabled => false,
+                                            recovered = crate::account_pool_recovery::wait_for_recovery(
+                                                execution_auth.as_ref(), turn_context.config.as_ref(), &wait_budget, &cancellation_token,
+                                            ) => recovered,
+                                        }
+                                    },
+                                    original_input
+                                        .take()
+                                        .unwrap_or_else(|| prompt.input.clone())
+                                );
                                 if recovered {
                                     execution_auth.compatibility_auth_manager().reload().await;
                                     sess.services
@@ -2271,13 +2342,16 @@ async fn run_sampling_request(
                             }
                             if api_fallback_enabled
                                 && crate::account_pool_recovery::can_continue(retry_mode)
-                                && let Some(target) = fallback_after_pool_exhaustion(
-                                    execution_auth.as_ref(),
-                                    turn_context.as_ref(),
-                                    &cancellation_token,
-                                )
-                                .or_cancel(&preempt)
-                                .await??
+                                && let Some(target) = await_recovery!(
+                                    fallback_after_pool_exhaustion(
+                                        execution_auth.as_ref(),
+                                        turn_context.as_ref(),
+                                        &cancellation_token,
+                                    ),
+                                    original_input
+                                        .take()
+                                        .unwrap_or_else(|| prompt.input.clone())
+                                )?
                             {
                                 step_context = activate_api_target(
                                     &sess,
@@ -2291,6 +2365,27 @@ async fn run_sampling_request(
                                 pooled_execution = false;
                                 max_retries = target.provider.info().stream_max_retries();
                                 retry_state = ResponsesStreamRetryState::default();
+                                turn_context.turn_timing_state.record_sampling_retry();
+                                continue;
+                            }
+                            if crate::account_pool_recovery::can_continue(retry_mode)
+                                && execution_auth.active_lease().is_some()
+                            {
+                                execution_auth.compatibility_auth_manager().reload().await;
+                                sess.services
+                                    .model_client
+                                    .replace_session_for_execution_identity_change(client_session);
+                                turn_context
+                                    .extension_data
+                                    .remove::<codex_api::ResponseId>();
+                                retry_state = ResponsesStreamRetryState::default();
+                                sess.refresh_mcp_if_dirty().await;
+                                step_context = sess
+                                    .capture_step_context(
+                                        Arc::clone(&turn_context),
+                                        &cancellation_token,
+                                    )
+                                    .await?;
                                 turn_context.turn_timing_state.record_sampling_retry();
                                 continue;
                             }

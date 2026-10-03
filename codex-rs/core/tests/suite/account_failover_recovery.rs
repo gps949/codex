@@ -483,12 +483,40 @@ enum ResetTiming {
     Unknown,
 }
 
+async fn mount_denied_pool_usage(server: &MockServer, profile_id: &str, access_token: &str) {
+    let reset = (chrono::Utc::now() + chrono::Duration::hours(4)).timestamp();
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .and(header("authorization", format!("Bearer {access_token}")))
+        .and(header(
+            "chatgpt-account-id",
+            format!("account-{profile_id}"),
+        ))
+        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+            "plan_type": "pro",
+            "account_id": format!("account-{profile_id}"),
+            "user_id": format!("user-{profile_id}"),
+            "rate_limit": {
+                "allowed": false,
+                "limit_reached": true,
+                "primary_window": {"used_percent": 100, "limit_window_seconds": 18000,
+                    "reset_after_seconds": 14400, "reset_at": reset},
+                "secondary_window": {"used_percent": 100, "limit_window_seconds": 604800,
+                    "reset_after_seconds": 14400, "reset_at": reset},
+            },
+            "spend_control": {"reached": false},
+        })))
+        .mount(server)
+        .await;
+}
+
 async fn run_reset_credit_case(
     mode: AutoResetCredits,
     reset_timing: ResetTiming,
     consume_response: ResponseTemplate,
 ) -> anyhow::Result<(usize, usize)> {
     let server = MockServer::start().await;
+    mount_denied_pool_usage(&server, "backup-acct", "access-backup").await;
     let mut error = json!({"type": "usage_limit_reached", "message": "single profile exhausted"});
     if let ResetTiming::Known { minutes } = reset_timing {
         error["resets_at"] =
@@ -897,6 +925,7 @@ async fn run_concurrent_reset_credit_case(
     outcome: ConcurrentResetCreditOutcome,
 ) -> anyhow::Result<ConcurrentResetCreditObservation> {
     let server = MockServer::start().await;
+    mount_denied_pool_usage(&server, "backup-acct", "access-backup").await;
     let reset_at = chrono::Utc::now().timestamp() + 4 * 3600;
     let mut response_templates = vec![
         ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
@@ -925,6 +954,24 @@ async fn run_concurrent_reset_credit_case(
     // Allow any count in 1..=templates rather than requiring every template slot.
     let max_response_requests = response_templates.len() as u64;
     let reset_applied = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let usage_reset = std::sync::Arc::clone(&reset_applied);
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .and(header("authorization", "Bearer access-backup"))
+        .and(header("chatgpt-account-id", "account-backup-acct"))
+        .respond_with(move |_: &wiremock::Request| {
+            let allowed = usage_reset.load(std::sync::atomic::Ordering::SeqCst);
+            ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+                "plan_type":"pro", "account_id":"account-backup-acct", "user_id":"user-backup-acct",
+                "rate_limit":{"allowed":allowed,"limit_reached":!allowed,
+                    "primary_window":{"used_percent":if allowed {0} else {100}, "limit_window_seconds":18000,
+                        "reset_after_seconds":14400,"reset_at":reset_at},
+                    "secondary_window":{"used_percent":if allowed {0} else {100}, "limit_window_seconds":604800,
+                        "reset_after_seconds":14400,"reset_at":reset_at}}
+            }))
+        })
+        .with_priority(1)
+        .mount(&server).await;
     let responses = {
         let reset_applied = std::sync::Arc::clone(&reset_applied);
         let (mock, response_mock) = responses::base_mock();
@@ -1128,6 +1175,8 @@ async fn reset_credit_http_failure_and_timeout_never_report_success() -> anyhow:
 async fn reset_credit_rescue_uses_another_exhausted_seat_when_last_has_no_credit()
 -> anyhow::Result<()> {
     let server = MockServer::start().await;
+    mount_denied_pool_usage(&server, "primary-acct", "access-primary").await;
+    mount_denied_pool_usage(&server, "backup-acct", "access-backup").await;
     let exhausted = ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
         "error": {"type": "usage_limit_reached", "message": "fixture exhausted",
             "resets_at": (chrono::Utc::now() + chrono::Duration::hours(5)).timestamp()}
@@ -1240,6 +1289,7 @@ async fn reset_credit_rescue_uses_another_exhausted_seat_when_last_has_no_credit
 async fn reset_credit_rescue_skips_entitlement_seat_after_another_seat_exhausts()
 -> anyhow::Result<()> {
     let server = MockServer::start().await;
+    mount_denied_pool_usage(&server, "backup-acct", "access-backup").await;
     let responses = mount_response_sequence(
         &server,
         vec![
