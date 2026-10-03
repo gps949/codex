@@ -162,6 +162,10 @@ pub(super) async fn refresh(
                 .iter()
                 .find(|profile| profile.profile_id.as_str() == account.profile_id)
             {
+                if let Some(pool) = pool.as_ref() {
+                    let _ =
+                        pool.update_rate_limits(&profile.profile_id, profile.rate_limits.clone());
+                }
                 let cached = account_pool_rate_limits(profile.rate_limits.clone());
                 if cached.observed_at >= account.rate_limits.observed_at {
                     account.rate_limits = cached;

@@ -393,6 +393,7 @@ async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool
         .find(|profile| profile.profile_id.as_str() == "selected-acct")
         .expect("fixture selected seat");
     restored.quota_reset_at = Some(reset_at);
+    restored.quota_reset_observed_at = Some(reset_at);
     restored.rate_limits = codex_login::AccountRateLimits {
         observed_at: Some(reset_at),
         ..codex_login::AccountRateLimits::default()
