@@ -87,10 +87,10 @@ pub(super) enum LoginState {
 impl LoginState {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Cached => "cached",
+            Self::Cached => "stored",
             Self::Pending => "pending",
             Self::Missing => "missing",
-            Self::ReadFailed => "read failed",
+            Self::ReadFailed => "read error",
         }
     }
 }

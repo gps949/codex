@@ -12,7 +12,7 @@ use super::quota_display;
 
 pub(super) fn render_table(
     inventory: &AccountInventory,
-    view: AccountView,
+    _view: AccountView,
     options: AccountOutputOptions,
     columns: usize,
 ) -> String {
@@ -30,36 +30,68 @@ pub(super) fn render_table(
     if inventory.accounts.is_empty() {
         lines.push("No account profiles. Add one with `codex account add`.".into());
     } else {
-        let full_headers = [
-            "ACCOUNT",
-            "PROFILE",
-            "NOW",
-            "LOGIN",
-            "AVAILABILITY",
-            "PLAN",
-            "PRI",
-            "5H USED",
-            "WEEK USED",
-        ];
-        let mut rows = inventory
+        let labels = inventory
             .accounts
             .iter()
             .map(|row| {
-                vec![
-                    fit(
-                        &mask_identity(row.label.as_deref().unwrap_or(&row.profile_id)),
-                        /*width*/ 20,
-                    ),
-                    if options.show_profile {
+                fit(
+                    &mask_identity(row.label.as_deref().unwrap_or(&row.profile_id)),
+                    /*width*/ 20,
+                )
+            })
+            .collect::<Vec<_>>();
+        // Masked, truncated, and duplicated labels cannot be used as exact selectors.
+        let show_profile = options.show_profile
+            || labels.iter().enumerate().any(|(index, label)| {
+                label.is_empty()
+                    || inventory.accounts[index].label.as_deref() != Some(label.as_str())
+                    || labels[..index].contains(label)
+            });
+        let mut headers = vec!["ACCOUNT".into()];
+        if show_profile {
+            headers.push("PROFILE".into());
+        }
+        headers.extend(["NOW", "PLAN", "PRIORITY", "LOGIN", "POOL"].map(String::from));
+        headers.push(window_heading(
+            inventory
+                .accounts
+                .iter()
+                .map(|row| row.rate_limits.primary.as_ref()),
+            "PRIMARY",
+        ));
+        headers.push(window_heading(
+            inventory
+                .accounts
+                .iter()
+                .map(|row| row.rate_limits.secondary.as_ref()),
+            "SECONDARY",
+        ));
+        headers.push("UPDATED".into());
+        let rows = inventory
+            .accounts
+            .iter()
+            .zip(&labels)
+            .map(|(row, label)| {
+                let mut cells = vec![label.clone()];
+                if show_profile {
+                    cells.push(if options.show_profile {
                         row.profile_id.clone()
                     } else {
                         short_id(&row.profile_id)
-                    },
+                    });
+                }
+                cells.extend([
                     if row.active { "*".into() } else { "-".into() },
-                    row.login.label().into(),
-                    sanitize(&row.availability),
                     fit(row.plan.as_deref().unwrap_or("unknown"), /*width*/ 12),
                     row.priority.to_string(),
+                    row.login.label().into(),
+                    match row.cooldown_until {
+                        Some(until) if row.availability == "cooldown" => format!(
+                            "retry {}",
+                            duration(until.signed_duration_since(now).num_seconds())
+                        ),
+                        Some(_) | None => sanitize(&row.availability),
+                    },
                     quota_cell(
                         row.rate_limits.primary.as_ref(),
                         row.rate_limits.primary_observed_at(),
@@ -70,37 +102,16 @@ pub(super) fn render_table(
                         row.rate_limits.secondary_observed_at(),
                         now,
                     ),
-                ]
+                    updated(row, now),
+                ]);
+                cells
             })
             .collect::<Vec<_>>();
-        let mut headers = full_headers.to_vec();
-        let mut widths = column_widths(&headers, &rows);
-        if widths.iter().sum::<usize>() + 2 * (widths.len() - 1) > columns && !options.show_profile
-        {
-            for index in [5, 1] {
-                headers.remove(index);
-                for row in &mut rows {
-                    row.remove(index);
-                }
-            }
-            widths = column_widths(&headers, &rows);
-        }
+        let widths = column_widths(&headers, &rows);
         if widths.iter().sum::<usize>() + 2 * (widths.len() - 1) <= columns {
-            lines.push(aligned_row(
-                &headers
-                    .iter()
-                    .map(|header| (*header).into())
-                    .collect::<Vec<_>>(),
-                &widths,
-            ));
+            lines.push(aligned_row(&headers, &widths, &headers));
             for (cells, row) in rows.iter().zip(&inventory.accounts) {
-                lines.push(aligned_row(cells, &widths));
-                if let Some(until) = row.cooldown_until {
-                    lines.push(format!(
-                        "  Cooldown: {}",
-                        codex_login::format_relative_reset(until, now)
-                    ));
-                }
+                lines.push(aligned_row(cells, &widths, &headers));
                 if options.details {
                     lines.extend(details(row, now));
                 }
@@ -108,21 +119,26 @@ pub(super) fn render_table(
         } else {
             for row in &inventory.accounts {
                 lines.push(format!(
-                    "{}  [{} {}]",
+                    "{}{}",
                     mask_identity(row.label.as_deref().unwrap_or(&row.profile_id)),
-                    if row.active { "*" } else { "-" },
-                    if options.show_profile {
-                        row.profile_id.clone()
-                    } else {
-                        short_id(&row.profile_id)
-                    }
+                    if row.active { "  [current]" } else { "" },
                 ));
+                if show_profile {
+                    lines.push(format!(
+                        "  Profile: {}",
+                        if options.show_profile {
+                            row.profile_id.clone()
+                        } else {
+                            short_id(&row.profile_id)
+                        }
+                    ));
+                }
                 lines.push(format!("  Login: {}", row.login.label()));
-                lines.push(format!("  Availability: {}", sanitize(&row.availability)));
+                lines.push(format!("  Pool: {}", sanitize(&row.availability)));
                 if let Some(until) = row.cooldown_until {
                     lines.push(format!(
-                        "  Cooldown: {}",
-                        codex_login::format_relative_reset(until, now)
+                        "  Local retry: in {}",
+                        duration(until.signed_duration_since(now).num_seconds())
                     ));
                 }
                 lines.push(format!(
@@ -131,7 +147,14 @@ pub(super) fn render_table(
                     row.priority
                 ));
                 lines.push(format!(
-                    "  5h used: {}",
+                    "  {} used: {}",
+                    window_label(
+                        row.rate_limits
+                            .primary
+                            .as_ref()
+                            .and_then(|window| window.window_minutes),
+                        "Primary"
+                    ),
                     quota_cell(
                         row.rate_limits.primary.as_ref(),
                         row.rate_limits.primary_observed_at(),
@@ -139,110 +162,139 @@ pub(super) fn render_table(
                     )
                 ));
                 lines.push(format!(
-                    "  Week used: {}",
+                    "  {} used: {}",
+                    window_label(
+                        row.rate_limits
+                            .secondary
+                            .as_ref()
+                            .and_then(|window| window.window_minutes),
+                        "Secondary"
+                    ),
                     quota_cell(
                         row.rate_limits.secondary.as_ref(),
                         row.rate_limits.secondary_observed_at(),
                         now
                     )
                 ));
+                lines.push(format!("  Updated: {} (oldest sample)", updated(row, now)));
                 if options.details {
                     lines.extend(details(row, now));
                 }
+                lines.push(String::new());
             }
         }
     }
-    if matches!(view, AccountView::Pool) {
-        lines.push("Quota: cached usage (age per window).".into());
+    lines.push("Cached status; UPDATED = oldest quota sample; retry = local.".into());
+    if options.details {
+        lines.push("* current; priority: lower is preferred; login validity not checked.".into());
+    } else {
+        lines.push("* current; more: --details / --show-profile".into());
     }
-    lines.push("Login: stored credentials, unverified.".into());
-    lines.push("Availability: cached scheduling state.".into());
-    lines.push("* current; use unique label or full ID.".into());
-    if !options.details {
-        lines.push("IDs: --show-profile; details: --details.".into());
-    }
-    lines.push("Full metadata: --format json.".into());
     for warning in &inventory.warnings {
         lines.push(format!("Warning: {warning}"));
     }
+    let wrap_options = textwrap::Options::new(columns)
+        .word_separator(textwrap::WordSeparator::AsciiSpace)
+        .word_splitter(textwrap::WordSplitter::NoHyphenation);
     lines
         .iter()
-        .map(|line| fit(line, columns))
+        .flat_map(|line| {
+            let line = sanitize(line);
+            textwrap::wrap(&line, &wrap_options)
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
 }
 
 fn details(row: &AccountRow, now: DateTime<Utc>) -> Vec<String> {
-    vec![
+    let mut lines = vec![
         format!("  Profile: {}", row.profile_id),
         format!(
             "  Email: {}",
             mask_identity(row.email.as_deref().unwrap_or("unknown"))
         ),
-        format!(
-            "  Primary observed: {}",
-            quota_display::observed_at(
-                row.rate_limits
-                    .primary_observed_at()
-                    .map(|at| at.timestamp()),
-                now
-            )
+    ];
+    for (name, window, observed, kind) in [
+        (
+            "Primary",
+            row.rate_limits.primary.as_ref(),
+            row.rate_limits.primary_observed_at(),
+            quota_display::QuotaWindow::Primary,
         ),
-        format!(
-            "  Primary reset: {}",
-            quota_display::reset(
-                row.rate_limits.primary.as_ref(),
-                quota_display::QuotaWindow::Primary,
-                now
-            )
+        (
+            "Secondary",
+            row.rate_limits.secondary.as_ref(),
+            row.rate_limits.secondary_observed_at(),
+            quota_display::QuotaWindow::Secondary,
         ),
-        format!(
-            "  Secondary observed: {}",
-            quota_display::observed_at(
-                row.rate_limits
-                    .secondary_observed_at()
-                    .map(|at| at.timestamp()),
-                now
+    ] {
+        lines.push(format!(
+            "  {name} ({}):",
+            window_label(
+                window.and_then(|window| window.window_minutes),
+                "duration unreported"
             )
-        ),
-        format!(
-            "  Secondary reset: {}",
-            quota_display::reset(
-                row.rate_limits.secondary.as_ref(),
-                quota_display::QuotaWindow::Secondary,
-                now
-            )
-        ),
-        format!("  Warmup: {}", row.warmup.as_deref().unwrap_or("unknown")),
-    ]
+        ));
+        lines.push(format!(
+            "    Last sample: {}",
+            window
+                .filter(|window| window.used_percent.is_finite() && window.used_percent >= 0.0)
+                .map(|window| {
+                    let used = window.used_percent;
+                    format!("{used}% used")
+                })
+                .unwrap_or_else(|| "unknown".into())
+        ));
+        lines.push(format!(
+            "    Updated: {}",
+            quota_display::observed_at(observed.map(|at| at.timestamp()), now)
+        ));
+        lines.push(format!(
+            "    Reset: {}",
+            quota_display::reset(window, kind, now)
+        ));
+        if window.is_some_and(|window| window.resets_at.is_some_and(|at| at <= now)) {
+            lines.push("    Current usage: unknown; reset passed, refresh needed.".into());
+        } else if observed.is_some_and(|at| at > now) {
+            lines.push("    Current usage: unknown; observation is future-dated.".into());
+        }
+    }
+    lines.push(format!(
+        "  Warmup: {}",
+        row.warmup.as_deref().unwrap_or("unknown")
+    ));
+    lines
 }
 
-fn column_widths(headers: &[&str], rows: &[Vec<String>]) -> Vec<usize> {
+fn column_widths(headers: &[String], rows: &[Vec<String>]) -> Vec<usize> {
     headers
         .iter()
         .enumerate()
         .map(|(index, header)| {
             rows.iter()
                 .map(|row| UnicodeWidthStr::width(row[index].as_str()))
-                .fold(UnicodeWidthStr::width(*header), usize::max)
+                .fold(UnicodeWidthStr::width(header.as_str()), usize::max)
         })
         .collect()
 }
 
-fn aligned_row(cells: &[String], widths: &[usize]) -> String {
+fn aligned_row(cells: &[String], widths: &[usize], headers: &[String]) -> String {
     cells
         .iter()
         .zip(widths)
         .enumerate()
         .map(|(index, (cell, width))| {
-            if index + 1 == cells.len() {
+            let padding = " ".repeat(width.saturating_sub(UnicodeWidthStr::width(cell.as_str())));
+            if headers[index] == "PRIORITY" || headers[index].ends_with(" USED") {
+                format!("{padding}{cell}")
+            } else if index + 1 == cells.len() {
                 cell.clone()
             } else {
-                format!(
-                    "{cell}{}",
-                    " ".repeat(width.saturating_sub(UnicodeWidthStr::width(cell.as_str())))
-                )
+                format!("{cell}{padding}")
             }
         })
         .collect::<Vec<_>>()
@@ -261,23 +313,101 @@ fn quota_cell(
     observed: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> String {
-    let used = percentage(window, "unknown");
-    if used == "unknown" {
-        return used;
+    let Some(window) =
+        window.filter(|window| window.used_percent.is_finite() && window.used_percent >= 0.0)
+    else {
+        return "unknown".into();
+    };
+    if window.resets_at.is_some_and(|at| at <= now) {
+        return "stale".into();
     }
-    let age = match observed {
-        Some(at) if at.timestamp() > now.timestamp() => "clock skew".into(),
+    if observed.is_some_and(|at| at > now) {
+        return "unknown".into();
+    }
+    match window.used_percent {
+        used if used > 0.0 && used < 1.0 => "<1%".into(),
+        used if used > 99.0 && used < 100.0 => ">99%".into(),
+        used => format!("{used:.0}%"),
+    }
+}
+
+fn window_heading<'a>(
+    windows: impl Iterator<Item = Option<&'a AccountRateLimitWindow>>,
+    fallback: &str,
+) -> String {
+    let mut windows = windows.flatten().map(|window| window.window_minutes);
+    if let Some(Some(minutes)) = windows.next()
+        && minutes > 0
+        && windows.all(|value| value == Some(minutes))
+    {
+        format!(
+            "{} USED",
+            window_label(Some(minutes), fallback).to_uppercase()
+        )
+    } else {
+        format!("{fallback} USED")
+    }
+}
+
+fn window_label(minutes: Option<i64>, fallback: &str) -> String {
+    match minutes {
+        Some(10080) => "week".into(),
+        Some(minutes) if minutes > 0 && minutes % 1440 == 0 => format!("{}d", minutes / 1440),
+        Some(minutes) if minutes > 0 && minutes % 60 == 0 => format!("{}h", minutes / 60),
+        Some(minutes) if minutes > 0 => format!("{minutes}m"),
+        Some(_) | None => fallback.into(),
+    }
+}
+
+fn updated(row: &AccountRow, now: DateTime<Utc>) -> String {
+    let times = [
+        (
+            row.rate_limits.primary.as_ref(),
+            row.rate_limits.primary_observed_at(),
+        ),
+        (
+            row.rate_limits.secondary.as_ref(),
+            row.rate_limits.secondary_observed_at(),
+        ),
+    ]
+    .into_iter()
+    .filter(|(window, _)| window.is_some())
+    .map(|(_, at)| at)
+    .collect::<Vec<_>>();
+    if times.iter().any(|at| at.is_some_and(|at| at > now)) {
+        return "clock skew".into();
+    }
+    if times.iter().any(Option::is_none) {
+        return "unknown".into();
+    }
+    match times.into_iter().flatten().min() {
         Some(at) => {
             let minutes = now.signed_duration_since(at).num_minutes();
             match minutes {
-                0..=59 => format!("{minutes}m"),
-                60..=1439 => format!("{}h", minutes / 60),
-                _ => format!("{}d", minutes / 1440),
+                0 => "<1m ago".into(),
+                1..=59 => format!("{minutes}m ago"),
+                60..=1439 => format!("{}h ago", minutes / 60),
+                _ => format!("{}d ago", minutes / 1440),
             }
         }
-        None => "age unknown".into(),
-    };
-    format!("{used}% ({age})")
+        None => "unknown".into(),
+    }
+}
+
+fn duration(seconds: i64) -> String {
+    let minutes = u64::try_from(seconds)
+        .unwrap_or_default()
+        .div_ceil(/*rhs*/ 60);
+    match minutes {
+        0..=59 => format!("{minutes}m"),
+        60..=1439 => format!("{}h{}m", minutes / 60, minutes % 60),
+        _ => format!(
+            "{}d{}h{}m",
+            minutes / 1440,
+            minutes % 1440 / 60,
+            minutes % 60
+        ),
+    }
 }
 
 fn short_id(id: &str) -> String {

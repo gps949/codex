@@ -604,8 +604,12 @@ enum AccountSubcommand {
     #[command(
         after_help = "Quota values are cached observations; this command does not query the backend.\n\
             Refresh from mobile /account or the accountPool/read API.\n\n\
+            USED is the used quota percentage. UPDATED is the oldest window's sample age, not a reset countdown.\n\
+            'stale' means a cached reset has passed; current usage requires refresh.\n\
+            LOGIN only checks stored credentials. POOL and retry deadlines are local scheduling state.\n\n\
             Terminal output adapts to the window width; redirected output preserves TSV columns.\n\
-            Pass --show-profile for full profile IDs or --details for cache timestamps.\n\n\
+            Pass --show-profile for full IDs, --details for each window's timestamps and resets.\n\
+            Use a unique account label or full profile ID to select an account.\n\n\
             Examples:\n  codex account list\n  codex account list --format json\n  codex account list --show-profile --format tsv"
     )]
     List {
@@ -696,8 +700,12 @@ enum AccountSubcommand {
     /// Show cached multi-account scheduler and quota observations.
     #[command(
         after_help = "Quota values are cached; this command does not refresh the backend.\n\
+            USED is the used quota percentage. UPDATED is the oldest window's sample age, not a reset countdown.\n\
+            'stale' means a cached reset has passed; current usage requires refresh.\n\
+            LOGIN only checks stored credentials. POOL and retry deadlines are local scheduling state.\n\n\
             Terminal output adapts to the window width; redirected output preserves TSV columns.\n\
-            Pass --show-profile for full profile IDs or --details for cache timestamps.\n\n\
+            Pass --show-profile for full IDs, --details for each window's timestamps and resets.\n\
+            Use a unique account label or full profile ID to select an account.\n\n\
             Examples:\n  codex account pool\n  codex account status --details\n  codex account pool --format json"
     )]
     #[command(visible_alias = "status")]

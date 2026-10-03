@@ -36,7 +36,13 @@ pub(super) fn reset(
     let Some(window) = window else {
         return "unknown".into();
     };
-    if matches!(kind, QuotaWindow::Primary) && window.used_percent <= 0.0 {
+    if window.resets_at.is_some_and(|reset| reset <= now) {
+        return "passed; awaiting refresh".into();
+    }
+    if matches!(kind, QuotaWindow::Primary)
+        && window.used_percent <= 0.0
+        && window.window_minutes.is_none_or(|minutes| minutes == 300)
+    {
         return format_primary_window_reset(
             window.used_percent,
             window.resets_at.map(|at| at.timestamp()),
@@ -44,7 +50,6 @@ pub(super) fn reset(
         );
     }
     match window.resets_at {
-        Some(reset) if reset <= now => "passed; awaiting refresh".into(),
         Some(reset) => format_relative_reset(reset, now),
         None => "unknown".into(),
     }
