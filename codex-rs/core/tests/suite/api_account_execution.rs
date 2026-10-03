@@ -20,10 +20,17 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 use super::account_failover::write_account_pool_fixture;
+
+#[path = "api_account_consent.rs"]
+mod consent;
 
 fn api_store(home: &Path) -> ApiAccountStore {
     ApiAccountStore::new(
@@ -48,6 +55,69 @@ fn add_api_fixture(home: &Path, base_url: &str) -> ApiAccount {
             "synthetic-api-key",
         )
         .expect("synthetic API fixture")
+}
+
+async fn mount_subscription_usage_denials(server: &MockServer) {
+    for (profile_id, access_token) in [
+        ("primary-acct", "access-primary"),
+        ("backup-acct", "access-backup"),
+    ] {
+        let account_id = format!("account-{profile_id}");
+        let user_id = format!("user-{profile_id}");
+        Mock::given(method("GET"))
+            .and(path("/backend-api/wham/usage"))
+            .and(header("authorization", format!("Bearer {access_token}")))
+            .and(header("chatgpt-account-id", account_id.clone()))
+            .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+                "plan_type": "pro", "account_id": account_id, "user_id": user_id,
+                "rate_limit": {"allowed": false, "limit_reached": true,
+                    "primary_window": {"used_percent": 100, "limit_window_seconds": 18000,
+                        "reset_after_seconds": 3600, "reset_at": chrono::Utc::now().timestamp() + 3600}},
+            })))
+            .mount(server)
+            .await;
+    }
+}
+
+async fn assert_all_subscription_seats_checked(server: &MockServer) {
+    let mut checked_seats = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| {
+            request.method.as_str() == "GET" && request.url.path() == "/backend-api/wham/usage"
+        })
+        .map(|request| {
+            (
+                request
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
+                request
+                    .headers
+                    .get("chatgpt-account-id")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
+            )
+        })
+        .collect::<Vec<_>>();
+    checked_seats.sort_unstable();
+    checked_seats.dedup();
+    assert_eq!(
+        checked_seats,
+        vec![
+            (
+                Some("Bearer access-backup".to_string()),
+                Some("account-backup-acct".to_string()),
+            ),
+            (
+                Some("Bearer access-primary".to_string()),
+                Some("account-primary-acct".to_string()),
+            ),
+        ]
+    );
 }
 
 async fn turn_events(thread: &codex_core::CodexThread) -> anyhow::Result<Vec<EventMsg>> {
@@ -142,6 +212,7 @@ async fn opt_in_api_fallback_preserves_completed_tools_and_subscription_selectio
 -> anyhow::Result<()> {
     let subscription = MockServer::start().await;
     let api = MockServer::start().await;
+    mount_subscription_usage_denials(&subscription).await;
     let rejected = ResponseTemplate::new(/*status*/ 429).set_body_json(json!({"error": {
         "type": "usage_limit_reached", "message": "synthetic quota exhaustion",
         "resets_at": chrono::Utc::now().timestamp() + 3_600,
@@ -174,6 +245,7 @@ async fn opt_in_api_fallback_preserves_completed_tools_and_subscription_selectio
     )
     .await;
     let base_url = api.uri();
+    let backend_base_url = format!("{}/backend-api", subscription.uri());
     let mut builder = test_codex()
         .without_auth()
         .with_pre_build_hook(move |home| {
@@ -187,7 +259,8 @@ async fn opt_in_api_fallback_preserves_completed_tools_and_subscription_selectio
                 })
                 .expect("configure synthetic fallback");
         })
-        .with_config(|config| {
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend_base_url;
             config.account_pool.window_warmup = Some(false);
             config.update_plan_enabled = true;
         });
@@ -220,6 +293,7 @@ async fn opt_in_api_fallback_preserves_completed_tools_and_subscription_selectio
         1
     );
     assert_eq!(subscription_requests.requests().len(), 3);
+    assert_all_subscription_seats_checked(&subscription).await;
     let request = api_requests.single_request();
     assert_eq!(request.body_json()["model"], json!("vendor-exact-model"));
     assert!(
@@ -243,19 +317,22 @@ async fn opt_in_api_fallback_preserves_completed_tools_and_subscription_selectio
 async fn exhausted_subscription_pool_does_not_use_api_by_default() -> anyhow::Result<()> {
     let subscription = MockServer::start().await;
     let api = MockServer::start().await;
+    mount_subscription_usage_denials(&subscription).await;
     let rejected = ResponseTemplate::new(/*status*/ 429).set_body_json(json!({"error": {
         "type": "usage_limit_reached", "message": "synthetic quota exhaustion",
         "resets_at": chrono::Utc::now().timestamp() + 3_600,
     }}));
     let requests = mount_response_sequence(&subscription, vec![rejected.clone(), rejected]).await;
     let base_url = api.uri();
+    let backend_base_url = format!("{}/backend-api", subscription.uri());
     let mut builder = test_codex()
         .without_auth()
         .with_pre_build_hook(move |home| {
             write_account_pool_fixture(home);
             add_api_fixture(home, &base_url);
         })
-        .with_config(|config| {
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend_base_url;
             config.account_pool.window_warmup = Some(false);
             config.account_pool.resume_after_reset = Some(false);
         });
@@ -284,12 +361,14 @@ async fn exhausted_subscription_pool_does_not_use_api_by_default() -> anyhow::Re
 async fn api_fallback_wait_can_be_cancelled_without_paid_requests() -> anyhow::Result<()> {
     let subscription = MockServer::start().await;
     let api = MockServer::start().await;
+    mount_subscription_usage_denials(&subscription).await;
     let rejected = ResponseTemplate::new(/*status*/ 429).set_body_json(json!({"error": {
         "type": "usage_limit_reached", "message": "synthetic quota exhaustion",
         "resets_at": chrono::Utc::now().timestamp() + 3_600,
     }}));
     mount_response_sequence(&subscription, vec![rejected.clone(), rejected]).await;
     let base_url = api.uri();
+    let backend_base_url = format!("{}/backend-api", subscription.uri());
     let mut builder = test_codex()
         .without_auth()
         .with_pre_build_hook(move |home| {
@@ -303,7 +382,10 @@ async fn api_fallback_wait_can_be_cancelled_without_paid_requests() -> anyhow::R
                 })
                 .expect("configure synthetic fallback");
         })
-        .with_config(|config| config.account_pool.window_warmup = Some(false));
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend_base_url;
+            config.account_pool.window_warmup = Some(false);
+        });
     let fixture = builder.build_with_auto_env(&subscription).await?;
     fixture
         .codex
@@ -375,11 +457,13 @@ async fn disabling_all_subscription_accounts_during_wait_does_not_enter_paid_fal
 -> anyhow::Result<()> {
     let subscription = MockServer::start().await;
     let api = MockServer::start().await;
+    mount_subscription_usage_denials(&subscription).await;
     let rejected = ResponseTemplate::new(429)
         .set_body_json(json!({"error": {"type":"usage_limit_reached",
         "message":"synthetic quota exhaustion","resets_at":chrono::Utc::now().timestamp()+3600}}));
     mount_response_sequence(&subscription, vec![rejected.clone(), rejected]).await;
     let base_url = api.uri();
+    let backend_base_url = format!("{}/backend-api", subscription.uri());
     let mut builder = test_codex()
         .without_auth()
         .with_pre_build_hook(move |home| {
@@ -393,7 +477,10 @@ async fn disabling_all_subscription_accounts_during_wait_does_not_enter_paid_fal
                 })
                 .unwrap();
         })
-        .with_config(|config| config.account_pool.window_warmup = Some(false));
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend_base_url;
+            config.account_pool.window_warmup = Some(false);
+        });
     let fixture = builder.build_with_auto_env(&subscription).await?;
     fixture
         .codex

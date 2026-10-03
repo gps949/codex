@@ -3170,6 +3170,9 @@ async fn try_run_sampling_request(
     let effort = sess
         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
         .await;
+    crate::api_account_execution::authorize_api_request(turn_context.as_ref())
+        .or_cancel(&cancellation_token)
+        .await??;
     let mut stream = client_session
         .stream(
             prompt,

@@ -36,6 +36,14 @@ impl ApiAccountStore {
         self.read()
     }
 
+    /// Reads metadata only when the account transaction lock is immediately available.
+    pub fn try_load(&self) -> std::io::Result<Option<ApiAccountState>> {
+        let Some(_lock) = crate::account_file::try_lock(&self.home)? else {
+            return Ok(None);
+        };
+        self.read().map(Some)
+    }
+
     /// Captures deployment metadata and its key in the same account transaction.
     /// The returned key must stay in request-owned memory and never be logged or persisted.
     pub fn capture_target(&self, id: &str) -> std::io::Result<(ApiAccount, String)> {

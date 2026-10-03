@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_login::ApiAccountFallback;
 use codex_login::ApiAccountSelection;
 use codex_login::ApiAccountStore;
 use codex_model_provider::SharedModelProvider;
@@ -51,6 +52,7 @@ pub(crate) struct ApiTurnPolicy {
     pub(crate) selected: Option<Arc<ApiExecutionTarget>>,
     pub(crate) fallback: Option<Arc<ApiExecutionTarget>>,
     pub(crate) max_subscription_wait: Duration,
+    fallback_authorization: Option<ApiAccountFallback>,
 }
 
 impl ApiTurnPolicy {
@@ -87,6 +89,7 @@ impl ApiTurnPolicy {
                 })),
                 fallback: None,
                 max_subscription_wait: Duration::ZERO,
+                fallback_authorization: None,
             });
         }
         let store = ApiAccountStore::new(
@@ -128,9 +131,35 @@ impl ApiTurnPolicy {
             selected,
             fallback,
             max_subscription_wait,
+            fallback_authorization: Some(state.fallback),
         })
     }
 }
+
+/// Manual compaction bypasses the regular turn runner but must capture the same API selection.
+pub(crate) fn prepare_api_turn_context(turn: Arc<TurnContext>) -> Result<Arc<TurnContext>> {
+    let policy = match turn.extension_data.get::<ApiTurnPolicy>() {
+        Some(policy) => policy,
+        None => {
+            let captured = ApiTurnPolicy::capture(turn.config.as_ref())?;
+            turn.extension_data.get_or_init(|| captured)
+        }
+    };
+    let Some(target) = turn
+        .extension_data
+        .get::<ApiExecutionTarget>()
+        .or_else(|| policy.selected.clone())
+    else {
+        return Ok(turn);
+    };
+    let rebound = turn.with_api_target(&target)?;
+    rebound.extension_data.insert(target.as_ref().clone());
+    Ok(Arc::new(rebound))
+}
+
+#[path = "api_account_consent.rs"]
+mod consent;
+pub(crate) use consent::authorize_api_request;
 
 impl ApiExecutionTarget {
     fn capture(store: &ApiAccountStore, profile_id: &str, config: &Config) -> Result<Self> {
@@ -226,6 +255,9 @@ pub(crate) async fn activate_api_target(
         .remove::<crate::execution_provenance::SamplingExecutionProvenance>();
     rebound.extension_data.remove::<codex_api::ResponseId>();
     rebound.extension_data.insert(target.as_ref().clone());
+    rebound
+        .extension_data
+        .get_or_init(consent::PendingApiFallback::default);
     sess.services
         .model_client
         .replace_session_for_api_target(client_session, target);
@@ -262,16 +294,20 @@ pub(crate) async fn fallback_after_pool_exhaustion(
     let budget = turn
         .extension_data
         .get_or_init(|| RecoveryWaitBudget::new(policy.max_subscription_wait));
-    if !budget.remaining().is_zero()
-        && crate::account_pool_recovery::wait_for_recovery(
+    if !budget.remaining().is_zero() {
+        let recovered = tokio::select! {
+            _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
+            _ = wait_for_api_fallback_revocation(turn) => return Ok(None),
+            recovered = crate::account_pool_recovery::wait_for_recovery(
             execution_auth,
             turn.config.as_ref(),
             &budget,
             cancellation,
-        )
-        .await
-    {
-        return Ok(None);
+            ) => recovered,
+        };
+        if recovered {
+            return Ok(None);
+        }
     }
     if cancellation.is_cancelled() {
         return Err(CodexErr::TurnAborted);
@@ -283,7 +319,34 @@ pub(crate) async fn fallback_after_pool_exhaustion(
     {
         return Ok(None);
     }
+    match crate::account_pool_recovery::coverage_for_spending(execution_auth, turn.config.as_ref(), cancellation).await {
+        crate::account_pool_recovery::SpendingRecoveryCoverage::Recovered => return Ok(None),
+        crate::account_pool_recovery::SpendingRecoveryCoverage::CompleteUnchanged => {}
+        crate::account_pool_recovery::SpendingRecoveryCoverage::Incomplete => return Err(CodexErr::InvalidRequest(
+            "Subscription quota could not be checked for every eligible account. No paid API fallback was started; refresh the pool and retry.".into())),
+    }
+    if !consent::fallback_is_authorized(turn, target)
+        .or_cancel(cancellation)
+        .await?
+    {
+        return Ok(None);
+    }
+    turn.extension_data
+        .get_or_init(consent::PendingApiFallback::default);
     Ok(Some(Arc::clone(target)))
+}
+
+/// Observes revocation without recapturing or retargeting the pending provider.
+pub(crate) async fn wait_for_api_fallback_revocation(turn: &TurnContext) {
+    if let Some(target) = turn
+        .extension_data
+        .get::<ApiTurnPolicy>()
+        .and_then(|policy| policy.fallback.clone())
+    {
+        consent::wait_for_revocation(turn, &target).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 async fn eligible_quota_fallback(execution_auth: &ExecutionAuth, config: &Config) -> bool {
