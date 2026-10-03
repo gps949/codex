@@ -152,3 +152,14 @@ fn cell(value: &str, width: usize) -> String {
 #[cfg(test)]
 #[path = "account_manager_display_tests.rs"]
 mod tests;
+
+pub(super) fn availability(value: &str) -> &str {
+    match value {
+        "ready" => "Ready",
+        "coolingDown" => "Waiting reset",
+        "needsLogin" => "Needs login",
+        "disabled" => "Disabled",
+        "paused" => "Paused",
+        _ => "Check status",
+    }
+}
