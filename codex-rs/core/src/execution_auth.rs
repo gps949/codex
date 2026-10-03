@@ -35,6 +35,10 @@ use tokio::sync::OnceCell;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+#[path = "account_pool_recovery_coordinator.rs"]
+pub(crate) mod recovery_coordinator;
+use recovery_coordinator::RecoveryProbeCoordinator;
+
 /// Process-local registry that preserves one execution-auth coordinator for every live AuthManager.
 ///
 /// This deliberately keys by Arc allocation identity rather than account id: before pooled auth is
@@ -61,6 +65,7 @@ pub(crate) struct ExecutionAuth {
     runtime: OnceCell<Arc<AccountPoolRuntime>>,
     change_tx: watch::Sender<u64>,
     reset_credit_rescue_attempt: ResetCreditRescueSingleflight,
+    pub(crate) recovery_probes: RecoveryProbeCoordinator,
     window_warmup_task: StdMutex<Option<WindowWarmupTask>>,
     pool_suspended: AtomicBool,
 }
@@ -195,6 +200,7 @@ impl ExecutionAuth {
             runtime: OnceCell::new(),
             change_tx,
             reset_credit_rescue_attempt: ResetCreditRescueSingleflight::default(),
+            recovery_probes: RecoveryProbeCoordinator::default(),
             window_warmup_task: StdMutex::new(None),
             pool_suspended: AtomicBool::new(false),
         }
