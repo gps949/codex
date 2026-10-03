@@ -37,6 +37,7 @@ impl SessionTask for CompactTask {
         _input: Vec<TurnInput>,
         _cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
+        let ctx = crate::api_account_execution::prepare_api_turn_context(ctx)?;
         let _profile_guard = ctx.turn_timing_state.begin_compaction();
         let execution_auth = ExecutionAuth::shared(Arc::clone(&session.services.auth_manager));
         let execution_auth_mode = execution_auth
@@ -48,8 +49,15 @@ impl SessionTask for CompactTask {
                 ))
             })?;
         let history = session.clone_history().await;
-        let portable_policy =
-            PortableCompactionPolicy::for_history(&execution_auth_mode, history.annotated_items());
+        let portable_policy = if ctx
+            .extension_data
+            .get::<crate::api_account_execution::ApiExecutionTarget>()
+            .is_some()
+        {
+            PortableCompactionPolicy::Portable
+        } else {
+            PortableCompactionPolicy::for_history(&execution_auth_mode, history.annotated_items())
+        };
         let opaque_migration_required = portable_policy == PortableCompactionPolicy::Portable
             && history_contains_opaque_compaction(history.annotated_items());
         if ctx.config.features.enabled(Feature::TokenBudget) && !opaque_migration_required {

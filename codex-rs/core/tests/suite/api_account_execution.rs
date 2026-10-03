@@ -29,6 +29,8 @@ use wiremock::matchers::path;
 
 use super::account_failover::write_account_pool_fixture;
 
+#[path = "api_account_compaction.rs"]
+mod compaction;
 #[path = "api_account_consent.rs"]
 mod consent;
 

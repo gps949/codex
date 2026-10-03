@@ -2,21 +2,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::Prompt;
-use crate::account_transition::stamp_execution_provenance;
+use crate::api_account_execution::authorize_api_request;
+use crate::api_account_execution::project_api_history;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
 use crate::execution_auth::ExecutionAuth;
-use crate::execution_auth::ExecutionAuthBinding;
-use crate::failover_turn::pool_unavailable_error;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
-use crate::opaque_history_migration::AccountTransitionTargetProfile;
-use crate::opaque_history_migration::preflight_account_transition;
 use crate::portable_compaction::PortableCompactionPolicy;
 use crate::portable_compaction::project_history_for_execution;
 use crate::responses_metadata::CodexResponsesMetadata;
@@ -64,6 +61,11 @@ const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 pub(crate) const MAX_PORTABLE_CONTEXT_ITEM_TOKENS: usize = 8_000;
 const MAX_LOCAL_COMPACTION_OUTPUT_ITEMS: usize = 64;
 const MAX_LOCAL_COMPACTION_OUTPUT_TOKENS: i64 = 32_000;
+
+#[path = "compact_execution.rs"]
+mod execution;
+use execution::CompactionExecutionIdentity;
+use execution::LocalCompactionExecution;
 
 #[derive(Default)]
 struct LocalCompactionOutputBuffer {
@@ -302,34 +304,13 @@ async fn run_compact_task_inner_impl(
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
-    let execution_auth_mode = match execution_auth
-        .mode_for_turn(turn_context.config.as_ref(), turn_context.provider.info())
-        .await
-    {
-        Ok(mode) => mode,
-        Err(err) => {
-            return Err(CodexErr::UnsupportedOperation(format!(
-                "failed to initialize native multi-account execution for compaction: {err}"
-            )));
-        }
-    };
-    let portable_policy =
-        PortableCompactionPolicy::for_history(&execution_auth_mode, history.annotated_items());
-    let execution_binding = execution_auth_mode
-        .capture_binding()
-        .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
-    let preflight_history = history
-        .clone()
-        .for_prompt_annotated(&turn_context.model_info().input_modalities);
-    let target_profile =
-        AccountTransitionTargetProfile::from_execution(execution_auth.as_ref(), &execution_binding);
-    preflight_account_transition(&preflight_history, &target_profile)
-        .ensure_ready(&target_profile)
-        .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
-    let mut client_session = sess.services.model_client.new_session();
-    if let Some(request_auth) = execution_binding.request_auth() {
-        client_session.bind_execution_auth(request_auth);
-    }
+    let mut execution = LocalCompactionExecution::capture(
+        sess.as_ref(),
+        turn_context.as_ref(),
+        execution_auth.as_ref(),
+        &history,
+    )
+    .await?;
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
     // survives retries within this compact turn.
@@ -338,9 +319,16 @@ async fn run_compact_task_inner_impl(
         let annotated = history
             .clone()
             .for_prompt_annotated(&turn_context.model_info().input_modalities);
-        let mut turn_input =
-            project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
-                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?;
+        let mut turn_input = if execution.identity.api_target.is_some() {
+            project_api_history(annotated)?
+        } else {
+            project_history_for_execution(
+                execution_auth.as_ref(),
+                &execution.identity.binding,
+                annotated,
+            )
+            .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
+        };
         sess.services
             .executed_tool_calls
             .attach_to_compaction_prompt(&mut turn_input);
@@ -357,10 +345,10 @@ async fn run_compact_task_inner_impl(
         let attempt_result = drain_to_completed(
             &sess,
             turn_context.as_ref(),
-            &mut client_session,
+            &mut execution.client,
             &responses_metadata,
             &prompt,
-            &execution_binding,
+            &execution.identity,
             compaction_metadata.phase(),
         )
         .await;
@@ -433,9 +421,7 @@ async fn run_compact_task_inner_impl(
         // This replacement history skips `record_conversation_items`; only the appended summary
         // belongs to this compaction turn.
         summary_item.set_turn_id_if_missing(&turn_context.sub_id);
-        if let ExecutionAuthBinding::Pooled(lease) = &execution_binding {
-            stamp_execution_provenance(&mut summary_item.metadata, lease);
-        }
+        execution.identity.stamp(&mut summary_item.metadata);
         bound_portable_context_item(&mut summary_item.item, MAX_PORTABLE_CONTEXT_ITEM_TOKENS);
     }
     let (window_number, window_ids) = sess.advance_auto_compact_window().await;
@@ -460,7 +446,7 @@ async fn run_compact_task_inner_impl(
             message: summary_text,
             window_number,
             window_ids,
-            portable_policy,
+            portable_policy: execution.portable_policy,
             compaction_response_id: Some(compaction_response.response_id),
             compaction_model_hash: turn_context.model_info().comp_hash.clone(),
             reviewer_compaction_hash: None,
@@ -950,9 +936,10 @@ async fn drain_to_completed(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
-    execution_binding: &ExecutionAuthBinding,
+    execution_identity: &CompactionExecutionIdentity,
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
+    authorize_api_request(turn_context).await?;
     let mut stream = client_session
         .stream(
             prompt,
@@ -987,7 +974,9 @@ async fn drain_to_completed(
                 sess.set_server_reasoning_included(included).await;
             }
             Ok(ResponseEvent::RateLimits(snapshot)) => {
-                sess.update_rate_limits(turn_context, snapshot).await;
+                if execution_identity.api_target.is_none() {
+                    sess.update_rate_limits(turn_context, snapshot).await;
+                }
             }
             Ok(ResponseEvent::Completed {
                 response_id,
@@ -1010,9 +999,7 @@ async fn drain_to_completed(
                                     ..Default::default()
                                 }),
                             };
-                            if let ExecutionAuthBinding::Pooled(lease) = execution_binding {
-                                stamp_execution_provenance(&mut envelope.metadata, lease);
-                            }
+                            execution_identity.stamp(&mut envelope.metadata);
                             envelope
                         })
                         .collect();
