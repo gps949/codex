@@ -120,6 +120,7 @@ mod filters;
 mod fs_watch;
 mod fuzzy_file_search;
 mod gateway_oauth_notifications;
+mod host_login_policy;
 mod image_url;
 pub mod in_process;
 mod log_write_warning;
@@ -759,16 +760,18 @@ pub async fn run_main_with_transport_options(
             None => error!("{}", warning.summary),
         }
     }
-    let remote_control_policy = if config
-        .config_layer_stack
-        .requirements()
-        .allow_remote_control
-        .as_ref()
-        .is_some_and(|requirement| !requirement.value)
-    {
-        RemoteControlPolicy::DisabledByRequirements
-    } else {
+    let local_remote_allowed = config_manager.local_remote_control_allowed().await?;
+    let workload_remote_denied = auth_manager.is_workload_identity_selected()
+        && config
+            .config_layer_stack
+            .requirements()
+            .allow_remote_control
+            .as_ref()
+            .is_some_and(|requirement| !requirement.value);
+    let remote_control_policy = if local_remote_allowed && !workload_remote_denied {
         RemoteControlPolicy::Allowed
+    } else {
+        RemoteControlPolicy::DisabledByRequirements
     };
     let remote_control_startup_mode = runtime_options.remote_control_startup_mode;
     let remote_control_explicitly_requested =
@@ -837,19 +840,28 @@ pub async fn run_main_with_transport_options(
     }
     drop(unix_socket_startup_lock);
 
-    // Keep remote-control enrollment pinned to root credentials while execution rotates. Without
-    // an account pool nothing rotates, so remote control follows the shared manager and sees
-    // logins and logouts like upstream.
-    let remote_control_auth_manager =
-        if codex_login::AccountProfileStore::new(config.codex_home.to_path_buf())
-            .manifest_path()
-            .is_file()
-        {
-            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
-                .await
-                .map_err(std::io::Error::other)?
+    // Host sign-in has an independent source and policy owner even when a pool
+    // is created after startup. Inference rotation must never replace it.
+    let host_config_manager = config_manager.for_host_login();
+    let host_policy_loader: Arc<dyn codex_login::PrimaryLoginPolicyLoader> =
+        Arc::new(crate::host_login_policy::HostLoginPolicyLoader {
+            config: host_config_manager.clone(),
+            source: Arc::new(tokio::sync::Mutex::new(std::sync::Weak::new())),
+            chatgpt_base_url: config.chatgpt_base_url.clone(),
+            http_client_factory: config.http_client_factory(),
+        });
+    let (primary_login_runtime, remote_control_auth_manager) =
+        if auth_manager.is_workload_identity_selected() {
+            // Host-managed identity cannot rotate with the pool; retain its initialized policy owner.
+            (None, Arc::clone(&auth_manager))
         } else {
-            auth_manager.clone()
+            let runtime = codex_login::PrimaryLoginRuntime::start(
+                host_config_manager.host_login_auth_config(&config),
+            )
+            .await?;
+            runtime.set_policy_loader(Arc::downgrade(&host_policy_loader));
+            let manager = runtime.auth_manager();
+            (Some(runtime), manager)
         };
 
     let remote_control_enabled = remote_control_policy == RemoteControlPolicy::Allowed
@@ -1007,6 +1019,7 @@ pub async fn run_main_with_transport_options(
                 &auth_manager,
             ))),
             auth_manager,
+            primary_login_runtime: primary_login_runtime.clone(),
             installation_id,
             code_mode_session_provider,
             rpc_transport: analytics_rpc_transport(&transport),

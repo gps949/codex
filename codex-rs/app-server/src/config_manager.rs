@@ -122,6 +122,62 @@ impl ConfigManager {
         manager
     }
 
+    /// Startup Remote permission belongs to this machine. Account restrictions are checked
+    /// against the selected host source before each authenticated Remote request.
+    pub(crate) async fn local_remote_control_allowed(&self) -> std::io::Result<bool> {
+        let requirements = load_managed_requirements_state(
+            LOCAL_FS.as_ref(),
+            &self.codex_home,
+            codex_config::ConfigLoadOptions {
+                loader_overrides: self.loader_overrides.clone(),
+                strict_config: self.strict_config,
+                cloud_config_bundle: CloudConfigBundleLoader::default(),
+            },
+        )
+        .await?;
+        Ok(requirements.allow_remote_control != Some(false))
+    }
+
+    pub(crate) fn suspend_host_login_requests(&self) {
+        self.network_policy
+            .unavailable(self.network_policy.policy().revision());
+        if let Ok(mut snapshot) = self.network_policy_snapshot.write() {
+            *snapshot = None;
+        }
+    }
+
+    /// Keeps host requirements independent from inference account rotation.
+    pub(crate) fn for_host_login(&self) -> Self {
+        let mut manager = Self::new(
+            self.codex_home.clone(),
+            self.current_cli_overrides(),
+            self.loader_overrides.clone(),
+            self.strict_config,
+            CloudConfigBundleLoader::default(),
+            self.arg0_paths.clone(),
+            Arc::clone(&self.thread_config_loader),
+        );
+        manager.runtime_feature_enablement = Arc::clone(&self.runtime_feature_enablement);
+        manager.local_network_policy = self.local_network_policy.clone();
+        manager
+    }
+
+    /// Authenticates host Remote Control against a separate effective-policy owner.
+    pub(crate) fn host_login_auth_config(&self, config: &Config) -> codex_login::AuthConfig {
+        let mut auth = config.auth_config();
+        auth.auth_route_config = codex_login::AuthRouteConfig::from_http_client_factory(
+            config
+                .http_client_factory()
+                .with_network_policy(self.network_policy.policy()),
+        )
+        .with_local_bootstrap_factory(
+            config
+                .http_client_factory()
+                .with_network_policy(self.local_network_policy.policy()),
+        );
+        auth
+    }
+
     pub(crate) fn codex_home(&self) -> &Path {
         self.codex_home.as_path()
     }

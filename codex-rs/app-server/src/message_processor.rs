@@ -260,6 +260,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) config_warnings: Vec<ConfigWarningNotification>,
     pub(crate) session_source: SessionSource,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) primary_login_runtime: Option<Arc<codex_login::PrimaryLoginRuntime>>,
     pub(crate) user_verification: Arc<crate::user_verification::Service>,
     pub(crate) installation_id: String,
     pub(crate) code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>>,
@@ -286,6 +287,7 @@ impl MessageProcessor {
             config_warnings,
             session_source,
             auth_manager,
+            primary_login_runtime,
             user_verification,
             installation_id,
             code_mode_session_provider,
@@ -421,6 +423,7 @@ impl MessageProcessor {
             Arc::clone(&config),
             config_manager.clone(),
             Arc::clone(&outgoing.remote_clients),
+            primary_login_runtime,
         );
         let apps_processor = AppsRequestProcessor::new(
             auth_manager.clone(),

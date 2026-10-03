@@ -107,6 +107,7 @@ impl Drop for ActiveLogin {
 #[derive(Clone)]
 pub(crate) struct AccountRequestProcessor {
     auth_manager: Arc<AuthManager>,
+    primary_login_runtime: Option<Arc<codex_login::PrimaryLoginRuntime>>,
     execution_account_pool: ExecutionAccountPoolHandle,
     thread_manager: Arc<ThreadManager>,
     outgoing: Arc<OutgoingMessageSender>,
@@ -144,6 +145,7 @@ impl AccountRequestProcessor {
         config: Arc<Config>,
         config_manager: ConfigManager,
         remote_client_registry: Arc<RemoteClientRegistry>,
+        primary_login_runtime: Option<Arc<codex_login::PrimaryLoginRuntime>>,
     ) -> Arc<Self> {
         let execution_account_pool = ExecutionAccountPoolHandle::shared(Arc::clone(&auth_manager));
         let pool_updates_task = pool_updates::spawn(
@@ -165,6 +167,7 @@ impl AccountRequestProcessor {
                 (*config).clone(),
             ),
             auth_manager,
+            primary_login_runtime,
             execution_account_pool,
             thread_manager,
             outgoing,
@@ -985,13 +988,17 @@ impl AccountRequestProcessor {
             chatgpt_plan_type.as_deref(),
         )
         .map_err(|err| internal_error(format!("failed to set external auth: {err}")))?;
+        let external: Arc<dyn codex_login::ExternalAuth> =
+            Arc::new(ExternalAuthBridge::new(Arc::clone(&self.outgoing), auth));
         self.auth_manager
-            .set_external_auth(Arc::new(ExternalAuthBridge::new(
-                Arc::clone(&self.outgoing),
-                auth,
-            )))
+            .set_external_auth(Arc::clone(&external))
             .await
             .map_err(|err| internal_error(format!("failed to set external auth: {err}")))?;
+        if let Some(runtime) = &self.primary_login_runtime {
+            runtime
+                .set_root_external_auth(Some(external))
+                .map_err(|err| internal_error(err.to_string()))?;
+        }
         self.config_manager.replace_cloud_config_bundle_loader(
             self.auth_manager.clone(),
             self.config.chatgpt_base_url.clone(),
@@ -1020,6 +1027,26 @@ impl AccountRequestProcessor {
     ) {
         let auth_changes = self.auth_manager.auth_change_state_receiver();
         let owner_generation = auth_changes.borrow().owner_generation;
+        if payload.success
+            && let Err(error) =
+                codex_login::PrimaryLoginStore::new(self.config.codex_home.to_path_buf()).use_root()
+        {
+            payload.success = false;
+            payload.error = Some(format!(
+                "Login saved, but host sign-in source could not be updated: {error}"
+            ));
+        }
+        if payload.success
+            && let Some(runtime) = &self.primary_login_runtime
+        {
+            if !matches!(
+                self.auth_manager.auth_cached(),
+                Some(CodexAuth::ChatgptAuthTokens(_))
+            ) {
+                let _ = runtime.set_root_external_auth(None);
+            }
+            let _ = runtime.sync().await;
+        }
         if payload.success
             && let Err(error) = self.read_account(/*request*/ None).await
         {
@@ -1085,6 +1112,15 @@ impl AccountRequestProcessor {
     async fn logout_common(&self) -> std::result::Result<Option<AuthMode>, JSONRPCErrorError> {
         if self.auth_manager.is_workload_identity_selected() {
             return Err(self.configured_auth_owned_by_host_error());
+        }
+        codex_login::PrimaryLoginStore::new(self.config.codex_home.to_path_buf())
+            .sign_out()
+            .map_err(|error| internal_error(error.to_string()))?;
+        if let Some(runtime) = &self.primary_login_runtime {
+            runtime
+                .set_root_external_auth(None)
+                .map_err(|error| internal_error(error.to_string()))?;
+            let _ = tokio::time::timeout(Duration::from_secs(1), runtime.sync()).await;
         }
         let config = self.load_latest_config().await;
 

@@ -309,7 +309,7 @@ impl ExecutionAuth {
                 match AccountPoolRuntime::try_install_from_config(
                     Arc::clone(&self.legacy_manager),
                     config,
-                    /*include_existing_root_login*/ true,
+                    /*include_existing_root_login*/ false,
                 )
                 .await
                 {
