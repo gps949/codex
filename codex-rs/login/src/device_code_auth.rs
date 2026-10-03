@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::Deserializer;
 use serde::de::{self};
+use std::future::Future;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -183,6 +184,17 @@ pub async fn complete_device_code_login(
     opts: ServerOptions,
     device_code: DeviceCode,
 ) -> std::io::Result<()> {
+    complete_device_code_login_with_cancellation(opts, device_code, std::future::pending()).await
+}
+
+/// Cancellation is allowed during network requests, never while the blocking credential save
+/// can still write. The account wrapper removes its staged credentials after this method settles.
+pub(crate) async fn complete_device_code_login_with_cancellation(
+    opts: ServerOptions,
+    device_code: DeviceCode,
+    cancellation: impl Future<Output = ()> + Send,
+) -> std::io::Result<()> {
+    tokio::pin!(cancellation);
     let base_url = opts.issuer.trim_end_matches('/');
     let api_base_url = format!("{base_url}/api/accounts");
     let client = create_raw_auth_client(
@@ -190,40 +202,48 @@ pub async fn complete_device_code_login(
         &opts.auth_route_config,
     )?;
 
-    let code_resp = poll_for_token(
-        &client,
-        &api_base_url,
-        &device_code.device_auth_id,
-        &device_code.user_code,
-        device_code.interval,
-    )
-    .await?;
+    let exchange = async {
+        let code_resp = poll_for_token(
+            &client,
+            &api_base_url,
+            &device_code.device_auth_id,
+            &device_code.user_code,
+            device_code.interval,
+        )
+        .await?;
 
-    let pkce = PkceCodes {
-        code_verifier: code_resp.code_verifier,
-        code_challenge: code_resp.code_challenge,
+        let pkce = PkceCodes {
+            code_verifier: code_resp.code_verifier,
+            code_challenge: code_resp.code_challenge,
+        };
+        let redirect_uri = format!("{base_url}/deviceauth/callback");
+
+        let (tokens, _) = crate::server::exchange_code_for_tokens(
+            base_url,
+            &opts.client_id,
+            &redirect_uri,
+            &pkce,
+            &code_resp.authorization_code,
+            &opts.auth_route_config,
+        )
+        .await
+        .map_err(|err| std::io::Error::other(format!("device code exchange failed: {err}")))?;
+
+        if let Err(message) = crate::server::ensure_workspace_allowed(
+            opts.forced_chatgpt_workspace_id.as_deref(),
+            &tokens.id_token,
+        ) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
+        }
+        Ok(tokens)
     };
-    let redirect_uri = format!("{base_url}/deviceauth/callback");
+    let tokens = tokio::select! {
+        biased;
+        _ = &mut cancellation => return Err(io::Error::new(io::ErrorKind::Interrupted, "Login cancelled")),
+        result = exchange => result?,
+    };
 
-    let (tokens, _) = crate::server::exchange_code_for_tokens(
-        base_url,
-        &opts.client_id,
-        &redirect_uri,
-        &pkce,
-        &code_resp.authorization_code,
-        &opts.auth_route_config,
-    )
-    .await
-    .map_err(|err| std::io::Error::other(format!("device code exchange failed: {err}")))?;
-
-    if let Err(message) = crate::server::ensure_workspace_allowed(
-        opts.forced_chatgpt_workspace_id.as_deref(),
-        &tokens.id_token,
-    ) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
-    }
-
-    crate::server::persist_tokens_async(
+    let result = crate::server::persist_tokens_async(
         &opts.codex_home,
         /*api_key*/ None,
         tokens.id_token,
@@ -232,7 +252,12 @@ pub async fn complete_device_code_login(
         opts.cli_auth_credentials_store_mode,
         opts.auth_keyring_backend_kind,
     )
-    .await
+    .await;
+    tokio::select! {
+        biased;
+        _ = &mut cancellation => Err(io::Error::new(io::ErrorKind::Interrupted, "Login cancelled")),
+        _ = std::future::ready(()) => result,
+    }
 }
 
 pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {

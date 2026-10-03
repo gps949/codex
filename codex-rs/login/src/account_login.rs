@@ -7,14 +7,21 @@ use crate::AccountProfile;
 use crate::AccountProfileId;
 use crate::AccountProfileStore;
 use crate::AccountProfileStoreError;
-use crate::DeviceCode;
 use crate::LoginServer;
 use crate::ServerOptions;
-use crate::account_identity::reconcile_duplicate_new_login;
+use crate::account_identity::abandon_pending_login;
+use crate::account_identity::reconcile_duplicate_login;
 use crate::account_relogin::ReloginStaging;
-use crate::complete_device_code_login;
-use crate::request_device_code;
 use crate::run_login_server;
+
+#[path = "account_device_login.rs"]
+mod device;
+
+pub use device::PendingAccountDeviceLogin;
+pub use device::begin_account_device_login;
+pub use device::begin_account_device_relogin;
+pub use device::prepare_account_device_login;
+pub use device::prepare_account_device_relogin;
 
 /// Result of a completed account login flow.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,7 +71,14 @@ pub fn begin_account_browser_login(
             },
         }),
         Err(error) => {
-            abandon_after_failed_login(&store, &profile.id);
+            abandon_after_failed_login(
+                &store,
+                &profile.id,
+                AuthPersistenceConfig {
+                    auth_credentials_store_mode: options.cli_auth_credentials_store_mode,
+                    auth_keyring_backend_kind: options.auth_keyring_backend_kind,
+                },
+            );
             Err(error.into())
         }
     }
@@ -99,71 +113,6 @@ pub fn begin_account_browser_relogin(
         store,
         profile,
         server: Some(server),
-        mode: AccountLoginMode::Relogin,
-        relogin: Some(relogin),
-        auth,
-    })
-}
-
-/// Starts the official device-code flow for a new account profile.
-///
-/// No token exchange is performed until [`PendingAccountDeviceLogin::complete`] is called. As with
-/// browser login, the profile-specific credential home is selected before the first auth request.
-pub async fn begin_account_device_login(
-    store: AccountProfileStore,
-    mut options: ServerOptions,
-    label: Option<String>,
-    priority: u32,
-) -> Result<PendingAccountDeviceLogin, AccountLoginFlowError> {
-    let profile = store.allocate_profile(label, priority)?;
-    options.codex_home = profile.credential_home.clone();
-
-    match request_device_code(&options).await {
-        Ok(device_code) => Ok(PendingAccountDeviceLogin {
-            store,
-            profile,
-            options: Some(options.clone()),
-            device_code: Some(device_code),
-            mode: AccountLoginMode::NewProfile,
-            relogin: None,
-            auth: AuthPersistenceConfig {
-                auth_credentials_store_mode: options.cli_auth_credentials_store_mode,
-                auth_keyring_backend_kind: options.auth_keyring_backend_kind,
-            },
-        }),
-        Err(error) => {
-            abandon_after_failed_login(&store, &profile.id);
-            Err(error.into())
-        }
-    }
-}
-
-/// Device-code variant of [`begin_account_browser_relogin`].
-pub async fn begin_account_device_relogin(
-    store: AccountProfileStore,
-    mut options: ServerOptions,
-    profile_id: &AccountProfileId,
-) -> Result<PendingAccountDeviceLogin, AccountLoginFlowError> {
-    let profile = existing_profile(&store, profile_id)?;
-    let auth = AuthPersistenceConfig {
-        auth_credentials_store_mode: options.cli_auth_credentials_store_mode,
-        auth_keyring_backend_kind: options.auth_keyring_backend_kind,
-    };
-    let relogin = ReloginStaging::new(
-        store.codex_home(),
-        &profile,
-        auth.auth_credentials_store_mode,
-        auth.auth_keyring_backend_kind,
-    )?;
-    options.codex_home = relogin.home().to_path_buf();
-    options.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
-
-    let device_code = request_device_code(&options).await?;
-    Ok(PendingAccountDeviceLogin {
-        store,
-        profile,
-        options: Some(options),
-        device_code: Some(device_code),
         mode: AccountLoginMode::Relogin,
         relogin: Some(relogin),
         auth,
@@ -241,7 +190,7 @@ impl PendingAccountBrowserLogin {
             }
             Err(error) => {
                 if self.mode == AccountLoginMode::NewProfile {
-                    abandon_after_failed_login(&self.store, &self.profile.id);
+                    abandon_after_failed_login(&self.store, &self.profile.id, self.auth);
                 }
                 Err(error.into())
             }
@@ -258,7 +207,12 @@ impl PendingAccountBrowserLogin {
         server.cancel();
         let _ = server.block_until_done().await;
         if self.mode == AccountLoginMode::NewProfile {
-            self.store.abandon_pending_profile(&self.profile.id)?;
+            abandon_pending_login(
+                &self.store,
+                &self.profile.id,
+                self.auth.auth_credentials_store_mode,
+                self.auth.auth_keyring_backend_kind,
+            )?;
         }
         Ok(())
     }
@@ -281,74 +235,17 @@ impl Drop for PendingAccountBrowserLogin {
     }
 }
 
-pub struct PendingAccountDeviceLogin {
-    store: AccountProfileStore,
-    profile: AccountProfile,
-    options: Option<ServerOptions>,
-    device_code: Option<DeviceCode>,
-    mode: AccountLoginMode,
-    relogin: Option<ReloginStaging>,
+fn abandon_after_failed_login(
+    store: &AccountProfileStore,
+    profile_id: &AccountProfileId,
     auth: AuthPersistenceConfig,
-}
-
-impl PendingAccountDeviceLogin {
-    pub fn profile(&self) -> &AccountProfile {
-        &self.profile
-    }
-
-    pub fn verification_url(&self) -> Option<&str> {
-        self.device_code
-            .as_ref()
-            .map(|device_code| device_code.verification_url.as_str())
-    }
-
-    pub fn user_code(&self) -> Option<&str> {
-        self.device_code
-            .as_ref()
-            .map(|device_code| device_code.user_code.as_str())
-    }
-
-    pub async fn complete(mut self) -> Result<AccountLoginOutcome, AccountLoginFlowError> {
-        let options = self
-            .options
-            .take()
-            .ok_or(AccountLoginFlowError::FlowAlreadyConsumed)?;
-        let device_code = self
-            .device_code
-            .take()
-            .ok_or(AccountLoginFlowError::FlowAlreadyConsumed)?;
-        match complete_device_code_login(options, device_code).await {
-            Ok(()) => {
-                finish_successful_login(
-                    self.store.clone(),
-                    self.profile.clone(),
-                    self.mode,
-                    self.auth,
-                    self.relogin.take(),
-                )
-                .await
-            }
-            Err(error) => {
-                if self.mode == AccountLoginMode::NewProfile {
-                    abandon_after_failed_login(&self.store, &self.profile.id);
-                }
-                Err(error.into())
-            }
-        }
-    }
-
-    pub fn cancel(mut self) -> Result<(), AccountLoginFlowError> {
-        self.options.take();
-        self.device_code.take();
-        if self.mode == AccountLoginMode::NewProfile {
-            self.store.abandon_pending_profile(&self.profile.id)?;
-        }
-        Ok(())
-    }
-}
-
-fn abandon_after_failed_login(store: &AccountProfileStore, profile_id: &AccountProfileId) {
-    if let Err(error) = store.abandon_pending_profile(profile_id) {
+) {
+    if let Err(error) = abandon_pending_login(
+        store,
+        profile_id,
+        auth.auth_credentials_store_mode,
+        auth.auth_keyring_backend_kind,
+    ) {
         tracing::warn!(
             profile_id = %profile_id,
             error = %error,
@@ -365,6 +262,15 @@ async fn finish_successful_login(
     relogin: Option<ReloginStaging>,
 ) -> Result<AccountLoginOutcome, AccountLoginFlowError> {
     tokio::task::spawn_blocking(move || {
+        let mut transaction = store.enrollment_transaction()?;
+        // Recheck the profile under the manifest lock before writing credentials. A cancelled or
+        // removed enrollment must not be recreated by a late OAuth completion.
+        let profile = transaction
+            .records()?
+            .into_iter()
+            .find(|record| record.profile.id == profile.id)
+            .map(|record| record.profile)
+            .ok_or_else(|| AccountProfileStoreError::UnknownProfile(profile.id.clone()))?;
         if let Some(relogin) = relogin.as_ref() {
             // Validate before committing so a wrong workspace never replaces the profile's auth.
             relogin.commit(
@@ -374,8 +280,8 @@ async fn finish_successful_login(
             )?;
         }
         if mode == AccountLoginMode::NewProfile
-            && let Some(existing) = reconcile_duplicate_new_login(
-                &store,
+            && let Some(existing) = reconcile_duplicate_login(
+                &mut transaction,
                 &profile,
                 auth.auth_credentials_store_mode,
                 auth.auth_keyring_backend_kind,
@@ -387,7 +293,7 @@ async fn finish_successful_login(
             });
         }
 
-        let profile = store.complete_profile(&profile.id)?;
+        let profile = transaction.complete_profile(&profile.id)?;
         Ok(AccountLoginOutcome {
             profile,
             kind: AccountLoginOutcomeKind::Added,
@@ -397,6 +303,10 @@ async fn finish_successful_login(
     .map_err(|error| io::Error::other(format!("account login commit task failed: {error}")))?
 }
 
+#[cfg(test)]
+#[path = "account_login_completion_tests.rs"]
+mod completion_tests;
+
 #[derive(Debug, Error)]
 pub enum AccountLoginFlowError {
     #[error(transparent)]
@@ -405,6 +315,8 @@ pub enum AccountLoginFlowError {
     Store(#[from] AccountProfileStoreError),
     #[error("account login flow was already consumed")]
     FlowAlreadyConsumed,
+    #[error("Login cancelled")]
+    Cancelled,
 }
 
 #[cfg(test)]
