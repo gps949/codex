@@ -1,0 +1,108 @@
+---
+source: cli/tests/account_manager_names.rs
+assertion_line: 56
+expression: transcript
+---
+Automatic name, priority edit:
+Codex Accounts
+
+Target: Automatic subscriptions
+Subscription pool: Enabled
+1 subscription accounts · 1 ready · 0 checking
+Quota percentages show USED allowance; ? means not checked.
+Next: Choose an account number to view quota, credits and actions.
+Host sign-in / Remote Control: Root login
+Host sign-in and inference selection are independent.
+
+   1 alice@example.com
+     Pro (More) · Ready
+     Primary    ? · Weekly    ?
+     Reset credits ?
+
+API accounts · fallback off
+
+[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions
+[C] Cancel login  [number] Account actions  [G] Language  [Q] Quit
+Choose: 
+alice@example.com · Pro (More)
+Profile: fixture
+E edits a custom name; Enter keeps it. N clears it and uses email, then profile ID.
+Status: Ready · Priority: 10
+Quota percentages show used allowance. Refresh checks the backend without starting a task or spending a credit.
+Short window: Not checked. R refreshes quota.
+Long window: Not checked. R refreshes quota.
+[U] Use  [H] Host sign-in  [R] Refresh  [T] Retry after external reset  [C] Reset credits  [L] Relogin  [E] Edit  [N] Automatic name  [D] Enable/disable  [X] Remove  [Enter] Back
+Action: Custom label (Enter keeps the current name): Priority [10]: Codex Accounts
+
+Target: Automatic subscriptions
+Subscription pool: Enabled
+1 subscription accounts · 1 ready · 0 checking
+Quota percentages show USED allowance; ? means not checked.
+Next: Choose an account number to view quota, credits and actions.
+Host sign-in / Remote Control: Root login
+Host sign-in and inference selection are independent.
+
+   1 alice@example.com
+     Pro (More) · Ready
+     Primary    ? · Weekly    ?
+     Reset credits ?
+
+API accounts · fallback off
+
+Account details saved. Running clients synchronize the change.
+
+[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions
+[C] Cancel login  [number] Account actions  [G] Language  [Q] Quit
+Choose: 
+Explicit name matching ID, clear:
+Codex 账号管理
+
+当前目标：自动选择订阅账号
+订阅账号池：已启用
+1 个订阅账号 · 1 个可用 · 0 个正在检查
+百分比表示已用额度；? 表示尚未检查。
+下一步：输入账号编号，查看额度、重置券和可用操作。
+主登录 / 远程控制: 根目录登录
+主登录与推理账号选择相互独立。
+
+   1 fixture
+     Pro (More) · 可用
+     短期    ? · 长期    ?
+     重置券 ?
+
+API 账号 · 最终兜底已关闭
+
+[R] 刷新额度  [A] 添加账号  [S] 设置  [P] API 账号  [O] 自动选择订阅
+[C] 取消登录  [编号] 账号操作  [G] 语言 / Language  [Q] 退出
+请选择: 
+fixture · Pro (More)
+档案：fixture
+邮箱：alice@example.com
+E 编辑自定义名称；回车保留原名称。N 清空自定义名称，自动使用邮箱，邮箱不可用时使用档案 ID。
+状态：可用 · 优先级：11
+百分比表示已用额度。刷新只检查服务端，不启动任务，也不消耗重置券。
+短期额度窗口：尚未检查。按 R 刷新额度。
+长期额度窗口：尚未检查。按 R 刷新额度。
+[U] 推理使用  [H] 主登录  [R] 刷新  [T] 外部重置后重试  [C] 重置券  [L] 重新登录  [E] 编辑  [N] 自动名称  [D] 启用/停用  [X] 移除  [回车] 返回
+操作: Codex 账号管理
+
+当前目标：自动选择订阅账号
+订阅账号池：已启用
+1 个订阅账号 · 1 个可用 · 0 个正在检查
+百分比表示已用额度；? 表示尚未检查。
+下一步：输入账号编号，查看额度、重置券和可用操作。
+主登录 / 远程控制: 根目录登录
+主登录与推理账号选择相互独立。
+
+   1 alice@example.com
+     Pro (More) · 可用
+     短期    ? · 长期    ?
+     重置券 ?
+
+API 账号 · 最终兜底已关闭
+
+账号信息已保存，运行中的客户端会同步更改。
+
+[R] 刷新额度  [A] 添加账号  [S] 设置  [P] API 账号  [O] 自动选择订阅
+[C] 取消登录  [编号] 账号操作  [G] 语言 / Language  [Q] 退出
+请选择:

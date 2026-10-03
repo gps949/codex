@@ -1,0 +1,43 @@
+---
+source: cli/src/account_manager_display_tests.rs
+assertion_line: 179
+expression: "format!(\"Wide:\\n{wide}\\nNarrow:\\n{narrow}\")"
+---
+Wide:
+Codex Accounts
+
+Target: Automatic subscriptions
+Subscription pool: Enabled
+3 subscription accounts · 2 ready · 0 checking
+Quota percentages show USED allowance; ? means not checked.
+Next: Choose an account number to view quota, credits and actions.
+
+     ACCOUNT                                 PLAN       AVAILABILITY    PRIMARY  WEEKLY  CREDITS
+*  1 alice+personal-subscription@example.com Pro        Ready                1%       ?        2
+   2 工作席位                                Pro        Waiting reset      100%       ?        ?
+   3 Standby                                 Pro        Ready                9%       ?       10
+
+API accounts · fallback off
+Narrow:
+Codex 账号管理
+
+当前目标：自动选择订阅账号
+订阅账号池：已启用
+3 个订阅账号 · 2 个可用 · 0 个正在检查
+百分比表示已用额度；? 表示尚未检查。
+下一步：输入账号编号，查看额度、重置券和可用操作。
+
+*  1 alice+personal-subscription@example.com
+     Pro · 可用
+     短期   1% · 长期    ?
+     重置券 2
+   2 工作席位
+     Pro · 等待额度重置
+     短期 100% · 长期    ?
+     重置券 ?
+   3 Standby
+     Pro · 可用
+     短期   9% · 长期    ?
+     重置券 10
+
+API 账号 · 最终兜底已关闭

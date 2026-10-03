@@ -30,6 +30,21 @@ pub(super) async fn account_actions(
     );
     println!(
         "{}",
+        locale.format("Profile: {}", &[&clean(&account.profile_id)])
+    );
+    if let Some(email) = &account.email
+        && email != &account.label
+    {
+        println!("{}", locale.format("Email: {}", &[&clean(email)]));
+    }
+    println!(
+        "{}",
+        locale.text(
+            "E edits a custom name; Enter keeps it. N clears it and uses email, then profile ID."
+        )
+    );
+    println!(
+        "{}",
         locale.format(
             "Status: {} · Priority: {}",
             &[
@@ -134,7 +149,7 @@ pub(super) async fn account_actions(
         );
     }
     println!("{}", locale.text(
-        "[U] Use  [R] Refresh  [T] Retry after external reset  [C] Reset credits  [L] Relogin  [E] Edit  [D] Enable/disable  [X] Remove  [Enter] Back"
+        "[U] Use  [H] Host sign-in  [R] Refresh  [T] Retry after external reset  [C] Reset credits  [L] Relogin  [E] Edit  [N] Automatic name  [D] Enable/disable  [X] Remove  [Enter] Back"
     ));
     let id = account.profile_id.clone();
     Ok(
@@ -143,6 +158,15 @@ pub(super) async fn account_actions(
             .to_ascii_lowercase()
             .as_str()
         {
+            "h" => {
+                if prompt(locale, "Use this account for host sign-in? Type APPLY", "").await?
+                    == "APPLY"
+                {
+                    Some(Operation::PrimaryUse { profile_id: id })
+                } else {
+                    None
+                }
+            }
             "u" => Some(Operation::Use { profile_id: id }),
             "r" => Some(Operation::Refresh {
                 profile_ids: Some(vec![id]),
@@ -158,15 +182,30 @@ pub(super) async fn account_actions(
                 priority: None,
                 disabled: Some(!account.disabled),
             }),
-            "e" => Some(Operation::Update {
+            "e" => {
+                let default = account.custom_label.as_deref().unwrap_or_default();
+                let entered = prompt(
+                    locale,
+                    "Custom label (Enter keeps the current name)",
+                    default,
+                )
+                .await?;
+                Some(Operation::Update {
+                    profile_id: id,
+                    label: (entered != default).then_some(entered),
+                    priority: Some(
+                        prompt(locale, "Priority", &account.priority.to_string())
+                            .await?
+                            .parse()
+                            .map_err(|_| anyhow::anyhow!(locale.text("Enter a whole number")))?,
+                    ),
+                    disabled: None,
+                })
+            }
+            "n" => Some(Operation::Update {
                 profile_id: id,
-                label: Some(prompt(locale, "Label", &account.label).await?),
-                priority: Some(
-                    prompt(locale, "Priority", &account.priority.to_string())
-                        .await?
-                        .parse()
-                        .map_err(|_| anyhow::anyhow!(locale.text("Enter a whole number")))?,
-                ),
+                label: Some(String::new()),
+                priority: None,
                 disabled: None,
             }),
             "x" => {

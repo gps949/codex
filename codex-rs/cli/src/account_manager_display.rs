@@ -93,21 +93,42 @@ pub(super) fn render(
             )],
         ),
     );
+    if let Some(primary) = &inventory.primary_login {
+        let label = if primary.source == "profile" {
+            primary.label.as_str()
+        } else {
+            locale.message(&primary.label)
+        };
+        rows.push(format!(
+            "{}: {}",
+            locale.text("Host sign-in / Remote Control"),
+            clean(label)
+        ));
+        rows.push(
+            locale
+                .text("Host sign-in and inference selection are independent.")
+                .into(),
+        );
+    }
     rows.push(String::new());
-    let wide = columns >= 86;
+    let identity_width = inventory
+        .accounts
+        .iter()
+        .map(|account| UnicodeWidthStr::width(clean(&account.label).as_str()))
+        .max()
+        .unwrap_or_default()
+        .clamp(26, 64);
+    let wide = columns >= identity_width + 60;
     if wide {
-        rows.push(match locale {
-            Locale::English => "     ACCOUNT                    PLAN       AVAILABILITY     PRIMARY  WEEKLY   CREDITS".into(),
-            Locale::SimplifiedChinese => format!(
-                "     {} {} {} {} {} {}",
-                cell(locale.text("ACCOUNT"), /*width*/ 26),
-                cell(locale.text("PLAN"), /*width*/ 10),
-                cell(locale.text("AVAILABILITY"), /*width*/ 15),
-                right_cell(locale.text("PRIMARY"), /*width*/ 7),
-                right_cell(locale.text("WEEKLY"), /*width*/ 7),
-                right_cell(locale.text("CREDITS"), /*width*/ 8)
-            ),
-        });
+        rows.push(format!(
+            "     {} {} {} {} {} {}",
+            cell(locale.text("ACCOUNT"), identity_width),
+            cell(locale.text("PLAN"), /*width*/ 10),
+            cell(locale.text("AVAILABILITY"), /*width*/ 15),
+            right_cell(locale.text("PRIMARY"), /*width*/ 7),
+            right_cell(locale.text("WEEKLY"), /*width*/ 7),
+            right_cell(locale.text("CREDITS"), /*width*/ 8)
+        ));
     }
     for (index, account) in inventory.accounts.iter().enumerate() {
         let marker = if matches!(
@@ -129,7 +150,7 @@ pub(super) fn render(
             rows.push(format!(
                 "{marker}{:>3} {} {} {} {:>7} {:>7} {:>8}",
                 index + 1,
-                cell(&account.label, /*width*/ 26),
+                cell(&account.label, identity_width),
                 cell(
                     account
                         .plan
@@ -240,14 +261,12 @@ fn percent(
         )
 }
 
-fn clean(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| {
-            !ch.is_control() && !matches!(*ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-        })
-        .take(240)
-        .collect()
+pub(super) fn clean(value: &str) -> String {
+    value.chars().map(|ch| {
+        if ch.is_control() || matches!(ch, '\u{061c}' | '\u{200b}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{feff}') {
+            ' '
+        } else { ch }
+    }).take(320).collect()
 }
 
 fn cell(value: &str, width: usize) -> String {

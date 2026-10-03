@@ -15,6 +15,7 @@ fn inventory() -> AccountManagerInventory {
     .map(|(index, (label, used, credits))| ManagedAccountView {
         profile_id: format!("fixture-{index}"),
         label: label.into(),
+        custom_label: Some(label.into()),
         priority: index as u32,
         disabled: false,
         login_state: "signedIn".into(),
@@ -44,6 +45,7 @@ fn inventory() -> AccountManagerInventory {
     })
     .collect();
     AccountManagerInventory {
+        primary_login: None,
         host_now: 1800000000,
         paused: false,
         active_profile_id: Some("fixture-0".into()),
@@ -157,6 +159,51 @@ fn manager_language_switch_updates_menu_and_guidance() {
         english.main_menu(),
         render(&inventory, /*columns*/ 100, chinese),
         chinese.main_menu()
+    );
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn manager_email_names_expand_tables_and_remain_complete_in_cards_after_clear() {
+    let mut inventory = inventory();
+    inventory.accounts[0].custom_label = None;
+    inventory.accounts[0].email = Some("alice+personal-subscription@example.com".into());
+    inventory.accounts[0].label = codex_login::account_display::account_display_name(
+        inventory.accounts[0].custom_label.as_deref(),
+        inventory.accounts[0].email.as_deref(),
+        &inventory.accounts[0].profile_id,
+    )
+    .to_string();
+    let wide = render(&inventory, /*columns*/ 120, Locale::English);
+    assert!(wide.contains("alice+personal-subscription@example.com"));
+    let narrow = render(&inventory, /*columns*/ 60, Locale::SimplifiedChinese);
+    assert!(narrow.contains("alice+personal-subscription@example.com"));
+    assert!(
+        narrow
+            .lines()
+            .all(|line| UnicodeWidthStr::width(line) <= 60)
+    );
+    insta::assert_snapshot!(format!("Wide:\n{wide}\nNarrow:\n{narrow}"));
+}
+
+#[test]
+fn manager_identity_controls_cannot_move_rows_or_hide_numeric_selectors() {
+    let mut inventory = inventory();
+    inventory.accounts[0].custom_label = None;
+    inventory.accounts[0].email = Some("alice\u{061c}@example.com\n".into());
+    inventory.accounts[0].label = codex_login::account_display::account_display_name(
+        inventory.accounts[0].custom_label.as_deref(),
+        inventory.accounts[0].email.as_deref(),
+        &inventory.accounts[0].profile_id,
+    )
+    .to_string();
+    inventory.accounts[1].label = "Name\u{202e}\tWork".into();
+    let output = render(&inventory, /*columns*/ 100, Locale::English);
+    assert!(!output.contains(['\u{061c}', '\u{202e}', '\t']));
+    assert!(output.contains("alice @example.com"));
+    assert_eq!(
+        output.lines().filter(|line| line.contains("Pro")).count(),
+        3
     );
     insta::assert_snapshot!(output);
 }

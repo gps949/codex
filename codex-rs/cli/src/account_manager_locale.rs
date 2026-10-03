@@ -80,6 +80,22 @@ impl Locale {
 
 fn chinese(english: &str) -> Option<&'static str> {
     let translated = match english {
+        "Host sign-in / Remote Control" => "主登录 / 远程控制",
+        "Root login" => "根目录登录",
+        "Signed out" => "已退出登录",
+        "Host sign-in unavailable" => "主登录不可用",
+        "Selected account unavailable" => "所选账号不可用",
+        "Host sign-in selected. Inference selection is unchanged. Remote Control may need reconnection or pairing for the new owner." => {
+            "已选择主登录，推理账号选择未更改。远程控制可能需要为新身份重新连接或配对。"
+        }
+        "Host sign-in now uses root login. Inference selection is unchanged." => {
+            "主登录已改为根目录登录，推理账号选择未更改。"
+        }
+        "Host signed out. Pool credentials were retained." => "已退出主登录，账号池凭据仍保留。",
+        "This profile is selected for host sign-in. Choose another host login or run codex account primary logout before removing it." => {
+            "此档案正在用作主登录。移除前请另选主登录，或运行 codex account primary logout。"
+        }
+        "Host sign-in and inference selection are independent." => "主登录与推理账号选择相互独立。",
         "Codex Accounts" => "Codex 账号管理",
         "Automatic subscriptions" => "自动选择订阅账号",
         "API target unavailable" => "API 目标账号不可用",

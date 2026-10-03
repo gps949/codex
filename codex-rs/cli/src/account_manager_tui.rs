@@ -111,13 +111,7 @@ pub(crate) async fn run(manager: Arc<AccountManager>, mut locale: Locale) -> any
 }
 
 fn clean(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| {
-            !ch.is_control() && !matches!(*ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-        })
-        .take(240)
-        .collect()
+    display::clean(value)
 }
 
 fn show_login(

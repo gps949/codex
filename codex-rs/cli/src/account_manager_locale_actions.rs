@@ -2,6 +2,18 @@
 
 pub(super) fn chinese(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Use this account for host sign-in? Type APPLY" => {
+            "将此账号用作主登录？输入 APPLY 确认，推理选择不变；远程连接可能需要重连或配对。"
+        }
+        "Use this account for host sign-in?" => {
+            "将此账号用作主登录？推理选择不变，远程连接可能需要重连或配对。"
+        }
+        "Profile: {}" => "档案：{}",
+        "Email: {}" => "邮箱：{}",
+        "E edits a custom name; Enter keeps it. N clears it and uses email, then profile ID." => {
+            "E 编辑自定义名称；回车保留原名称。N 清空自定义名称，自动使用邮箱，邮箱不可用时使用档案 ID。"
+        }
+        "Custom label (Enter keeps the current name)" => "自定义名称（回车保留原名称）",
         "Status: {} · Priority: {}" => "状态：{} · 优先级：{}",
         "Quota percentages show used allowance. Refresh checks the backend without starting a task or spending a credit." => {
             "百分比表示已用额度。刷新只检查服务端，不启动任务，也不消耗重置券。"
@@ -25,8 +37,8 @@ pub(super) fn chinese(english: &str) -> Option<&'static str> {
         "Cached observation: {} minutes ago" => "缓存观测：{} 分钟前",
         "{}: Not checked. R refreshes quota." => "{}：尚未检查。按 R 刷新额度。",
         "Last check: {}" => "上次检查：{}",
-        "[U] Use  [R] Refresh  [T] Retry after external reset  [C] Reset credits  [L] Relogin  [E] Edit  [D] Enable/disable  [X] Remove  [Enter] Back" => {
-            "[U] 使用  [R] 刷新  [T] 外部重置后重试  [C] 重置券  [L] 重新登录  [E] 编辑  [D] 启用/停用  [X] 移除  [回车] 返回"
+        "[U] Use  [H] Host sign-in  [R] Refresh  [T] Retry after external reset  [C] Reset credits  [L] Relogin  [E] Edit  [N] Automatic name  [D] Enable/disable  [X] Remove  [Enter] Back" => {
+            "[U] 推理使用  [H] 主登录  [R] 刷新  [T] 外部重置后重试  [C] 重置券  [L] 重新登录  [E] 编辑  [N] 自动名称  [D] 启用/停用  [X] 移除  [回车] 返回"
         }
         "Action" => "操作",
         "Label" => "账号名称",
