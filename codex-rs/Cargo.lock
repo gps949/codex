@@ -2424,6 +2424,8 @@ name = "codex-backend-client"
 version = "0.160.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "chrono",
  "codex-api",
  "codex-backend-openapi-models",
  "codex-http-client",
@@ -2434,7 +2436,9 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-util",
  "url",
  "wiremock",
 ]

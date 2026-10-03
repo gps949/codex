@@ -1,3 +1,4 @@
+mod account_credit_expiry;
 mod analytics_session;
 mod client;
 pub(crate) mod types;
@@ -62,3 +63,7 @@ pub use client::task_usage::TaskUsageResponse;
 pub use client::task_usage::TaskUsageStatus;
 pub use client::task_usage::TaskUsageThread;
 pub use codex_backend_openapi_models::models::analytics as analytics_models;
+
+pub use account_credit_expiry::AccountCreditExpiryReader;
+pub use account_credit_expiry::CreditExpirySnapshot;
+pub use account_credit_expiry::ExpiringResetCredit;
