@@ -191,6 +191,12 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
     .await
     {
         Ok(_) => {
+            if let Err(error) =
+                codex_login::PrimaryLoginStore::new(config.codex_home.to_path_buf()).use_root()
+            {
+                eprintln!("Login saved, but host sign-in selection could not be updated: {error}");
+                std::process::exit(1);
+            }
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
             std::process::exit(0);
         }
@@ -224,6 +230,12 @@ pub async fn run_login_with_api_key(
         config.auth_keyring_backend_kind(),
     ) {
         Ok(_) => {
+            if let Err(error) =
+                codex_login::PrimaryLoginStore::new(config.codex_home.to_path_buf()).use_root()
+            {
+                eprintln!("Login saved, but host sign-in selection could not be updated: {error}");
+                std::process::exit(1);
+            }
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
             std::process::exit(0);
         }
@@ -264,6 +276,12 @@ pub async fn run_login_with_access_token(
     .await
     {
         Ok(_) => {
+            if let Err(error) =
+                codex_login::PrimaryLoginStore::new(config.codex_home.to_path_buf()).use_root()
+            {
+                eprintln!("Login saved, but host sign-in selection could not be updated: {error}");
+                std::process::exit(1);
+            }
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
             std::process::exit(0);
         }
@@ -353,6 +371,12 @@ pub async fn run_login_with_device_code(
     }
     match run_device_code_login(opts).await {
         Ok(()) => {
+            if let Err(error) =
+                codex_login::PrimaryLoginStore::new(config.codex_home.to_path_buf()).use_root()
+            {
+                eprintln!("Login saved, but host sign-in selection could not be updated: {error}");
+                std::process::exit(1);
+            }
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
             std::process::exit(0);
         }
@@ -407,6 +431,12 @@ pub async fn run_login_with_device_code_fallback_to_browser(
 
     match run_device_code_login(opts.clone()).await {
         Ok(()) => {
+            if let Err(error) =
+                codex_login::PrimaryLoginStore::new(config.codex_home.to_path_buf()).use_root()
+            {
+                eprintln!("Login saved, but host sign-in selection could not be updated: {error}");
+                std::process::exit(1);
+            }
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
             std::process::exit(0);
         }
@@ -418,6 +448,16 @@ pub async fn run_login_with_device_code_fallback_to_browser(
                         print_login_server_start(server.actual_port, &server.auth_url);
                         match server.block_until_done().await {
                             Ok(()) => {
+                                if let Err(error) = codex_login::PrimaryLoginStore::new(
+                                    config.codex_home.to_path_buf(),
+                                )
+                                .use_root()
+                                {
+                                    eprintln!(
+                                        "Login saved, but host sign-in selection could not be updated: {error}"
+                                    );
+                                    std::process::exit(1);
+                                }
                                 eprintln!("{LOGIN_SUCCESS_MESSAGE}");
                                 std::process::exit(0);
                             }
@@ -510,6 +550,30 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
 pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let auth_route_config = config.auth_route_config();
+    let primary = codex_login::PrimaryLoginStore::new(config.codex_home.to_path_buf());
+    let source = match primary.load() {
+        Ok(state) => state.source,
+        Err(error) => {
+            eprintln!("Error reading host sign-in source: {error}");
+            std::process::exit(1);
+        }
+    };
+    if matches!(
+        source,
+        codex_login::PrimaryLoginSource::Profile { .. }
+            | codex_login::PrimaryLoginSource::SignedOut
+    ) {
+        match primary.sign_out() {
+            Ok(_) => {
+                eprintln!("Host signed out. Account-pool credentials were retained.");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("Error signing out host: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let logged_out = match logout_with_revoke(
         &config.codex_home,

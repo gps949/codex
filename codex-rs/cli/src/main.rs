@@ -54,6 +54,7 @@ mod account_cmd;
 mod account_config;
 mod account_manager_cmd;
 mod account_manager_tui;
+mod account_primary_cmd;
 mod account_selector;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
@@ -565,7 +566,8 @@ struct LogoutCommand {
         codex account set \"Work Pro\" --priority 0\n  \
         codex account use \"Work Pro\"\n  \
         codex account pool\n\n\
-        Labels are optional human names stored locally. Prefer them for day-to-day\n\
+        Labels are optional; unnamed accounts display their email. Select a unique\n\
+        label or email for day-to-day commands; use a full ID when ambiguous.\n\
         commands (`use`, `set`, `enable`, `disable`, `login`, `remove`). Opaque\n\
         profile ids (acct-…) stay hidden in list/pool unless you pass --show-profile.\n\n\
         The pool keeps separate profiles for the same person in different ChatGPT\n\
@@ -580,6 +582,8 @@ struct AccountCommand {
 
 #[derive(Debug, clap::Subcommand)]
 enum AccountSubcommand {
+    /// Manage the host sign-in used by Remote Control independently of pool inference.
+    Primary(account_primary_cmd::AccountPrimaryArgs),
     /// Open the complete account manager in a paired browser.
     Manage(account_manager_cmd::AccountManageArgs),
     /// Add another Codex account profile via ChatGPT login.
@@ -1846,6 +1850,9 @@ async fn cli_main(
                 root_config_overrides.clone(),
             );
             match account_cli.action {
+                AccountSubcommand::Primary(args) => {
+                    account_primary_cmd::run(account_cli.config_overrides, args).await?;
+                }
                 AccountSubcommand::Manage(args) => {
                     account_manager_cmd::run(account_cli.config_overrides, args).await?;
                 }
