@@ -596,8 +596,12 @@ impl RemoteControlWebsocket {
             ) {
                 return true;
             }
-            let auth = match load_remote_control_auth(&self.auth_manager).await {
-                Ok(auth) => auth,
+            let account_id = match self
+                .auth_manager
+                .account_id_for_persisted_preference()
+                .await
+            {
+                Ok(account_id) => account_id,
                 Err(err) => {
                     info!(
                         error = %err,
@@ -617,7 +621,7 @@ impl RemoteControlWebsocket {
             let enrollment = state_db
                 .get_remote_control_enrollment(
                     &remote_control_target.websocket_url,
-                    &auth.account_id,
+                    &account_id,
                     app_server_client_name,
                 )
                 .await;

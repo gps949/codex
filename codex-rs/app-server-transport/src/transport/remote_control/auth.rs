@@ -49,6 +49,26 @@ impl RemoteControlAuth {
         self.owner.ensure_current()
     }
 
+    /// Resolves a local SQLite preference without loading network policy or refreshing tokens.
+    /// An uncached host-managed identity still uses the normal request-time auth path.
+    pub(super) async fn account_id_for_persisted_preference(&self) -> io::Result<String> {
+        self.ensure_current()?;
+        if let Some(auth) = self.manager.auth_cached() {
+            if !auth.uses_codex_backend() {
+                return Err(io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    "remote control requires ChatGPT authentication",
+                ));
+            }
+            if let Some(account_id) = auth.get_account_id() {
+                self.ensure_current()?;
+                return Ok(account_id);
+            }
+        }
+        let auth = load_remote_control_auth(self).await?;
+        Ok(auth.account_id)
+    }
+
     pub(super) fn unauthorized_recovery(&self) -> RemoteControlRecovery {
         RemoteControlRecovery {
             auth: self.clone(),

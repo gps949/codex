@@ -346,15 +346,30 @@ async fn fifth_seat_metadata_recovery_prevents_paid_api_fallback() -> anyhow::Re
         })
         .collect::<Vec<_>>();
     usage_profiles.sort();
+    // Discovery stops once a usable subscription responds; other concurrent reads need not finish.
     assert_eq!(
-        usage_profiles,
-        vec![
-            "account-seat-0",
-            "account-seat-1",
-            "account-seat-2",
-            "account-seat-3",
-            "account-seat-4"
-        ]
+        usage_profiles
+            .iter()
+            .filter(|profile| profile.as_str() == "account-seat-4")
+            .count(),
+        1,
+        "the restored seat must be checked before resuming subscription inference",
     );
+    assert!(
+        usage_profiles
+            .windows(2)
+            .all(|profiles| profiles[0] != profiles[1]),
+        "a recovery pass must not recheck an already observed seat",
+    );
+    assert!(usage_profiles.iter().all(|profile| matches!(
+        profile.as_str(),
+        "account-seat-0"
+            | "account-seat-1"
+            | "account-seat-2"
+            | "account-seat-3"
+            | "account-seat-4"
+    )));
+    subscription.verify().await;
+    api.verify().await;
     Ok(())
 }

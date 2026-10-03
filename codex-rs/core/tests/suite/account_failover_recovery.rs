@@ -836,6 +836,12 @@ async fn tool_side_effect_is_not_repeated_when_follow_up_sampling_fails() -> any
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_eligible_target_rejects_next_turn_without_sampling() -> anyhow::Result<()> {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(ResponseTemplate::new(/*status*/ 503))
+        .expect(/*requests*/ 2)
+        .mount(&server)
+        .await;
     let resets_at = chrono::Utc::now().timestamp() + 3600;
     let responses = mount_response_sequence(
         &server,
@@ -857,15 +863,20 @@ async fn no_eligible_target_rejects_next_turn_without_sampling() -> anyhow::Resu
         ],
     )
     .await;
+    let backend = format!("{}/backend-api", server.uri());
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_pre_build_hook(write_account_pool_fixture)
-        .with_config(|config| config.account_pool.resume_after_reset = Some(false));
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend;
+            config.account_pool.resume_after_reset = Some(false);
+            config.account_pool.window_warmup = Some(false);
+        });
     let fixture = builder.build_with_auto_env(&server).await?;
 
-    for (prompt, expected_warning_count) in [
-        ("exhaust the pool", 2),
-        ("do not sample without an eligible account", 1),
+    for (prompt, expected_switch_count) in [
+        ("exhaust the pool", 1),
+        ("do not sample without an eligible account", 0),
     ] {
         fixture
             .codex
@@ -885,10 +896,33 @@ async fn no_eligible_target_rejects_next_turn_without_sampling() -> anyhow::Resu
             }
         }
         assert_eq!(errors, vec![Some(CodexErrorInfo::UsageLimitExceeded)]);
-        assert_eq!(warnings.len(), expected_warning_count);
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| warning.contains("switched to `backup-acct`"))
+                .count(),
+            expected_switch_count,
+        );
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| {
+                    warning.contains(
+                        "Quota recovery check is incomplete: 0/2 accounts have a verified denial.",
+                    ) && warning.contains("Refresh quota in `/account` or `codex account manage`")
+                })
+                .count(),
+            1,
+            "failed quota reads must be reported as incomplete rather than verified exhaustion",
+        );
         assert!(warnings.last().is_some_and(|warning| {
             warning.contains("No configured Codex account is currently available")
         }));
+        assert_eq!(
+            responses.requests().len(),
+            2,
+            "neither incomplete metadata nor the next turn may cause another inference request",
+        );
     }
 
     let requests = responses.requests();
@@ -907,6 +941,7 @@ async fn no_eligible_target_rejects_next_turn_without_sampling() -> anyhow::Resu
             Some("Bearer access-backup".to_string()),
         ],
     );
+    server.verify().await;
 
     Ok(())
 }

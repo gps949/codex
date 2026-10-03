@@ -64,7 +64,10 @@ impl RemoteControlSession {
             .state_db
             .as_deref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, RemoteControlUnavailable))?;
-        let auth = super::auth::load_remote_control_auth(&self.auth_manager).await?;
+        let account_id = self
+            .auth_manager
+            .account_id_for_persisted_preference()
+            .await?;
         let remote_control_target = normalize_remote_control_url(&self.remote_control_url)?;
         let app_server_client_name = self.pairing_persistence_key(app_server_client_name)?;
         let _persistence =
@@ -72,7 +75,7 @@ impl RemoteControlSession {
         let enrollment = state_db
             .get_remote_control_enrollment(
                 &remote_control_target.websocket_url,
-                &auth.account_id,
+                &account_id,
                 app_server_client_name.as_deref(),
             )
             .await
