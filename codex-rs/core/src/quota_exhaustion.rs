@@ -9,6 +9,17 @@ use codex_protocol::account::PlanType;
 use codex_protocol::error::UsageLimitReachedError;
 use codex_protocol::protocol::RateLimitReachedType;
 
+/// A retained window is fresh only according to its own observation time.
+pub(crate) fn rate_limit_window_is_fresh(
+    window: &codex_login::AccountRateLimitWindow,
+    observed_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    observed_at
+        .is_some_and(|observed| observed <= now && now - observed < chrono::Duration::minutes(30))
+        && window.resets_at.is_none_or(|reset| reset > now)
+}
+
 /// Returns `false` when advisory plan metadata disagrees with the bound profile.
 pub(crate) async fn usage_limit_metadata_matches_profile(
     lease: &AccountLease,
@@ -56,25 +67,43 @@ fn is_workspace_rate_limit(reached_type: RateLimitReachedType) -> bool {
     )
 }
 
-/// A named model bucket does not exhaust the account's ordinary Codex allowance.
+/// A metered model bucket does not exhaust the account's ordinary Codex allowance.
 /// Workspace credit limits and reserve fallbacks still belong to account recovery.
 pub(crate) fn is_model_specific_usage_limit(limit: &UsageLimitReachedError) -> bool {
+    let Some(snapshot) = limit.rate_limits.as_ref() else {
+        return false;
+    };
     if limit
         .rate_limit_reached_type
         .is_some_and(is_workspace_rate_limit)
+        || snapshot
+            .rate_limit_reached_type
+            .is_some_and(is_workspace_rate_limit)
     {
         return false;
     }
-    limit
-        .rate_limits
-        .as_ref()
-        .and_then(|snapshot| snapshot.limit_name.as_deref())
+    let limit_id = snapshot
+        .limit_id
+        .as_deref()
         .map(str::trim)
-        .is_some_and(|name| {
-            !name.is_empty()
-                && !name.eq_ignore_ascii_case("codex")
-                && !name.eq_ignore_ascii_case("gpt-reserve")
-        })
+        .filter(|id| !id.is_empty());
+    let limit_name = snapshot
+        .limit_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    // Reserve rejections can carry an ordinary-looking model id. Keep their explicit
+    // fallback signal account-scoped even when the metered id and display name differ.
+    if limit_id
+        .into_iter()
+        .chain(limit_name)
+        .any(|scope| scope.eq_ignore_ascii_case("gpt-reserve"))
+    {
+        return false;
+    }
+    limit_id
+        .or(limit_name)
+        .is_some_and(|scope| !scope.eq_ignore_ascii_case("codex"))
 }
 
 pub(crate) fn plans_share_quota_bucket(left: PlanType, right: PlanType) -> bool {

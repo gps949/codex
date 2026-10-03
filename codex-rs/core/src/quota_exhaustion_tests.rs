@@ -4,9 +4,82 @@ use codex_protocol::auth::PlanType as AuthPlanType;
 use codex_protocol::error::UsageLimitReachedError;
 use codex_protocol::protocol::RateLimitReachedType;
 use codex_protocol::protocol::RateLimitSnapshot;
+use pretty_assertions::assert_eq;
 
+use super::is_model_specific_usage_limit;
 use super::plans_share_quota_bucket;
 use super::usage_limit_metadata_matches_profile;
+
+#[test]
+fn metered_bucket_scope_does_not_depend_on_a_display_name() {
+    for (id, name, expected) in [
+        (Some("fast-model"), None, true),
+        (Some("fast-model"), Some("gpt-fast"), true),
+        (Some("codex"), Some("gpt-fast"), false),
+        (Some("gpt-reserve"), Some("Reserve allocation"), false),
+        (Some("fast-model"), Some("gpt-reserve"), false),
+        (None, Some("gpt-fast"), true),
+        (None, Some(" GPT-Reserve "), false),
+        (None, Some("codex"), false),
+        (Some("  "), Some("gpt-fast"), true),
+        (None, None, false),
+    ] {
+        let limit = UsageLimitReachedError {
+            plan_type: None,
+            resets_at: None,
+            limit_window_minutes: None,
+            rate_limits: Some(Box::new(RateLimitSnapshot {
+                limit_id: id.map(str::to_string),
+                limit_name: name.map(str::to_string),
+                normal_model_slug: None,
+                plan_type: None,
+                primary: None,
+                secondary: None,
+                credits: None,
+                individual_limit: None,
+                spend_control_reached: None,
+                rate_limit_reached_type: None,
+            })),
+            promo_message: None,
+            rate_limit_reached_type: None,
+        };
+        assert_eq!(
+            is_model_specific_usage_limit(&limit),
+            expected,
+            "{id:?}/{name:?}"
+        );
+    }
+}
+
+#[test]
+fn workspace_rejection_overrides_a_model_bucket_in_either_metadata_location() {
+    let mut limit = UsageLimitReachedError {
+        plan_type: None,
+        resets_at: None,
+        limit_window_minutes: None,
+        rate_limits: Some(Box::new(RateLimitSnapshot {
+            limit_id: Some("fast-model".to_string()),
+            limit_name: None,
+            normal_model_slug: None,
+            plan_type: None,
+            primary: None,
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            spend_control_reached: None,
+            rate_limit_reached_type: None,
+        })),
+        promo_message: None,
+        rate_limit_reached_type: None,
+    };
+    assert!(is_model_specific_usage_limit(&limit));
+    limit.rate_limit_reached_type = Some(RateLimitReachedType::WorkspaceOwnerCreditsDepleted);
+    assert!(!is_model_specific_usage_limit(&limit));
+    limit.rate_limit_reached_type = None;
+    limit.rate_limits.as_mut().unwrap().rate_limit_reached_type =
+        Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached);
+    assert!(!is_model_specific_usage_limit(&limit));
+}
 
 #[test]
 fn workspace_and_consumer_plans_do_not_share_quota_bucket() {

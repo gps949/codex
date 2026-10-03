@@ -366,6 +366,79 @@ async fn suspended_pool_reads_stay_logged_out_and_failed_resume_stays_suspended(
 }
 
 #[tokio::test]
+async fn preemptive_rotation_uses_the_depleted_windows_own_observation() -> anyhow::Result<()> {
+    for primary_observed_at in [
+        Some(Utc::now() - chrono::Duration::minutes(31)),
+        None,
+        Some(Utc::now() + chrono::Duration::minutes(1)),
+    ] {
+        let home = TempDir::new()?;
+        let profiles = AccountProfileStore::new(home.path().to_path_buf());
+        for (name, priority) in [("primary", 0), ("backup", 10)] {
+            let profile = profiles.allocate_profile(Some(name.to_string()), priority)?;
+            let claims = serde_json::json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_user_id": name,
+                    "chatgpt_account_id": name,
+                    "chatgpt_plan_type": "pro",
+                }
+            });
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&claims)?);
+            std::fs::write(
+                profile.credential_home.join("auth.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "tokens": {
+                        "id_token": format!("e30.{payload}.sig"),
+                        "access_token": format!("{name}-access"),
+                        "refresh_token": format!("{name}-refresh"),
+                        "account_id": name,
+                    },
+                    "last_refresh": "2099-01-01T00:00:00Z",
+                }))?,
+            )?;
+            profiles.complete_profile(&profile.id)?;
+        }
+        let mut config = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(home.path().to_path_buf())
+            .build()
+            .await?;
+        config.account_pool.window_warmup = Some(false);
+        let execution_auth = ExecutionAuth::legacy(AuthManager::from_auth_for_testing(
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        ));
+        assert!(execution_auth.ensure_runtime_from_config(&config).await?);
+        let pool = execution_auth.account_pool().expect("installed pool");
+        let profile_id = pool.lease()?.profile().id.clone();
+        let now = Utc::now();
+        pool.update_rate_limits(
+            &profile_id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 99.0,
+                    resets_at: None,
+                    window_minutes: Some(300),
+                }),
+                secondary: Some(AccountRateLimitWindow {
+                    used_percent: 20.0,
+                    resets_at: None,
+                    window_minutes: Some(10080),
+                }),
+                observed_at: Some(now),
+                window_observed_at: Some(codex_login::AccountWindowObservationTimes {
+                    primary: primary_observed_at,
+                    secondary: Some(now),
+                }),
+            },
+        )?;
+        let before = pool.snapshots();
+        assert!(execution_auth.preemptive_rotation(95.0).is_none());
+        assert_eq!(pool.snapshots(), before);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn running_warmup_adopts_new_config_without_canceling_the_task() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
     let mut config = ConfigBuilder::without_managed_config_for_tests()

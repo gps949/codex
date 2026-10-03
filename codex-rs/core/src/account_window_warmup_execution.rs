@@ -480,20 +480,25 @@ pub(super) fn profile_allows_generation(
         return Ok(false);
     }
     let now = Utc::now();
-    let quota_fresh = snapshot
-        .rate_limits
-        .observed_at
-        .is_some_and(|observed| observed <= now && now - observed < chrono::Duration::minutes(30));
     if account_primary_started(&snapshot.rate_limits)
-        || quota_fresh
-            && snapshot
-                .rate_limits
-                .primary
-                .iter()
-                .chain(snapshot.rate_limits.secondary.iter())
-                .any(|window| {
-                    window.used_percent >= 100.0 && window.resets_at.is_none_or(|reset| reset > now)
-                })
+        || [
+            (
+                snapshot.rate_limits.primary.as_ref(),
+                snapshot.rate_limits.primary_observed_at(),
+            ),
+            (
+                snapshot.rate_limits.secondary.as_ref(),
+                snapshot.rate_limits.secondary_observed_at(),
+            ),
+        ]
+        .into_iter()
+        .any(|(window, observed_at)| {
+            window.is_some_and(|window| {
+                window.used_percent.is_finite()
+                    && window.used_percent >= 100.0
+                    && crate::quota_exhaustion::rate_limit_window_is_fresh(window, observed_at, now)
+            })
+        })
     {
         return Ok(false);
     }

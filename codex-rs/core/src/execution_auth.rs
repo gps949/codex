@@ -517,6 +517,28 @@ impl ExecutionAuth {
         }
     }
 
+    /// Captures maintenance identity for a persisted quota refusal without authorizing inference.
+    pub(crate) fn quota_rescue_identity(&self) -> Option<ExecutionAuthLease> {
+        if self.pool_is_suspended() {
+            return None;
+        }
+        let pool = self.account_pool()?;
+        if pool.lease().is_ok() {
+            return None;
+        }
+        let lease = pool.identity_lease().ok()?;
+        pool.snapshots()
+            .iter()
+            .any(|snapshot| {
+                snapshot.profile.id == lease.profile().id
+                    && matches!(
+                        snapshot.availability,
+                        codex_login::AccountAvailability::Exhausted { .. }
+                    )
+            })
+            .then(|| ExecutionAuthLease::from_account_lease(lease))
+    }
+
     /// Compatibility manager for account-aware side systems that have not yet moved to leases.
     /// In pooled mode the AccountPoolRuntime keeps this outer manager synchronized with the active
     /// account; inference itself must use [`Self::active_lease`] instead.
@@ -555,8 +577,6 @@ impl ExecutionAuth {
     /// every successful response. The rotation is skipped when no window has crossed `threshold`,
     /// when the data is stale or already reset, or when no other account could take over.
     pub(crate) fn preemptive_rotation(&self, threshold: f64) -> Option<PreemptiveSwitch> {
-        const STALE_OBSERVATION_CUTOFF: chrono::Duration = chrono::Duration::minutes(30);
-
         let pool = self.account_pool()?;
         let lease = pool.lease().ok()?;
         let snapshot = pool
@@ -565,22 +585,25 @@ impl ExecutionAuth {
             .find(|snapshot| snapshot.profile.id == lease.profile().id)?;
 
         let now = Utc::now();
-        let observed_recently = snapshot
-            .rate_limits
-            .observed_at
-            .is_some_and(|observed_at| now - observed_at < STALE_OBSERVATION_CUTOFF);
         let depleted_windows = [
-            snapshot.rate_limits.primary.as_ref(),
-            snapshot.rate_limits.secondary.as_ref(),
+            (
+                snapshot.rate_limits.primary.as_ref(),
+                snapshot.rate_limits.primary_observed_at(),
+            ),
+            (
+                snapshot.rate_limits.secondary.as_ref(),
+                snapshot.rate_limits.secondary_observed_at(),
+            ),
         ]
         .into_iter()
-        .flatten()
-        .filter(|window| window.used_percent >= threshold)
-        .filter(|window| match window.resets_at {
+        .filter_map(|(window, observed_at)| window.map(|window| (window, observed_at)))
+        .filter(|(window, _)| window.used_percent.is_finite() && window.used_percent >= threshold)
+        .filter(|(window, observed_at)| match window.resets_at {
             // A window whose reset already passed no longer constrains the account.
             Some(resets_at) => resets_at > now,
-            None => observed_recently,
-        });
+            None => crate::quota_exhaustion::rate_limit_window_is_fresh(window, *observed_at, now),
+        })
+        .map(|(window, _)| window);
 
         // Every depleted window still constrains this profile. Parking only until the
         // highest-used window resets can return to the preferred account while another

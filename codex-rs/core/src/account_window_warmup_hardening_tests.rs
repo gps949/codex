@@ -86,6 +86,51 @@ async fn warmup_missing_preflight_does_not_blindly_generate() -> anyhow::Result<
 }
 
 #[tokio::test]
+async fn warmup_discovers_quota_when_another_window_refreshed_stale_exhaustion()
+-> anyhow::Result<()> {
+    for secondary_observed_at in [
+        Some(Utc::now() - chrono::Duration::minutes(31)),
+        None,
+        Some(Utc::now() + chrono::Duration::minutes(1)),
+    ] {
+        let fixture = warmup_request_fixture(/*enable_agent_identity*/ false).await?;
+        let now = Utc::now();
+        fixture.pool.update_rate_limits(
+            &fixture.profile_id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    resets_at: Some(now + chrono::Duration::hours(5)),
+                    window_minutes: Some(300),
+                }),
+                secondary: Some(AccountRateLimitWindow {
+                    used_percent: 100.0,
+                    resets_at: None,
+                    window_minutes: Some(10080),
+                }),
+                observed_at: Some(now),
+                window_observed_at: Some(codex_login::AccountWindowObservationTimes {
+                    primary: Some(now),
+                    secondary: secondary_observed_at,
+                }),
+            },
+        )?;
+        run_warmup_pass(&fixture.pool, &fixture.config).await?;
+        assert_eq!(generating_requests(&fixture).await, 1);
+        assert!(
+            fixture
+                .server
+                .received_requests()
+                .await
+                .expect("requests")
+                .iter()
+                .any(|request| request.url.path() == "/api/codex/usage")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn interrupted_warmup_is_only_confirmed_without_another_generating_request()
 -> anyhow::Result<()> {
     let fixture = warmup_request_fixture_with_sse(
