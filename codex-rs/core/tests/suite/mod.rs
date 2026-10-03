@@ -42,6 +42,7 @@ mod account_credit_expiry_reminders;
 mod account_failover;
 mod account_failover_recovery;
 mod account_pool_strategy;
+mod account_recovered_reentry;
 mod account_request_auth;
 mod additional_context;
 #[path = "agent_control_tests.rs"]

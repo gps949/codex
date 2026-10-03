@@ -1881,6 +1881,11 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
+    let mut recovery_budget = crate::account_pool_recovery::SamplingRecoveryBudget::new(
+        execution_auth
+            .account_pool()
+            .map_or(0, |pool| pool.snapshots().len()),
+    );
     // Steering must return control to the input queue while dropping any unstarted rescue.
     macro_rules! await_recovery {
         ($future:expr, $retained_input:expr) => {
@@ -1909,8 +1914,14 @@ async fn run_sampling_request(
         } {
             Ok(binding) => binding,
             Err(_) => {
-                if await_recovery!(
-                    crate::account_pool_recovery::probe_for_recovery(
+                if !recovery_budget.can_retry() {
+                    sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+                        message: "Repeated recovery checks did not restore usable quota. Refresh the account pool and retry.".into(),
+                    })).await;
+                    return Err(pool_unavailable_error(execution_auth.as_ref()));
+                }
+                let recovery = await_recovery!(
+                    crate::account_pool_recovery::probe_for_final_recovery(
                         execution_auth.as_ref(),
                         turn_context.config.as_ref(),
                         &cancellation_token,
@@ -1919,8 +1930,19 @@ async fn run_sampling_request(
                         .take()
                         .or_else(|| original_input.take())
                         .unwrap_or_default()
-                ) {
+                );
+                if recovery == crate::account_pool_recovery::FinalRecoveryOutcome::Recovered {
+                    recovery_budget.record_recovery();
                     continue;
+                }
+                if let crate::account_pool_recovery::FinalRecoveryOutcome::Incomplete {
+                    checked,
+                    total,
+                } = recovery
+                {
+                    sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+                        message: format!("Quota recovery check is incomplete: {checked}/{total} accounts have a verified denial. Refresh quota in `/account` or `codex account manage`, then retry."),
+                    })).await;
                 }
                 if let Some(identity) = execution_auth.quota_rescue_identity()
                     && await_recovery!(
@@ -1937,6 +1959,7 @@ async fn run_sampling_request(
                     )
                     .is_some()
                 {
+                    recovery_budget.record_recovery();
                     continue;
                 }
                 if let Some(target) = await_recovery!(
@@ -1965,6 +1988,7 @@ async fn run_sampling_request(
                     continue;
                 }
                 if execution_auth.active_lease().is_some() {
+                    recovery_budget.record_recovery();
                     execution_auth.compatibility_auth_manager().reload().await;
                     sess.services
                         .model_client
@@ -2107,6 +2131,15 @@ async fn run_sampling_request(
                             history_after.annotated_items(),
                         ));
                     }
+                    if checkpoint.retry_mode()
+                        == crate::failover_checkpoint::FailoverRetryMode::ContinueFromDurableHistory
+                    {
+                        recovery_budget = crate::account_pool_recovery::SamplingRecoveryBudget::new(
+                            execution_auth
+                                .account_pool()
+                                .map_or(0, |pool| pool.snapshots().len()),
+                        );
+                    }
 
                     match handle_sampling_failover(
                         execution_auth.as_ref(),
@@ -2185,9 +2218,16 @@ async fn run_sampling_request(
                                 })).await;
                                 return Err(err);
                             }
-                            if crate::account_pool_recovery::can_continue(retry_mode)
-                                && await_recovery!(
-                                    crate::account_pool_recovery::probe_for_recovery(
+                            if !recovery_budget.can_retry() {
+                                sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+                                    message: "Repeated recovery checks did not restore usable quota. Refresh the account pool and retry.".into(),
+                                })).await;
+                                return Err(err);
+                            }
+                            let recovery = if crate::account_pool_recovery::can_continue(retry_mode)
+                            {
+                                Some(await_recovery!(
+                                    crate::account_pool_recovery::probe_for_final_recovery(
                                         execution_auth.as_ref(),
                                         turn_context.config.as_ref(),
                                         &cancellation_token,
@@ -2195,8 +2235,14 @@ async fn run_sampling_request(
                                     original_input
                                         .take()
                                         .unwrap_or_else(|| prompt.input.clone())
-                                )
+                                ))
+                            } else {
+                                None
+                            };
+                            if crate::account_pool_recovery::can_continue(retry_mode)
+                                && recovery == Some(crate::account_pool_recovery::FinalRecoveryOutcome::Recovered)
                             {
+                                recovery_budget.record_recovery();
                                 execution_auth.compatibility_auth_manager().reload().await;
                                 sess.services
                                     .model_client
@@ -2214,6 +2260,17 @@ async fn run_sampling_request(
                                 turn_context.turn_timing_state.record_sampling_retry();
                                 continue;
                             }
+                            if let Some(
+                                crate::account_pool_recovery::FinalRecoveryOutcome::Incomplete {
+                                    checked,
+                                    total,
+                                },
+                            ) = recovery
+                            {
+                                sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+                                    message: format!("Quota recovery check is incomplete: {checked}/{total} accounts have a verified denial. Refresh quota in `/account` or `codex account manage`, then retry."),
+                                })).await;
+                            }
                             // Opt-in last resort before failing the turn: redeem an earned
                             // rate-limit reset credit and continue on the reactivated account.
                             if crate::account_pool_recovery::can_continue(retry_mode)
@@ -2229,6 +2286,7 @@ async fn run_sampling_request(
                                         .unwrap_or_else(|| prompt.input.clone())
                                 )
                             {
+                                recovery_budget.record_recovery();
                                 execution_auth.compatibility_auth_manager().reload().await;
                                 let safe_to_continue =
                                     crate::account_pool_recovery::can_continue(retry_mode);
@@ -2322,6 +2380,7 @@ async fn run_sampling_request(
                                         .unwrap_or_else(|| prompt.input.clone())
                                 );
                                 if recovered {
+                                    recovery_budget.record_recovery();
                                     execution_auth.compatibility_auth_manager().reload().await;
                                     sess.services
                                         .model_client
@@ -2380,6 +2439,7 @@ async fn run_sampling_request(
                             if crate::account_pool_recovery::can_continue(retry_mode)
                                 && execution_auth.active_lease().is_some()
                             {
+                                recovery_budget.record_recovery();
                                 execution_auth.compatibility_auth_manager().reload().await;
                                 sess.services
                                     .model_client

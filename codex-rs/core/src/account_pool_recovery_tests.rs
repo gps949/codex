@@ -5,6 +5,28 @@ use pretty_assertions::assert_eq;
 use tokio_util::sync::CancellationToken;
 
 use super::RecoveryWaitBudget;
+use super::SamplingRecoveryBudget;
+
+#[test]
+fn sampling_recovery_budget_does_not_renew_when_execution_identity_changes() {
+    let mut budget = SamplingRecoveryBudget::new(/*profile_count*/ 1);
+    assert!(budget.can_retry());
+    for _ in 0..3 {
+        budget.record_recovery();
+    }
+    assert!(!budget.can_retry());
+    assert!(SamplingRecoveryBudget::new(/*profile_count*/ 1).can_retry());
+}
+
+#[test]
+fn oversized_pools_have_a_bounded_no_progress_recovery_allowance() {
+    let mut budget = SamplingRecoveryBudget::new(/*profile_count*/ 1_000);
+    for _ in 0..16 {
+        assert!(budget.can_retry());
+        budget.record_recovery();
+    }
+    assert!(!budget.can_retry());
+}
 
 #[tokio::test(start_paused = true)]
 async fn repeated_waits_share_allowance_without_charging_productive_time() {

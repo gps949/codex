@@ -14,9 +14,33 @@ use crate::failover_turn::earliest_exhausted_reset;
 
 #[path = "account_pool_metadata_recovery.rs"]
 mod metadata;
+pub(crate) use metadata::FinalRecoveryOutcome;
 pub(crate) use metadata::SpendingRecoveryCoverage;
 pub(crate) use metadata::coverage_for_spending;
+pub(crate) use metadata::probe_for_final_recovery;
 pub(crate) use metadata::probe_for_recovery;
+
+/// Caps recovered-account retries of one sampling request without durable progress.
+/// Ordinary failover to previously available seats does not consume this allowance.
+pub(crate) struct SamplingRecoveryBudget {
+    remaining: usize,
+}
+
+impl SamplingRecoveryBudget {
+    pub(crate) fn new(profile_count: usize) -> Self {
+        Self {
+            remaining: profile_count.saturating_add(2).clamp(3, 16),
+        }
+    }
+
+    pub(crate) fn can_retry(&self) -> bool {
+        self.remaining > 0
+    }
+
+    pub(crate) fn record_recovery(&mut self) {
+        self.remaining = self.remaining.saturating_sub(1);
+    }
+}
 
 /// Cumulative waiting allowance shared by every sampling step of one user turn.
 pub(crate) struct RecoveryWaitBudget {
