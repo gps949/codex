@@ -8,8 +8,12 @@ Run on the host that stores your Codex accounts:
 
 ```sh
 codex account manage
+# Start the browser manager in Simplified Chinese:
+codex account manage --lang zh-CN
 # Terminal-only alternative:
 codex account manage --tui
+# Chinese terminal interface:
+codex account manage --tui --lang zh-CN
 # Print the browser URL without opening it:
 codex account manage --no-open
 ```
@@ -17,6 +21,18 @@ codex account manage --no-open
 The browser manager is a separate process. Keep it running; Ctrl+C closes it. It shares profiles, selection and quota observations with Codex processes using the same `CODEX_HOME`. Existing requests keep their captured identity; changes apply at safe subsequent request boundaries.
 
 The default address is loopback with a random port. The printed link pairs your browser; its code grants account administration. The code is removed from the URL after pairing and stored in origin-isolated browser session storage, not cookies or local storage. Pair again after restarting the manager.
+
+### Inside the official mobile Remote app
+
+Try `/account manage` in a Remote conversation, or `/account manage zh-CN` for Chinese. The host sends a native question menu with **Show overview**, account details, pagination, language selection and **Close**. This first stage is read-only: it shows a cached snapshot without inference, account switching or credit redemption. Reopen to load current local metadata.
+
+Use `/account capabilities` to inspect this connection's declared UI formats and observed native-question response. A successful response establishes a protocol round trip; official iOS/Android rendering and tap behavior still require device verification. A timeout only means no answer arrived. An explicit method-not-found response means this connection did not handle native questions; `/account list` and `/account show <label>` remain available.
+
+Questions close after 45 seconds without an answer. The menu lasts at most three minutes or twelve choices. Stop, a new message, disconnect or unsubscribe cancels it before another normal turn starts. Reconnect with `/account manage`; menu state is not restored in conversation history.
+
+The existing WebUI and full terminal manager still run separately. Remote does not forward their HTTP port or terminal keyboard input. The native menu uses the conversation's question controls.
+
+### External phone browser or SSH access
 
 For access from a phone, prefer an SSH tunnel or your own authenticated HTTPS reverse proxy. Choose a fixed host port if needed:
 
@@ -37,7 +53,7 @@ Configure that reverse proxy yourself and preserve its browser Host header. Use 
 
 The overview recommends a next action for the current pool: add your first account, finish a login, refresh exhausted subscriptions, resume a paused pool, or return from a billed API account. Each account also has a primary action suited to its current status. Advanced information stays in account details.
 
-The browser defaults to English. Use the language selector for Simplified Chinese; your account labels, URLs, model names and IDs remain unchanged. The choice applies to this browser.
+The browser defaults to English. Use `--lang zh-CN` for the opening language or the language selector for Simplified Chinese; your account labels, URLs, model names and IDs remain unchanged. The choice applies to this browser.
 
 ## Read the dashboard
 
@@ -71,7 +87,7 @@ Use Add account for device login. Open the verification URL and enter the code; 
 
 Edit labels and priority, enable or disable scheduling, and remove profiles from the same page. Removing local credentials attempts server revocation; local removal does not prove that the remote revocation succeeded. Pending-login cancellation cleans the selected credential storage without revoking credentials that were copied into an existing profile.
 
-The standalone terminal manager offers numbered accounts, login tasks and reset credits with explicit action menus. Verification codes appear while you wait at the main menu. Credit errors retain the same operation ID for review and retry; record the printed ID before closing the manager. Invalid input returns to the menu with an explanation. The browser interface provides the most detailed credit and quota layout.
+The standalone terminal manager offers numbered accounts, login tasks and reset credits with explicit action menus. It defaults to English; use `--lang zh-CN` at startup or press **G** to switch between English and Simplified Chinese. Commands, confirmation words, account names and identifiers keep their original values. Verification codes appear while you wait at the main menu. Credit errors retain the same operation ID for review and retry; record the printed ID before closing the manager. Invalid input returns to the menu with an explanation. The browser interface provides the most detailed credit and quota layout.
 
 ## Choose settings without learning the config format
 
@@ -94,3 +110,17 @@ Managed authentication, provider requirements, network, sandbox and approval pol
 Before an automatic reset credit or paid fallback is started, Codex makes a bounded metadata check of every eligible exhausted seat. A recovered free subscription wins. An incomplete or failed coverage check prevents automatic spending. Large pools continue passive rotation; they can be refreshed or selected manually.
 
 Disabling paid fallback or changing its selected account while a turn waits cancels the pending paid transition. The first outbound request checks authorization again. Requests and tool continuations that have already started retain their captured destination.
+
+## Closing the browser manager
+
+Choose **Stop manager** to stop its host listener and all paired tabs, or press Ctrl+C in its terminal. Unix hosts also handle SIGTERM. Pending logins and read requests are cancelled; a change already being written finishes safely before exit. Other Codex sessions keep running.
+
+Closing the last tab normally starts a 30-second grace period, allowing refresh or reopening. Other live tabs keep the manager running. A crashed or frozen page loses its lease after five minutes, followed by the same grace period. A manager never opened stops after ten minutes. The browser itself is managed by your operating system.
+
+## Reading the command-line inventory
+
+`codex account list` shows **used** quota. `UPDATED` is the age of the oldest displayed quota sample; each window's exact observation and reset time appears with `--details`. An elapsed reset marks the old percentage `stale` until a fresh authenticated query confirms current usage. `retry 3h29m` is the local scheduling delay, not a confirmed backend reset. Window headings use reported durations; unknown or mixed durations use primary/secondary labels. Full profile IDs remain available with `--show-profile`, and JSON/TSV output is unchanged.
+
+## Expiring reset credits
+
+During ordinary user turns, the host checks a small rotating batch of subscription profiles using authenticated credit metadata. A passive notice appears once per credit at the current 24/18/12/6/3/1-hour stage, at most six times for that credit. Missed stages are skipped; restart and duplicate profiles do not restart the notice budget. No credit is consumed by a notice. Fast completed turns can populate the cache for the next active turn without showing a late warning. Review and redeem explicitly in the dedicated manager; the native in-app menu currently provides account viewing.
