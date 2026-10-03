@@ -21,12 +21,21 @@
             <h1>Accounts</h1>
           </div>
         </div>
-        <div class="connection">
-          <span id="connection-state">Connecting</span
-          ><span id="metadata-age" class="muted"></span
-          ><button id="read-status" class="link" type="button">
-            Read status
-          </button>
+        <div class="header-tools">
+          <div class="language-control">
+            <label for="language">Language</label
+            ><select id="language">
+              <option value="en">English</option>
+              <option value="zh-CN">简体中文</option>
+            </select>
+          </div>
+          <div class="connection">
+            <span id="connection-state">Connecting</span
+            ><span id="metadata-age" class="muted"></span
+            ><button id="read-status" class="link" type="button">
+              Read status
+            </button>
+          </div>
         </div>
       </header>
       <p id="notice" class="notice" role="status">
@@ -70,6 +79,20 @@
           </div>
           <button id="automatic" type="button">Return to subscriptions</button>
         </section>
+        <section
+          id="pool-overview"
+          class="guidance panel"
+          aria-labelledby="overview-title"
+        >
+          <h2 id="overview-title">Pool overview</h2>
+          <div id="pool-counts" class="pool-counts"></div>
+          <p id="guidance-message"></p>
+          <div id="guidance-action" class="actions"></div>
+          <small
+            >Cached quota is not a guarantee. Percentages from different
+            accounts are never added together.</small
+          >
+        </section>
         <p id="paused-notice" class="message warning" hidden>
           Subscription accounts are paused. Select a signed-in account to
           resume. You can still edit accounts and repair logins here.
@@ -87,7 +110,7 @@
           <div class="section-heading">
             <div>
               <h2 id="accounts-title">
-                Subscription accounts
+                <span>Subscription accounts</span>
                 <span id="account-count" class="count"></span>
               </h2>
               <p class="muted">
@@ -116,7 +139,7 @@
               <label for="account-filter">Availability</label
               ><select id="account-filter">
                 <option value="all">All accounts</option>
-                <option value="ready">Ready</option>
+                <option value="ready">Eligible (cached)</option>
                 <option value="coolingDown">Cooling down</option>
                 <option value="needsLogin">Needs login</option>
                 <option value="disabled">Disabled</option>
@@ -159,17 +182,25 @@
           aria-labelledby="login-title"
           hidden
         >
-          <h2 id="login-title">Login activity</h2>
+          <h2 id="login-title" tabindex="-1">Login activity</h2>
           <p class="muted">
             Complete verification in your browser. This page keeps track of the
             result.
           </p>
           <div id="login-jobs" class="login-jobs"></div>
         </section>
-        <section id="api-management" aria-labelledby="api-title" hidden>
+        <details
+          id="api-management"
+          class="api-disclosure"
+          aria-labelledby="api-title"
+          hidden
+        >
+          <summary id="api-title">
+            Advanced API accounts (provider billed)
+          </summary>
           <div class="section-heading">
             <div>
-              <h2 id="api-title">API accounts</h2>
+              <h2>API accounts</h2>
               <p class="muted">
                 Separate from subscription quota. The provider must support the
                 Responses API; usage is billed by that provider.
@@ -188,7 +219,7 @@
               Configure fallback
             </button>
           </div>
-        </section>
+        </details>
         <section
           id="pool-settings"
           class="panel settings-summary"
@@ -210,7 +241,8 @@
             already in progress keep their current account.
           </p>
           <p id="poll-note">
-            Account metadata is read every 5 seconds while this page is visible.
+            Metadata reads do not refresh backend quota. Updates are faster
+            during login or quota checks, and slower while idle.
           </p>
         </footer>
       </div>

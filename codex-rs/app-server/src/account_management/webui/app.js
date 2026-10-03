@@ -375,36 +375,126 @@
       : null;
     $("selection-label").textContent = manualApi
       ? api && !api.disabled && api.hasKey
-        ? `API: ${api.label}`
-        : "API target unavailable"
+        ? t("API: {label}", { label: api.label })
+        : t("API target unavailable")
       : inventory.paused
-        ? "Subscription accounts paused"
-        : selected?.label || "No subscription account selected";
+        ? t("Subscription accounts paused")
+        : selected?.label || t("No subscription account selected");
+    $("selection-title").textContent = t(
+      manualApi ? "Current selection" : "Last selected subscription",
+    );
     $("selection-note").textContent = manualApi
       ? api
-        ? `${api.model} at ${api.baseUrl}. Usage is billed by this provider.`
-        : "Select a subscription account or an enabled API account."
+        ? t("{model} at {url}. Usage is billed by this provider.", {
+            model: api.model,
+            url: api.baseUrl,
+          })
+        : t("Select a subscription account or an enabled API account.")
       : selected && !inventory.paused
-        ? `Profile ${selected.profileId}`
-        : "Select an available account or repair its login below.";
+        ? `${guidance.status(selected.availability)}. ${guidance.reason(selected)}`
+        : t("Select an available account or repair its login below.");
     $("paused-notice").hidden = !inventory.paused;
-    $("metadata-age").textContent =
-      `Status read at ${new Date(state.lastRead).toLocaleTimeString()}`;
+    updateClocks();
+    renderGuidance();
     $("account-count").textContent = `(${inventory.accounts.length})`;
     const settings = inventory.settings || {};
-    $("settings-summary").textContent =
-      `${settings.rotation_strategy === "earliest_reset" ? "Earliest reset" : "Priority order"} · Standby warmup ${settings.window_warmup === false ? "off" : "on"} · Automatic reset credits ${settings.auto_reset_credits === "when_pool_exhausted" ? "on when pool exhausted" : "off"}`;
+    $("settings-summary").textContent = t(
+      "{strategy} · Standby warmup {warmup} · Automatic reset credits {credits}",
+      {
+        strategy: t(
+          settings.rotation_strategy === "earliest_reset"
+            ? "Earliest reset"
+            : "Priority order",
+        ),
+        warmup: t(settings.window_warmup === false ? "Off" : "On"),
+        credits: t(
+          settings.auto_reset_credits === "when_pool_exhausted"
+            ? "on when pool exhausted"
+            : "Off",
+        ),
+      },
+    );
     $("automatic").disabled = state.busy;
     $("refresh-all").disabled =
-      state.busy || !inventory.accounts.some(contactAllowed);
+      state.busy ||
+      !inventory.accounts.some(
+        (account) => contactAllowed(account) && !account.refresh?.inProgress,
+      );
     $("pending-reset").hidden = !state.redemption;
     renderAccounts();
     renderLogins();
     renderApiAccounts();
     if (focused)
-      [...$("app").querySelectorAll("button[data-focus-key]")]
+      [...$("app").querySelectorAll("[data-focus-key]")]
         .find((node) => node.dataset.focusKey === focused)
         ?.focus();
+  }
+  function runAccountAction(account, type) {
+    if (type === "refresh") return refreshQuota([account.profileId]);
+    if (type === "login") {
+      if (
+        state.inventory.loginJobs?.some(
+          (job) =>
+            job.profileId === account.profileId && job.status === "waiting",
+        )
+      )
+        return viewLogins();
+      return showLogin(account.profileId);
+    }
+    const enable = type === "enable";
+    confirmOperation(
+      enable ? "Enable account" : "Use account",
+      enable
+        ? "Allow this account to participate in the pool again. Login and quota still determine eligibility."
+        : "Use this account for subsequent requests. Requests already running keep their current identity.",
+      enable
+        ? { type: "update", profileId: account.profileId, disabled: false }
+        : { type: "use", profileId: account.profileId },
+      [
+        [t("Account"), account.label],
+        [t("Profile ID"), account.profileId],
+      ],
+    );
+  }
+  function viewLogins() {
+    $("login-section").scrollIntoView({ block: "start" });
+    $("login-title").focus();
+  }
+  function renderGuidance() {
+    const { counts, message, next } = guidance.summary(state.inventory);
+    $("pool-counts").replaceChildren(
+      ...[
+        [t("Eligible locally"), counts.eligible],
+        [t("Login needed"), counts.login],
+        [t("Cooling down"), counts.cooling],
+      ].map(([label, count]) => {
+        const item = element("span");
+        item.append(
+          element("strong", count),
+          document.createTextNode(` ${t(label)}`),
+        );
+        return item;
+      }),
+    );
+    $("guidance-message").textContent = message;
+    $("guidance-action").replaceChildren();
+    if (next) {
+      const action = button(
+        next.label,
+        () => {
+          if (next.type === "automatic") $("automatic").click();
+          else if (next.type === "add") showLogin();
+          else if (next.type === "refresh") refreshQuota();
+          else if (next.type === "loginActivity") viewLogins();
+          else if (next.type === "login") showLogin(next.profileId);
+          else showAccount(next.profileId);
+        },
+        "primary",
+      );
+      action.disabled = state.busy;
+      action.dataset.focusKey = "guidance:primary";
+      $("guidance-action").append(action);
+    }
   }
   function renderAccounts() {
     const focused = document.activeElement?.dataset.focusKey;
@@ -436,12 +526,12 @@
         !state.inventory.paused &&
         state.inventory.apiSelection?.type !== "manual"
       )
-        identity.append(element("span", "Selected", "badge active"));
+        identity.append(element("span", t("Selected"), "badge active"));
       identity.append(
         element(
           "p",
           [account.plan, account.email].filter(Boolean).join(" · ") ||
-            "Subscription account",
+            t("Subscription account"),
           "account-meta muted",
         ),
       );
@@ -449,19 +539,24 @@
       availability.append(
         element(
           "span",
-          statusNames[account.availability] || account.availability,
+          guidance.status(account.availability),
           `badge ${statusNames[account.availability] ? account.availability : ""}`,
         ),
       );
       if (account.loginState === "pending")
-        availability.append(element("small", "Login pending"));
+        availability.append(element("small", t("Login pending")));
       if (account.cooldownUntil)
         availability.append(
-          element("small", `Retry after ${date(account.cooldownUntil)}`),
+          element(
+            "small",
+            t("Retry after {date}", { date: date(account.cooldownUntil) }),
+          ),
         );
-      if (account.refresh && !account.refresh.succeeded)
+      if (account.refresh?.inProgress)
+        availability.append(element("small", t("Checking backend quota…")));
+      else if (account.refresh && !account.refresh.succeeded)
         availability.append(
-          element("small", "Refresh failed; cached quota retained"),
+          element("small", t("Refresh failed; cached quota retained")),
         );
       const primary = element("td");
       primary.append(quota(account, "primary"));
@@ -477,28 +572,41 @@
       manage.dataset.focusKey = `${account.profileId}:details`;
       manage.setAttribute(
         "aria-label",
-        `Details and actions for ${account.label}`,
+        t("Details and actions for {label}", { label: account.label }),
       );
-      const refresh = button(
-        "Refresh quota",
-        () => refreshQuota([account.profileId]),
+      const next = guidance.action(account);
+      const primaryAction = button(
+        next.label,
+        () => runAccountAction(account, next.type),
         "link",
       );
-      refresh.disabled = !contactAllowed(account) || state.busy;
-      refresh.dataset.focusKey = `${account.profileId}:refresh`;
-      refresh.setAttribute("aria-label", `Refresh quota for ${account.label}`);
-      buttons.append(manage, refresh);
+      primaryAction.disabled =
+        state.busy || Boolean(account.refresh?.inProgress);
+      primaryAction.dataset.focusKey = `${account.profileId}:primary`;
+      primaryAction.setAttribute(
+        "aria-label",
+        `${next.label}: ${account.label}`,
+      );
+      buttons.append(primaryAction, manage);
+      if (account.availability !== "ready")
+        actions.append(
+          element("small", guidance.reason(account), "action-reason"),
+        );
       actions.append(buttons);
       row.append(identity, availability, primary, secondary, actions);
       $("account-rows").append(row);
     }
     $("account-empty").hidden = accounts.length !== 0;
     $("empty-message").textContent = state.inventory.accounts.length
-      ? "Change your search or availability filter."
-      : "Add a subscription account to start managing this pool.";
+      ? t("Change your search or availability filter.")
+      : t("Add a subscription account to start managing this pool.");
     $("page-label").textContent = accounts.length
-      ? `${state.page * pageSize + 1}–${Math.min((state.page + 1) * pageSize, accounts.length)} of ${accounts.length}`
-      : "0 accounts";
+      ? t("{first}–{last} of {count}", {
+          first: state.page * pageSize + 1,
+          last: Math.min((state.page + 1) * pageSize, accounts.length),
+          count: accounts.length,
+        })
+      : t("0 accounts");
     $("previous-page").disabled = state.page === 0;
     $("next-page").disabled = state.page + 1 >= pages;
     if (focused)
@@ -515,14 +623,16 @@
       node.append(
         element(
           "h3",
-          accountById(job.profileId)?.label || job.profileId || "New account",
+          accountById(job.profileId)?.label ||
+            job.profileId ||
+            t("New account"),
         ),
         element(
           "span",
-          statusNames[job.status] || job.status,
+          guidance.status(job.status),
           `badge ${statusNames[job.status] ? job.status : ""}`,
         ),
-        element("p", job.message, "muted"),
+        element("p", t(job.message), "muted"),
       );
       if (job.userCode) node.append(element("code", job.userCode, "user-code"));
       const actions = element("div", "", "actions");
@@ -530,10 +640,11 @@
         try {
           const url = new URL(job.verificationUrl);
           if (url.protocol === "https:") {
-            const link = element("a", "Open verification link");
+            const link = element("a", t("Open verification link"));
             link.href = url.href;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
+            link.dataset.focusKey = `${job.operationId}:verification`;
             actions.append(link);
           }
         } catch {
@@ -559,8 +670,11 @@
               "Cancel this device verification flow. A new unfinished profile will be removed; existing accounts are retained.",
               { type: "cancelLogin", operationId: job.operationId },
               [
-                ["Account", accountById(job.profileId)?.label || job.profileId],
-                ["Operation ID", job.operationId],
+                [
+                  t("Account"),
+                  accountById(job.profileId)?.label || job.profileId,
+                ],
+                [t("Operation ID"), job.operationId],
               ],
             ),
           ),
@@ -1850,6 +1964,14 @@
       ? "Metadata updates are paused while this page is hidden."
       : "Account metadata is read every 5 seconds while this page is visible.";
     if (!document.hidden && state.paired) readInventory().catch(() => {});
+  });
+  $("language").value = messages.language();
+  $("language").addEventListener("change", () => {
+    if ($("action-dialog").open || state.busy) return;
+    messages.setLanguage($("language").value);
+    setPaired(state.paired);
+    if (state.inventory) renderInventory();
+    notice(state.paired ? "Account status is ready." : "Pairing required");
   });
   async function pair(token) {
     history.replaceState(null, "", location.pathname + location.search);
