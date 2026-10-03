@@ -1,0 +1,17 @@
+---
+source: cli/src/account_cmd/display_tests.rs
+expression: render(&data, AccountView::Pool, options(AccountOutputFormat::Table), /*columns*/ 40)
+---
+Work Pro  [* acct-…00001-1]
+  Login: cached
+  Availability: cooldown
+  Cooldown: in 2:00
+  Plan: Pro; priority: 10
+  5h used: 100% (5m)
+  Week used: unknown
+Quota: cached usage (age per window).
+Login: stored credentials, unverified.
+Availability: cached scheduling state.
+* current; use unique label or full ID.
+IDs: --show-profile; details: --details.
+Full metadata: --format json.
