@@ -62,6 +62,56 @@ fn message_count(request: &ResponsesRequest, role: &str, text: &str) -> usize {
         .count()
 }
 
+fn write_metadata_recovery_fixture(home: &std::path::Path) {
+    use base64::Engine as _;
+
+    write_backup_only_account_pool_fixture(home);
+    let path = home.join("auth-profiles/backup-acct/auth.json");
+    let mut auth: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&path).expect("valid synthetic quota-recovery fixture"),
+    )
+    .expect("valid synthetic quota-recovery fixture");
+    let mut parts = auth["tokens"]["id_token"]
+        .as_str()
+        .expect("valid synthetic quota-recovery fixture")
+        .split('.');
+    let jwt_header = parts
+        .next()
+        .expect("valid synthetic quota-recovery fixture")
+        .to_owned();
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(
+            parts
+                .next()
+                .expect("valid synthetic quota-recovery fixture"),
+        )
+        .expect("valid synthetic quota-recovery fixture");
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&payload).expect("valid synthetic quota-recovery fixture");
+    payload["https://api.openai.com/auth"]["chatgpt_user_id"] = json!("metadata-owner");
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&payload).expect("valid synthetic quota-recovery fixture"));
+    auth["tokens"]["id_token"] = json!(format!("{jwt_header}.{payload}.c2ln"));
+    std::fs::write(
+        path,
+        serde_json::to_vec(&auth).expect("valid synthetic quota-recovery fixture"),
+    )
+    .expect("valid synthetic quota-recovery fixture");
+}
+
+fn metadata_recovery_response(reset: i64) -> serde_json::Value {
+    json!({
+        "plan_type": "pro", "account_id": "account-backup-acct", "user_id": "metadata-owner",
+        "rate_limit": {
+            "allowed": true, "limit_reached": false,
+            "primary_window": {"used_percent": 0, "limit_window_seconds": 18000,
+                "reset_after_seconds": 120, "reset_at": reset},
+            "secondary_window": {"used_percent": 0, "limit_window_seconds": 604800,
+                "reset_after_seconds": 120, "reset_at": reset},
+        }, "spend_control": {"reached": false},
+    })
+}
+
 async fn collect_turn_events(codex: &codex_core::CodexThread) -> anyhow::Result<Vec<EventMsg>> {
     let mut events = Vec::new();
     loop {
@@ -124,6 +174,153 @@ async fn account_pool_waits_and_continues_after_external_quota_recovery() -> any
             .any(|event| matches!(event, EventMsg::Error(_)))
     );
     assert_eq!(requests.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhausted_wait_discovers_backend_recovery_without_consuming_a_credit() -> anyhow::Result<()>
+{
+    let server = MockServer::start().await;
+    let reset = chrono::Utc::now().timestamp() + 120;
+    let requests = mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(/*status*/ 429).set_body_json(json!({"error": {
+                "type": "usage_limit_reached", "message": "temporarily exhausted", "resets_at": reset,
+            }})),
+            responses::sse_response(sse(vec![
+                ev_response_created("metadata-recovered"),
+                ev_assistant_message("metadata-message", "recovered from fresh metadata"),
+                ev_completed("metadata-recovered"),
+            ])),
+        ],
+    ).await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .and(header("authorization", "Bearer access-backup"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200).set_body_json(metadata_recovery_response(reset)),
+        )
+        .expect(1..)
+        .mount(&server)
+        .await;
+    let backend_base_url = format!("{}/backend-api", server.uri());
+    let mut builder = test_codex()
+        .without_auth()
+        .with_pre_build_hook(write_metadata_recovery_fixture)
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend_base_url;
+            config.account_pool.resume_after_reset = Some(true);
+            config.account_pool.max_reset_wait_minutes = Some(3);
+            config.account_pool.window_warmup = Some(false);
+            config.account_pool.auto_reset_credits = Some(AutoResetCredits::Never);
+        });
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "discover external recovery while waiting".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let events =
+        tokio::time::timeout(Duration::from_secs(5), collect_turn_events(&fixture.codex)).await??;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EventMsg::Error(_)))
+    );
+    assert_eq!(requests.requests().len(), 2);
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| {
+                request
+                    .url
+                    .path()
+                    .ends_with("/rate-limit-reset-credits/consume")
+            })
+            .count(),
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhausted_startup_checks_fresh_usage_before_returning_pool_exhausted() -> anyhow::Result<()>
+{
+    let server = MockServer::start().await;
+    let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+    let requests = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("startup-recovered"),
+            ev_assistant_message("startup-message", "recovered before sampling"),
+            ev_completed("startup-recovered"),
+        ]),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200)
+                .set_body_json(metadata_recovery_response(reset.timestamp())),
+        )
+        .expect(1..)
+        .mount(&server)
+        .await;
+    let backend_base_url = format!("{}/backend-api", server.uri());
+    let mut builder = test_codex().without_auth()
+        .with_pre_build_hook(move |home| {
+            write_metadata_recovery_fixture(home);
+            let window = json!({"used_percent": 100.0, "resets_at": reset, "window_minutes": 300});
+            std::fs::write(home.join("account-runtime-state.json"), serde_json::to_vec(&json!({
+                "version": 1, "active_profile_id": "backup-acct", "profiles": [{
+                    "profile_id": "backup-acct", "exhausted_until": reset, "backend_resets_at": reset,
+                    "rate_limits": {"primary": window, "secondary": window, "observed_at": chrono::Utc::now()},
+                }],
+            })).unwrap()).unwrap();
+        })
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend_base_url;
+            config.account_pool.resume_after_reset = Some(false);
+            config.account_pool.window_warmup = Some(false);
+            config.account_pool.auto_reset_credits = Some(AutoResetCredits::Never);
+        });
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "retry an externally recovered startup pool".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let events =
+        tokio::time::timeout(Duration::from_secs(5), collect_turn_events(&fixture.codex)).await??;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EventMsg::Error(_)))
+    );
+    assert_eq!(requests.requests().len(), 1);
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| {
+                request
+                    .url
+                    .path()
+                    .ends_with("/rate-limit-reset-credits/consume")
+            })
+            .count(),
+        0
+    );
     Ok(())
 }
 
@@ -1003,7 +1200,16 @@ async fn reset_credit_rescue_uses_another_exhausted_seat_when_last_has_no_credit
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, EventMsg::Error(_)))
+            .any(|event| matches!(event, EventMsg::Error(_))),
+        "errors={:?}, request paths={:?}",
+        events
+            .iter()
+            .filter(|event| matches!(event, EventMsg::Error(_)))
+            .collect::<Vec<_>>(),
+        server.received_requests().await.map(|requests| requests
+            .into_iter()
+            .map(|request| request.url.path().to_string())
+            .collect::<Vec<_>>())
     );
     assert_eq!(events.iter().filter(|event| matches!(
         event, EventMsg::Warning(warning) if warning.message.contains("Redeemed one rate-limit reset credit")

@@ -45,6 +45,7 @@ mod agent_control;
 mod agent_execution;
 mod agent_websocket;
 mod agents_md;
+mod api_account_execution;
 mod app_tool_exposure;
 mod apply_patch_cli;
 mod apply_patch_serialization;

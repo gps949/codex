@@ -75,6 +75,7 @@ pub(super) fn write_profile_credentials(codex_home: &Path, id: &str, access_toke
         "https://api.openai.com/auth": {
             "chatgpt_plan_type": "pro",
             "chatgpt_account_id": format!("account-{id}"),
+            "chatgpt_user_id": format!("user-{id}"),
         }
     }))
     .unwrap());
@@ -1140,11 +1141,14 @@ async fn bound_401_permanent_refresh_failure_fails_over_in_the_turn_loop() -> an
     Ok(())
 }
 
-#[test_case::test_case(false; "http_model_limit")]
-#[test_case::test_case(true; "stream_model_limit")]
+#[test_case::test_case(false, true; "http_model_limit")]
+#[test_case::test_case(true, true; "stream_model_limit")]
+#[test_case::test_case(false, false; "http_model_limit_without_name")]
+#[test_case::test_case(true, false; "stream_model_limit_without_name")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_specific_limit_keeps_accounts_available_for_the_next_request(
     streaming: bool,
+    named: bool,
 ) -> anyhow::Result<()> {
     let server = MockServer::start().await;
     let error = json!({"type": "usage_limit_reached", "message": "model allocation reached",
@@ -1159,14 +1163,17 @@ async fn model_specific_limit_keeps_accounts_available_for_the_next_request(
     } else {
         ResponseTemplate::new(429).set_body_json(json!({"error": error}))
     };
+    let rejection = rejection
+        .insert_header("x-codex-active-limit", "fast-model")
+        .insert_header("x-fast-model-primary-used-percent", "100");
+    let rejection = if named {
+        rejection.insert_header("x-fast-model-limit-name", "gpt-fast")
+    } else {
+        rejection
+    };
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
-        .respond_with(
-            rejection
-                .insert_header("x-codex-active-limit", "fast-model")
-                .insert_header("x-fast-model-limit-name", "gpt-fast")
-                .insert_header("x-fast-model-primary-used-percent", "100"),
-        )
+        .respond_with(rejection)
         .up_to_n_times(1)
         .mount(&server)
         .await;
