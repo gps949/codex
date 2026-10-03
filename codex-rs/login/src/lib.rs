@@ -23,6 +23,7 @@ mod account_file;
 mod account_management_pool;
 mod account_relogin;
 mod callback_params;
+mod credit_expiry_reminders;
 mod device_code_auth;
 mod gateway_auth;
 mod oauth;
@@ -164,3 +165,8 @@ pub use gateway_auth::GatewayAuthStatus;
 pub use gateway_auth::GatewayAuthStatusChange;
 pub use gateway_auth::GatewayLoginControl;
 pub use gateway_auth::subscribe_gateway_auth_status;
+
+pub use credit_expiry_reminders::CreditExpiryCandidate;
+pub use credit_expiry_reminders::CreditExpiryReminder;
+pub use credit_expiry_reminders::CreditExpiryReminderResponse;
+pub use credit_expiry_reminders::CreditExpiryReminderStore;
