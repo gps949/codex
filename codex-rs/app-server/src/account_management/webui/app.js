@@ -1490,8 +1490,8 @@
         "Priority order prefers lower priority numbers. Earliest reset prefers the eligible account whose quota resets first.",
         {
           options: [
-            ["fill_first", "Priority order"],
-            ["earliest_reset", "Earliest reset"],
+            ["fill_first", t("Priority order")],
+            ["earliest_reset", t("Earliest reset")],
           ],
         },
       ],
@@ -1551,8 +1551,8 @@
         "When enabled, the scheduler may spend a credit only when the whole pool is exhausted and a natural reset is farther away than the minimum below.",
         {
           options: [
-            ["never", "Never (manual only)"],
-            ["when_pool_exhausted", "When the pool is exhausted"],
+            ["never", t("Never (manual only)")],
+            ["when_pool_exhausted", t("When the pool is exhausted")],
           ],
         },
       ],
@@ -1566,17 +1566,55 @@
       ],
     ];
     openDialog(
-      "Edit pool settings",
+      t("Edit pool settings"),
       "These settings are shared with clients using this Codex home. Active sessions apply them after configuration refresh.",
       (body) => {
         body.append(
           element(
             "p",
-            "Warmup generates real requests. Automatic reset credits can spend a limited credit without another confirmation. Review these choices before saving.",
+            t(
+              "Warmup generates real requests. Automatic reset credits can spend a limited credit without another confirmation. Review these choices before saving.",
+            ),
             "disclosure",
           ),
         );
+        const preset = field(
+          body,
+          "preset",
+          "Choose a behavior",
+          "select",
+          "current",
+          "Presets never enable automatic reset credits or paid API fallback. Review the exact changes before saving.",
+          {
+            options: [
+              ["current", t("Keep current settings")],
+              ["earlier", t("Prefer earlier resets")],
+              ["quiet", t("Reduce standby requests")],
+            ],
+          },
+        );
+        const preview = element("div", "", "disclosure");
         const grid = element("div", "", "settings-grid");
+        function previewChanges() {
+          const changes = specs.flatMap(([name, label, type, fallback]) => {
+            const input = inputs[name];
+            const value =
+              type === "checkbox"
+                ? input.checked
+                : type === "number"
+                  ? Number(input.value)
+                  : input.value;
+            if (value === (settings[name] ?? fallback)) return [];
+            return [
+              [label, type === "checkbox" ? t(value ? "On" : "Off") : value],
+            ];
+          });
+          preview.replaceChildren(
+            changes.length
+              ? definitions(changes)
+              : element("p", t("No changes selected.")),
+          );
+        }
         for (const [name, label, type, fallback, help, attributes] of specs) {
           let value = settings[name] ?? fallback;
           if (name === "window_warmup_interval_minutes")
@@ -1593,8 +1631,25 @@
             help,
             attributes,
           );
+          inputs[name].addEventListener("change", previewChanges);
+          inputs[name].addEventListener("input", previewChanges);
         }
-        body.append(grid);
+        preset.addEventListener("change", () => {
+          for (const [name, , type, fallback] of specs) {
+            if (type === "checkbox")
+              inputs[name].checked = settings[name] ?? fallback;
+            else inputs[name].value = settings[name] ?? fallback;
+          }
+          if (preset.value === "earlier") {
+            inputs.rotation_strategy.value = "earliest_reset";
+            inputs.return_to_preferred.checked = false;
+          } else if (preset.value === "quiet") {
+            inputs.window_warmup.checked = false;
+          }
+          previewChanges();
+        });
+        previewChanges();
+        body.append(preview, disclosure("Advanced settings", grid));
       },
       () => {
         const values = {};
@@ -1607,10 +1662,21 @@
               : type === "number"
                 ? Number(input.value)
                 : input.value;
-          review.push([
-            label,
-            type === "checkbox" ? (input.checked ? "On" : "Off") : values[name],
-          ]);
+          if (
+            values[name] !==
+            (settings[name] ?? specs.find((spec) => spec[0] === name)[3])
+          )
+            review.push([
+              label,
+              type === "checkbox"
+                ? t(input.checked ? "On" : "Off")
+                : values[name],
+            ]);
+          else delete values[name];
+        }
+        if (!review.length) {
+          showResult("No changes selected.");
+          return;
         }
         confirmOperation(
           "Save pool settings",
@@ -1655,13 +1721,20 @@
     $("api-billing").hidden = !manual;
     $("api-billing").textContent =
       current && !current.disabled && current.hasKey
-        ? `Manual API target: ${current.label}. Subsequent turns send conversation content to ${current.baseUrl} and may incur provider charges. Select a subscription account or return to subscriptions to switch back.`
-        : "The selected API profile is unavailable. Select a subscription account or another enabled API target.";
+        ? t(
+            "Manual API target: {label}. Subsequent turns send conversation content to {url} and may incur provider charges. Select a subscription account or return to subscriptions to switch back.",
+            { label: current.label, url: current.baseUrl },
+          )
+        : t(
+            "The selected API profile is unavailable. Select a subscription account or another enabled API target.",
+          );
     if (!accounts.length)
       $("api-accounts").append(
         element(
           "p",
-          "No API accounts. Add one for explicit manual use; automatic paid fallback starts off.",
+          t(
+            "No API accounts. Add one for explicit manual use; automatic paid fallback starts off.",
+          ),
           "disclosure",
         ),
       );
@@ -1672,23 +1745,23 @@
         element(
           "span",
           account.disabled
-            ? "Disabled"
+            ? t("Disabled")
             : account.hasKey
-              ? "Configured"
-              : "Key missing",
+              ? t("Configured")
+              : t("Key missing"),
           `badge ${account.disabled ? "disabled" : account.hasKey ? "ready" : "needsLogin"}`,
         ),
       );
       if (manual && current?.id === account.id)
-        card.append(element("span", "Selected API", "badge active"));
-      card.append(definitions(apiDetails(account)));
+        card.append(element("span", t("Selected API"), "badge active"));
+      card.append(element("p", account.model, "muted"));
       const actions = element("div", "", "actions");
       const use = button("Use API account", () =>
         confirmOperation(
           "Use API account",
           "Subsequent turns send conversation content to this provider and are billed under its API account. This explicit selection is shared with clients using this Codex home.",
           { type: "apiUse", profileId: account.id },
-          [["Account", account.label], ...apiDetails(account)],
+          [[t("Account"), account.label], ...apiDetails(account)],
         ),
       );
       use.disabled = state.busy || account.disabled || !account.hasKey;
@@ -1708,8 +1781,8 @@
                 account: { ...apiValues(account), disabled: !account.disabled },
               },
               [
-                ["Account", account.label],
-                ["Provider endpoint", account.baseUrl],
+                [t("Account"), account.label],
+                [t("Provider endpoint"), account.baseUrl],
               ],
             ),
         ),
@@ -1721,8 +1794,8 @@
               "Remove this provider profile and its local API key. A currently selected or configured fallback target will no longer be available.",
               { type: "apiRemove", profileId: account.id },
               [
-                ["Account", account.label],
-                ["Provider endpoint", account.baseUrl],
+                [t("Account"), account.label],
+                [t("Provider endpoint"), account.baseUrl],
               ],
             ),
           "danger",
@@ -1736,7 +1809,12 @@
       );
       for (const action of actions.querySelectorAll("button"))
         action.dataset.focusKey = `${account.id}:${action.textContent}`;
-      card.append(actions);
+      actions.removeChild(use);
+      card.append(
+        use,
+        disclosure("Advanced controls", actions),
+        disclosure("Technical details", definitions(apiDetails(account))),
+      );
       $("api-accounts").append(card);
     }
     const fallback = inventory.apiFallback;
@@ -1745,14 +1823,21 @@
     );
     $("api-fallback-summary").textContent = fallback?.enabled
       ? target && !target.disabled && target.hasKey
-        ? `Enabled: ${target.label} after ${fallback.waitMinutes} minutes of subscription waiting. Provider charges may apply.`
-        : "Configured on, but the provider target is unavailable. Choose an enabled account with a stored key."
-      : "Off. Subscription exhaustion will not automatically start paid API requests.";
+        ? t(
+            "Enabled: {label} after {minutes} minutes of subscription waiting. Provider charges may apply.",
+            { label: target.label, minutes: fallback.waitMinutes },
+          )
+        : t(
+            "Configured on, but the provider target is unavailable. Choose an enabled account with a stored key.",
+          )
+      : t(
+          "Off. Subscription exhaustion will not automatically start paid API requests.",
+        );
   }
   function showApiEditor(account = null) {
     const inputs = {};
     openDialog(
-      account ? "Edit API account" : "Add API account",
+      account ? t("Edit API account") : t("Add API account"),
       "Use a provider endpoint and exact model ID that support the Responses API. Saving configuration sends no generating request and does not test compatibility.",
       (body) => {
         inputs.label = field(
@@ -1792,8 +1877,9 @@
             "Saved only by the account manager in provider-specific credential storage. It will not be shown in results or kept in browser storage.",
             { required: true, autoComplete: "new-password", maxLength: 16384 },
           );
+        const capabilities = element("div");
         inputs.contextWindow = field(
-          body,
+          capabilities,
           "apiContext",
           "Context limit (tokens)",
           "number",
@@ -1802,12 +1888,39 @@
           { min: 8192, max: 2000000, step: 1, required: true },
         );
         inputs.images = field(
-          body,
+          capabilities,
           "apiImages",
           "Allow image inputs",
           "checkbox",
           account?.images || false,
           "Enable only when this provider and model accept images through the Responses API.",
+        );
+        const endpoint = element("p", "", "disclosure endpoint-preview");
+        function previewEndpoint() {
+          try {
+            const url = new URL(inputs.baseUrl.value.trim());
+            if (url.username || url.password || url.search || url.hash)
+              throw new Error("Invalid base URL");
+            url.pathname = url.pathname.replace(/\/+$/, "") + "/responses";
+            endpoint.textContent = t("Requests use: {url}", { url: url.href });
+          } catch {
+            endpoint.textContent = t(
+              "Enter a base URL to preview the Responses endpoint.",
+            );
+          }
+        }
+        inputs.baseUrl.addEventListener("input", previewEndpoint);
+        previewEndpoint();
+        body.append(
+          endpoint,
+          element(
+            "p",
+            t(
+              "Native Responses API required. Chat Completions-only endpoints are not supported.",
+            ),
+            "muted",
+          ),
+          disclosure("Model capabilities", capabilities),
         );
       },
       () => {
@@ -1822,10 +1935,10 @@
         try {
           url = new URL(values.baseUrl);
         } catch {
-          throw new Error("Enter a valid provider base URL.");
+          throw new Error(t("Enter a valid provider base URL."));
         }
         if (!values.label || !values.model)
-          throw new Error("Enter an account label and exact model ID.");
+          throw new Error(t("Enter an account label and exact model ID."));
         if (
           !(
             url.protocol === "https:" ||
@@ -1838,7 +1951,9 @@
           url.hash
         )
           throw new Error(
-            "Use an HTTPS endpoint without embedded credentials, query, or fragment. HTTP is allowed only on localhost.",
+            t(
+              "Use an HTTPS endpoint without embedded credentials, query, or fragment. HTTP is allowed only on localhost.",
+            ),
           );
         if (account) {
           confirmOperation(
@@ -1849,11 +1964,11 @@
               account: { ...apiValues(account), ...values },
             },
             [
-              ["Account", values.label],
-              ["Provider endpoint", values.baseUrl],
-              ["Model", values.model],
-              ["Context limit", values.contextWindow],
-              ["Images", values.images ? "Allowed" : "Off"],
+              [t("Account"), values.label],
+              [t("Provider endpoint"), values.baseUrl],
+              [t("Model"), values.model],
+              [t("Context limit"), values.contextWindow],
+              [t("Images"), values.images ? t("Allowed") : t("Off")],
             ],
           );
           return;
@@ -1864,9 +1979,10 @@
           apiKey: inputs.apiKey.value.trim(),
         };
         inputs.apiKey.value = "";
-        if (!payload.apiKey) throw new Error("Enter an API key before saving.");
+        if (!payload.apiKey)
+          throw new Error(t("Enter an API key before saving."));
         openDialog(
-          "Save API account",
+          t("Save API account"),
           "Save this provider and its key for explicit manual use. No generating request is sent. Usage after selection is billed by the provider.",
           (body) =>
             body.append(
@@ -1875,8 +1991,8 @@
                 ["Provider endpoint", values.baseUrl],
                 ["Model", values.model],
                 ["Context limit", values.contextWindow],
-                ["Images", values.images ? "Allowed" : "Off"],
-                ["API key", "Entered; never displayed"],
+                ["Images", values.images ? t("Allowed") : t("Off")],
+                ["API key", t("Entered; never displayed")],
               ]),
             ),
           async () => {
@@ -1886,7 +2002,7 @@
               payload.apiKey = "";
               dialogCompleted = true;
               $("dialog-submit").disabled = true;
-              $("dialog-cancel").textContent = "Close";
+              $("dialog-cancel").textContent = t("Close");
             }
           },
           "Save API account",
