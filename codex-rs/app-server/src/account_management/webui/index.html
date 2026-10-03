@@ -4,26 +4,28 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>Codex Accounts</title>
+    <title data-i18n="Codex Accounts">Codex Accounts</title>
     <link rel="stylesheet" href="/app.css" />
     <script src="/messages.js" defer></script>
     <script src="/guidance.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
-    <a class="skip-link" href="#subscriptions">Skip to accounts</a>
+    <a class="skip-link" href="#subscriptions" data-i18n="Skip to accounts"
+      >Skip to accounts</a
+    >
     <main id="app">
       <header class="page-header">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true"></span>
           <div>
             <p class="product">Codex</p>
-            <h1>Accounts</h1>
+            <h1 data-i18n="Accounts">Accounts</h1>
           </div>
         </div>
         <div class="header-tools">
           <div class="language-control">
-            <label for="language">Language</label
+            <label for="language" data-i18n="Language">Language</label
             ><select id="language">
               <option value="en">English</option>
               <option value="zh-CN">简体中文</option>
@@ -32,7 +34,12 @@
           <div class="connection">
             <span id="connection-state">Connecting</span
             ><span id="metadata-age" class="muted"></span
-            ><button id="read-status" class="link" type="button">
+            ><button
+              id="read-status"
+              class="link"
+              type="button"
+              data-i18n="Read status"
+            >
               Read status
             </button>
           </div>
@@ -48,13 +55,15 @@
         aria-labelledby="pair-title"
         hidden
       >
-        <h2 id="pair-title">Pair this browser</h2>
-        <p>
+        <h2 id="pair-title" data-i18n="Pair this browser">Pair this browser</h2>
+        <p
+          data-i18n="Open the pairing URL printed by the account manager, or paste its pairing code below."
+        >
           Open the pairing URL printed by the account manager, or paste its
           pairing code below.
         </p>
         <form id="pair-form">
-          <label for="pair-token">Pairing code</label>
+          <label for="pair-token" data-i18n="Pairing code">Pairing code</label>
           <input
             id="pair-token"
             type="password"
@@ -62,9 +71,14 @@
             spellcheck="false"
             required
           />
-          <button class="primary" type="submit">Pair browser</button>
+          <button class="primary" type="submit" data-i18n="Pair browser">
+            Pair browser
+          </button>
         </form>
-        <p class="muted">
+        <p
+          class="muted"
+          data-i18n="This tab keeps its management session in storage isolated to this browser origin, including the port. Closing the tab or stopping the manager ends the session. API keys are never kept in browser storage."
+        >
           This tab keeps its management session in storage isolated to this
           browser origin, including the port. Closing the tab or stopping the
           manager ends the session. API keys are never kept in browser storage.
@@ -77,32 +91,50 @@
             <p id="selection-label" class="selection-label"></p>
             <p id="selection-note" class="muted"></p>
           </div>
-          <button id="automatic" type="button">Return to subscriptions</button>
+          <button
+            id="automatic"
+            type="button"
+            data-i18n="Return to subscriptions"
+          >
+            Return to subscriptions
+          </button>
         </section>
         <section
           id="pool-overview"
           class="guidance panel"
           aria-labelledby="overview-title"
         >
-          <h2 id="overview-title">Pool overview</h2>
+          <h2 id="overview-title" data-i18n="Pool overview">Pool overview</h2>
           <div id="pool-counts" class="pool-counts"></div>
           <p id="guidance-message"></p>
           <div id="guidance-action" class="actions"></div>
           <small
+            data-i18n="Cached quota is not a guarantee. Percentages from different accounts are never added together."
             >Cached quota is not a guarantee. Percentages from different
             accounts are never added together.</small
           >
         </section>
-        <p id="paused-notice" class="message warning" hidden>
+        <p
+          id="paused-notice"
+          class="message warning"
+          hidden
+          data-i18n="Subscription accounts are paused. Select a signed-in account to resume. You can still edit accounts and repair logins here."
+        >
           Subscription accounts are paused. Select a signed-in account to
           resume. You can still edit accounts and repair logins here.
         </p>
         <div id="pending-reset" class="message warning reset-notice" hidden>
-          <p>
+          <p
+            data-i18n="A reset credit operation has an unconfirmed outcome. Review it before starting another reset."
+          >
             A reset credit operation has an unconfirmed outcome. Review it
             before starting another reset.
           </p>
-          <button id="review-reset" type="button">
+          <button
+            id="review-reset"
+            type="button"
+            data-i18n="Review reset operation"
+          >
             Review reset operation
           </button>
         </div>
@@ -110,69 +142,103 @@
           <div class="section-heading">
             <div>
               <h2 id="accounts-title">
-                <span>Subscription accounts</span>
+                <span data-i18n="Subscription accounts"
+                  >Subscription accounts</span
+                >
                 <span id="account-count" class="count"></span>
               </h2>
-              <p class="muted">
+              <p
+                class="muted"
+                data-i18n="Quota bars show used quota. Cached values update only when a request or an explicit refresh checks the backend."
+              >
                 Quota bars show used quota. Cached values update only when a
                 request or an explicit refresh checks the backend.
               </p>
             </div>
             <div class="actions">
-              <button id="refresh-all" type="button">Refresh quota</button
-              ><button id="add-account" class="primary" type="button">
+              <button id="refresh-all" type="button" data-i18n="Refresh quota">
+                Refresh quota</button
+              ><button
+                id="add-account"
+                class="primary"
+                type="button"
+                data-i18n="Add account"
+              >
                 Add account
               </button>
             </div>
           </div>
           <div class="list-controls">
             <div class="search">
-              <label for="account-search">Find an account</label
+              <label for="account-search" data-i18n="Find an account"
+                >Find an account</label
               ><input
                 id="account-search"
                 type="search"
                 placeholder="Label, email, or profile ID"
+                data-i18n-placeholder="Label, email, or profile ID"
                 autocomplete="off"
               />
             </div>
             <div>
-              <label for="account-filter">Availability</label
+              <label for="account-filter" data-i18n="Availability"
+                >Availability</label
               ><select id="account-filter">
-                <option value="all">All accounts</option>
-                <option value="ready">Eligible (cached)</option>
-                <option value="coolingDown">Cooling down</option>
-                <option value="needsLogin">Needs login</option>
-                <option value="disabled">Disabled</option>
-                <option value="paused">Paused</option>
+                <option value="all" data-i18n="All accounts">
+                  All accounts
+                </option>
+                <option value="ready" data-i18n="Eligible (cached)">
+                  Eligible (cached)
+                </option>
+                <option value="coolingDown" data-i18n="Cooling down">
+                  Cooling down
+                </option>
+                <option value="needsLogin" data-i18n="Needs login">
+                  Needs login
+                </option>
+                <option value="disabled" data-i18n="Disabled">Disabled</option>
+                <option value="paused" data-i18n="Paused">Paused</option>
               </select>
             </div>
           </div>
           <div class="table-wrap">
             <table class="accounts-table">
-              <caption class="sr-only">
+              <caption
+                class="sr-only"
+                data-i18n="Enrolled subscription accounts and cached quota"
+              >
                 Enrolled subscription accounts and cached quota
               </caption>
               <thead>
                 <tr>
-                  <th scope="col">Account</th>
-                  <th scope="col">Availability</th>
-                  <th scope="col">Primary window</th>
-                  <th scope="col">Secondary window</th>
-                  <th scope="col">Manage</th>
+                  <th scope="col" data-i18n="Account">Account</th>
+                  <th scope="col" data-i18n="Availability">Availability</th>
+                  <th scope="col" data-i18n="Primary window">Primary window</th>
+                  <th scope="col" data-i18n="Secondary window">
+                    Secondary window
+                  </th>
+                  <th scope="col" data-i18n="Manage">Manage</th>
                 </tr>
               </thead>
               <tbody id="account-rows"></tbody>
             </table>
           </div>
           <div id="account-empty" class="empty" hidden>
-            <h3>No accounts to show</h3>
+            <h3 data-i18n="No accounts to show">No accounts to show</h3>
             <p id="empty-message"></p>
           </div>
-          <nav class="pagination" aria-label="Account pages">
+          <nav
+            class="pagination"
+            aria-label="Account pages"
+            data-i18n-aria="Account pages"
+          >
             <p id="page-label"></p>
             <div class="actions">
-              <button id="previous-page" type="button">Previous</button
-              ><button id="next-page" type="button">Next</button>
+              <button id="previous-page" type="button" data-i18n="Previous">
+                Previous</button
+              ><button id="next-page" type="button" data-i18n="Next">
+                Next
+              </button>
             </div>
           </nav>
         </section>
@@ -182,8 +248,13 @@
           aria-labelledby="login-title"
           hidden
         >
-          <h2 id="login-title" tabindex="-1">Login activity</h2>
-          <p class="muted">
+          <h2 id="login-title" tabindex="-1" data-i18n="Login activity">
+            Login activity
+          </h2>
+          <p
+            class="muted"
+            data-i18n="Complete verification in your browser. This page keeps track of the result."
+          >
             Complete verification in your browser. This page keeps track of the
             result.
           </p>
@@ -195,27 +266,43 @@
           aria-labelledby="api-title"
           hidden
         >
-          <summary id="api-title">
+          <summary
+            id="api-title"
+            data-i18n="Advanced API accounts (provider billed)"
+          >
             Advanced API accounts (provider billed)
           </summary>
           <div class="section-heading">
             <div>
-              <h2>API accounts</h2>
-              <p class="muted">
+              <h2 data-i18n="API accounts">API accounts</h2>
+              <p
+                class="muted"
+                data-i18n="Separate from subscription quota. The provider must support the Responses API; usage is billed by that provider."
+              >
                 Separate from subscription quota. The provider must support the
                 Responses API; usage is billed by that provider.
               </p>
             </div>
-            <button id="add-api-account" type="button">Add API account</button>
+            <button
+              id="add-api-account"
+              type="button"
+              data-i18n="Add API account"
+            >
+              Add API account
+            </button>
           </div>
           <p id="api-billing" class="message warning" hidden></p>
           <div id="api-accounts" class="api-accounts"></div>
           <div class="panel settings-summary">
             <div>
-              <h3>Paid API fallback</h3>
+              <h3 data-i18n="Paid API fallback">Paid API fallback</h3>
               <p id="api-fallback-summary" class="muted"></p>
             </div>
-            <button id="edit-api-fallback" type="button">
+            <button
+              id="edit-api-fallback"
+              type="button"
+              data-i18n="Configure fallback"
+            >
               Configure fallback
             </button>
           </div>
@@ -226,28 +313,42 @@
           aria-labelledby="settings-title"
         >
           <div>
-            <h2 id="settings-title">Pool settings</h2>
+            <h2 id="settings-title" data-i18n="Pool settings">Pool settings</h2>
             <p id="settings-summary" class="muted"></p>
           </div>
-          <button id="edit-settings" type="button">Edit pool settings</button>
+          <button
+            id="edit-settings"
+            type="button"
+            data-i18n="Edit pool settings"
+          >
+            Edit pool settings
+          </button>
         </section>
         <details id="activity" class="activity">
-          <summary>Recent results</summary>
+          <summary data-i18n="Recent results">Recent results</summary>
           <ol id="activity-list"></ol>
         </details>
         <footer>
-          <p>
+          <p
+            data-i18n="Changes are shared with all clients using this Codex home. Requests already in progress keep their current account."
+          >
             Changes are shared with all clients using this Codex home. Requests
             already in progress keep their current account.
           </p>
-          <p id="poll-note">
+          <p
+            id="poll-note"
+            data-i18n="Metadata reads do not refresh backend quota. Updates are faster during login or quota checks, and slower while idle."
+          >
             Metadata reads do not refresh backend quota. Updates are faster
             during login or quota checks, and slower while idle.
           </p>
         </footer>
       </div>
       <noscript
-        ><p class="message error">
+        ><p
+          class="message error"
+          data-i18n="Enable JavaScript to manage accounts in this browser."
+        >
           Enable JavaScript to manage accounts in this browser.
         </p></noscript
       >

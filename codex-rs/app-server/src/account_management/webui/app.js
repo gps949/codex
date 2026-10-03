@@ -99,7 +99,6 @@
           timeZoneName: "short",
         });
   }
-
   function timedText(kind, value, name = "") {
     const node = element("small");
     node.dataset.timeKind = kind;
@@ -202,14 +201,16 @@
   async function request(path, payload) {
     const url = new URL(path, location.href);
     if (url.origin !== location.origin)
-      throw new Error("Account manager requests must use this browser origin.");
+      throw new Error(
+        t("Account manager requests must use this browser origin."),
+      );
     const headers =
       payload === undefined ? {} : { "Content-Type": "application/json" };
     if (url.pathname !== "/api/session") {
       if (!state.sessionToken) {
         setPaired(false);
         const error = new Error(
-          "Pair this browser with the account manager first.",
+          t("Pair this browser with the account manager first."),
         );
         error.status = 401;
         throw error;
@@ -230,8 +231,12 @@
     } catch (cause) {
       throw new Error(
         cause.name === "TimeoutError"
-          ? "The connection timed out. The operation may still be running; check its status before repeating it."
-          : "Connection interrupted. Check the account manager and read status before repeating an operation.",
+          ? t(
+              "The connection timed out. The operation may still be running; check its status before repeating it.",
+            )
+          : t(
+              "Connection interrupted. Check the account manager and read status before repeating an operation.",
+            ),
       );
     }
     let data;
@@ -240,7 +245,9 @@
     } catch {
       if (response.ok)
         throw new Error(
-          "The account manager returned an unreadable result. Check status before repeating the operation.",
+          t(
+            "The account manager returned an unreadable result. Check status before repeating the operation.",
+          ),
         );
       data = {};
     }
@@ -249,11 +256,18 @@
         payload?.type === "apiAdd" || payload?.type === "apiReplaceKey";
       const error = new Error(
         secretOperation
-          ? `The API credential operation failed (HTTP ${response.status}). Check account status and the provider settings. Re-enter the key to try again.`
+          ? t(
+              "The API credential operation failed (HTTP {status}). Check account status and the provider settings. Re-enter the key to try again.",
+              { status: response.status },
+            )
           : url.pathname === "/api/session"
-            ? "Pairing was denied. Open the current pairing URL printed by the manager."
+            ? t(
+                "Pairing was denied. Open the current pairing URL printed by the manager.",
+              )
             : data.error ||
-              `The account manager returned HTTP ${response.status}.`,
+              t("The account manager returned HTTP {status}.", {
+                status: response.status,
+              }),
       );
       error.status = response.status;
       if (response.status === 401 || response.status === 403) setPaired(false);
@@ -265,14 +279,18 @@
     const result = await request("/api/operation", payload);
     if (typeof result.message !== "string" || !Object.hasOwn(result, "data"))
       throw new Error(
-        "The operation returned an incomplete result. Check status before repeating it.",
+        t(
+          "The operation returned an incomplete result. Check status before repeating it.",
+        ),
       );
     if (payload.type === "apiAdd")
-      result.message =
-        "API account saved for manual selection. No generating request was sent.";
+      result.message = t(
+        "API account saved for manual selection. No generating request was sent.",
+      );
     if (payload.type === "apiReplaceKey")
-      result.message =
-        "API key replaced for this profile. No generating request was sent.";
+      result.message = t(
+        "API key replaced for this profile. No generating request was sent.",
+      );
     return result;
   }
   function setPaired(paired) {
@@ -776,7 +794,7 @@
   }
   function confirmOperation(title, description, payload, items = []) {
     openDialog(
-      title,
+      t(title),
       description,
       (body) => body.append(definitions(items)),
       () => perform(payload),
@@ -967,7 +985,7 @@
     const account = accountById(id);
     let label, priority;
     openDialog(
-      "Edit account",
+      t("Edit account"),
       "A lower priority number is preferred. Clearing the label displays the profile ID.",
       (body) => {
         body.append(definitions([["Profile ID", id]]));
@@ -1004,7 +1022,7 @@
     const account = accountById(id);
     let keep;
     openDialog(
-      "Remove account",
+      t("Remove account"),
       "Remove this profile from the pool. It will no longer be available for selection or automatic failover.",
       (body) => {
         body.append(
@@ -1037,7 +1055,7 @@
   function showLogin(id = null) {
     let label;
     openDialog(
-      id ? "Sign in again" : "Add account",
+      id ? t("Sign in again") : t("Add account"),
       id
         ? "Start device verification for this exact profile. Keep the verification link open until login completes."
         : "Create a new subscription account profile, then sign in using a verification code.",
@@ -1109,17 +1127,17 @@
   }
   function creditDetails(credit) {
     return [
-      ["Credit ID", credit.id],
-      ["Backend status", credit.status],
-      ["Validity", creditValidity(credit).label],
+      [t("Credit ID"), credit.id],
+      [t("Backend status"), credit.status],
+      [t("Validity"), creditValidity(credit).label],
       [
-        "Expires",
+        t("Expires"),
         credit.expiresAt
           ? `${date(credit.expiresAt)} (${credit.expiresAt})`
-          : "Not reported",
+          : t("Not reported"),
       ],
-      ["Scope", credit.resetType],
-      ["Granted", date(credit.grantedAt)],
+      [t("Scope"), credit.resetType],
+      [t("Granted"), date(credit.grantedAt)],
     ];
   }
   async function loadCredits(id) {
@@ -1277,7 +1295,9 @@
       else sessionStorage.removeItem(resetStorageKey);
     } catch {
       throw new Error(
-        "Browser session storage is unavailable. Enable it before consuming a credit so an uncertain operation can be retried safely.",
+        t(
+          "Browser session storage is unavailable. Enable it before consuming a credit so an uncertain operation can be retried safely.",
+        ),
       );
     }
     state.redemption = value;
@@ -1286,7 +1306,7 @@
   function showRedemption(id, credit) {
     let acknowledged;
     openDialog(
-      "Use this reset credit",
+      t("Use this reset credit"),
       "This consumes a limited credit for the exact profile shown below. Its backend scope is shown without assuming which quota windows it resets.",
       (body) => {
         body.append(
@@ -1319,7 +1339,9 @@
           !contactAllowed(accountById(id))
         )
           throw new Error(
-            "This credit or account is no longer eligible. Read the current details first.",
+            t(
+              "This credit or account is no longer eligible. Read the current details first.",
+            ),
           );
         let pending = state.redemption;
         if (
@@ -1327,12 +1349,16 @@
           (pending.profileId !== id || pending.creditId !== credit.id)
         )
           throw new Error(
-            "Review the earlier unconfirmed operation before starting another reset.",
+            t(
+              "Review the earlier unconfirmed operation before starting another reset.",
+            ),
           );
         if (!pending) {
           if (!crypto.randomUUID)
             throw new Error(
-              "Open this manager through HTTPS or localhost before consuming a credit.",
+              t(
+                "Open this manager through HTTPS or localhost before consuming a credit.",
+              ),
             );
           pending = {
             profileId: id,
@@ -1352,7 +1378,10 @@
           saveRedemption(null);
         } catch (error) {
           throw new Error(
-            `${error.message} The outcome remains unconfirmed. Refresh quota and inspect this credit before explicitly retrying the same operation.`,
+            t(
+              "{message} The outcome remains unconfirmed. Refresh quota and inspect this credit before explicitly retrying the same operation.",
+              { message: error.message },
+            ),
           );
         }
       },
@@ -1365,7 +1394,7 @@
     let acknowledged;
     const credit = evidence.credit;
     openDialog(
-      "Clear reviewed reset operation",
+      t("Clear reviewed reset operation"),
       evidence.profileMissing
         ? "A fresh account read shows the original profile is no longer enrolled. Its redemption outcome cannot be checked here. Clear only this browser's retry record after reviewing the uncertainty; no credit will be consumed."
         : "The latest successful credit read shows this credit is absent or unavailable. This does not prove whether the earlier operation consumed it. Clear only this browser's retry record; no credit will be consumed.",
@@ -1377,14 +1406,16 @@
             [
               "Review evidence",
               evidence.profileMissing
-                ? "Profile absent from current inventory"
+                ? t("Profile absent from current inventory")
                 : credit
-                  ? `Credit unavailable (${credit.status})`
-                  : "Credit absent from latest returned list",
+                  ? t("Credit unavailable ({status})", {
+                      status: credit.status,
+                    })
+                  : t("Credit absent from latest returned list"),
             ],
             [
               "Validity",
-              credit ? creditValidity(credit).label : "Outcome unconfirmed",
+              credit ? creditValidity(credit).label : t("Outcome unconfirmed"),
             ],
             ["Successful read", date(evidence.readAt)],
             ["Operation ID", pending.idempotencyKey],
@@ -1403,15 +1434,21 @@
       () => {
         if (!acknowledged.checked)
           throw new Error(
-            "Acknowledge the unconfirmed outcome before clearing this record.",
+            t(
+              "Acknowledge the unconfirmed outcome before clearing this record.",
+            ),
           );
         if (state.redemption?.idempotencyKey !== pending.idempotencyKey)
           throw new Error(
-            "The pending reset operation changed. Review its current record again.",
+            t(
+              "The pending reset operation changed. Review its current record again.",
+            ),
           );
         if (evidence.profileMissing && accountById(pending.profileId))
           throw new Error(
-            "This profile has reappeared. Inspect its current credits before clearing the record.",
+            t(
+              "This profile has reappeared. Inspect its current credits before clearing the record.",
+            ),
           );
         saveRedemption(null);
         dialogCompleted = true;
@@ -1425,7 +1462,7 @@
     const pending = state.redemption;
     if (!pending) return;
     openDialog(
-      "Unconfirmed reset operation",
+      t("Unconfirmed reset operation"),
       "Reading current account status before reviewing this operation…",
       (body) =>
         body.append(
@@ -1448,12 +1485,12 @@
     const account = accountById(pending.profileId);
     const readAt = Math.floor(state.lastRead / 1000);
     openDialog(
-      "Unconfirmed reset operation",
+      t("Unconfirmed reset operation"),
       "It may have reached the backend. Refresh quota and inspect the credit status before retrying. A retry keeps this operation ID.",
       (body) => {
         body.append(
           definitions([
-            ["Account", account?.label || "Profile no longer enrolled"],
+            ["Account", account?.label || t("Profile no longer enrolled")],
             ["Profile ID", pending.profileId],
             ["Credit ID", pending.creditId],
             ["Operation ID", pending.idempotencyKey],
@@ -1701,12 +1738,12 @@
   }
   function apiDetails(account) {
     return [
-      ["Profile ID", account.id],
-      ["Provider endpoint", account.baseUrl],
-      ["Model", account.model],
-      ["Context limit", account.contextWindow],
-      ["Images", account.images ? "Allowed" : "Off"],
-      ["Local key", account.hasKey ? "Stored" : "Missing"],
+      [t("Profile ID"), account.id],
+      [t("Provider endpoint"), account.baseUrl],
+      [t("Model"), account.model],
+      [t("Context limit"), account.contextWindow],
+      [t("Images"), account.images ? t("Allowed") : t("Off")],
+      [t("Local key"), account.hasKey ? t("Stored") : t("Missing")],
     ];
   }
   function renderApiAccounts() {
@@ -2019,7 +2056,7 @@
     };
     let enabled, target, wait;
     openDialog(
-      "Configure paid API fallback",
+      t("Configure paid API fallback"),
       "Off by default. Enabling this can send conversation content to a provider and incur charges after subscription waiting, without another per-turn confirmation.",
       (body) => {
         enabled = field(
@@ -2030,7 +2067,7 @@
           fallback.enabled,
         );
         const options = [
-          ["", "Choose a provider target"],
+          ["", t("Choose a provider target")],
           ...(state.inventory.apiAccounts || [])
             .filter((account) => !account.disabled && account.hasKey)
             .map((account) => [
@@ -2066,7 +2103,9 @@
           (!account || account.disabled || !account.hasKey)
         )
           throw new Error(
-            "Select an enabled API account with a stored key before enabling paid fallback.",
+            t(
+              "Select an enabled API account with a stored key before enabling paid fallback.",
+            ),
           );
         const config = {
           enabled: enabled.checked,
@@ -2080,11 +2119,17 @@
             : "Disable automatic paid fallback. Explicit manual API selection remains available.",
           { type: "apiFallback", config },
           [
-            ["Automatic paid fallback", config.enabled ? "Enabled" : "Off"],
-            ["Provider", account?.label || "None"],
-            ["Provider endpoint", account?.baseUrl || "None"],
-            ["Model", account?.model || "None"],
-            ["Subscription wait", `${config.waitMinutes} minutes`],
+            [
+              t("Automatic paid fallback"),
+              config.enabled ? t("Enabled") : t("Off"),
+            ],
+            [t("Provider"), account?.label || t("None")],
+            [t("Provider endpoint"), account?.baseUrl || t("None")],
+            [t("Model"), account?.model || t("None")],
+            [
+              t("Subscription wait"),
+              t("{minutes} minutes", { minutes: config.waitMinutes }),
+            ],
           ],
         );
       },
@@ -2094,7 +2139,7 @@
   function showApiKey(account) {
     let key;
     openDialog(
-      account.hasKey ? "Replace API key" : "Add API key",
+      account.hasKey ? t("Replace API key") : t("Add API key"),
       "Change only the local credential for this exact profile. Its endpoint, model, selection, and fallback settings are preserved. No generating request is sent.",
       (body) => {
         body.append(
@@ -2122,9 +2167,9 @@
         };
         key.value = "";
         if (!payload.apiKey)
-          throw new Error("Enter a new API key before continuing.");
+          throw new Error(t("Enter a new API key before continuing."));
         openDialog(
-          "Confirm API key replacement",
+          t("Confirm API key replacement"),
           "Replace the stored API key for the exact profile shown below. No request is sent to this provider to test the key.",
           (body) =>
             body.append(
@@ -2132,7 +2177,7 @@
                 ["Account", account.label],
                 ["Profile ID", account.id],
                 ["Provider endpoint", account.baseUrl],
-                ["New API key", "Entered; never displayed"],
+                ["New API key", t("Entered; never displayed")],
               ]),
             ),
           async () => {
@@ -2142,7 +2187,7 @@
               payload.apiKey = "";
               dialogCompleted = true;
               $("dialog-submit").disabled = true;
-              $("dialog-cancel").textContent = "Close";
+              $("dialog-cancel").textContent = t("Close");
             }
           },
           "Replace stored key",
@@ -2175,9 +2220,10 @@
   });
   $("action-dialog").addEventListener("close", () => {
     dialogTask = null;
+    $("language").disabled = state.busy;
     const replacement =
       returnFocusKey &&
-      [...$("app").querySelectorAll("button[data-focus-key]")].find(
+      [...$("app").querySelectorAll("[data-focus-key]")].find(
         (node) => node.dataset.focusKey === returnFocusKey,
       );
     if (!state.paired) $("pair-token").focus();
@@ -2217,8 +2263,10 @@
   document.addEventListener("visibilitychange", () => {
     clearTimeout(state.timer);
     $("poll-note").textContent = document.hidden
-      ? "Metadata updates are paused while this page is hidden."
-      : "Account metadata is read every 5 seconds while this page is visible.";
+      ? t("Metadata updates are paused while this page is hidden.")
+      : t(
+          "Metadata reads do not refresh backend quota. Updates are faster during login or quota checks, and slower while idle.",
+        );
     if (!document.hidden && state.paired) readInventory().catch(() => {});
   });
   $("language").value = messages.language();
@@ -2242,7 +2290,9 @@
         result.sessionToken.length > 256
       )
         throw new Error(
-          "The manager returned an invalid pairing session. Pair this browser again.",
+          t(
+            "The manager returned an invalid pairing session. Pair this browser again.",
+          ),
         );
       state.sessionToken = result.sessionToken;
       try {
