@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use crate::account_credit_expiry_reminders::AccountCreditExpiryReminders;
 use crate::account_window_warmup::spawn_window_warmup_task;
 use crate::config::Config;
 use crate::execution_request_auth::ExecutionRequestAuth;
@@ -66,6 +67,7 @@ pub(crate) struct ExecutionAuth {
     change_tx: watch::Sender<u64>,
     reset_credit_rescue_attempt: ResetCreditRescueSingleflight,
     pub(crate) recovery_probes: RecoveryProbeCoordinator,
+    pub(crate) credit_expiry_reminders: OnceLock<Arc<AccountCreditExpiryReminders>>,
     window_warmup_task: StdMutex<Option<WindowWarmupTask>>,
     pool_suspended: AtomicBool,
 }
@@ -201,6 +203,7 @@ impl ExecutionAuth {
             change_tx,
             reset_credit_rescue_attempt: ResetCreditRescueSingleflight::default(),
             recovery_probes: RecoveryProbeCoordinator::default(),
+            credit_expiry_reminders: OnceLock::new(),
             window_warmup_task: StdMutex::new(None),
             pool_suspended: AtomicBool::new(false),
         }

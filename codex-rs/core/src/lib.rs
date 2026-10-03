@@ -5,6 +5,7 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod account_credit_expiry_reminders;
 mod account_pool_recovery;
 mod account_transition;
 mod account_window_warmup;
