@@ -27,6 +27,8 @@ impl AccountRuntimeStateStore {
                 ),
                 preemptive_rotation_until: None,
                 quota_reset_at: None,
+                quota_reset_observed_at: None,
+                quota_failure_at: None,
                 rate_limits: AccountRateLimits::default(),
                 window_warmup: None,
 

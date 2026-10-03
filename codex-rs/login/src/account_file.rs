@@ -13,6 +13,10 @@ pub(crate) fn lock(home: &Path) -> io::Result<File> {
     lock_named(home, ACCOUNT_POOL_LOCK)
 }
 
+pub(crate) fn try_lock(home: &Path) -> io::Result<Option<File>> {
+    try_lock_named(home, ACCOUNT_POOL_LOCK)
+}
+
 /// Serializes identity-preserving 5h-window warmup so two Codex processes do not
 /// send the same standby `1+1?` request at once.
 pub(crate) fn warmup_lock(home: &Path) -> io::Result<File> {
@@ -26,6 +30,10 @@ pub(crate) fn try_warmup_lock(home: &Path) -> io::Result<Option<File>> {
 /// Serializes OAuth refresh + `auth.json` writes for one credential home.
 pub(crate) fn refresh_lock(home: &Path) -> io::Result<File> {
     lock_named(home, AUTH_REFRESH_LOCK)
+}
+
+pub(crate) fn try_refresh_lock(home: &Path) -> io::Result<Option<File>> {
+    try_lock_named(home, AUTH_REFRESH_LOCK)
 }
 
 pub(crate) fn try_reset_credit_lock(home: &Path) -> io::Result<Option<File>> {

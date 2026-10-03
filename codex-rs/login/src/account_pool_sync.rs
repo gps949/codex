@@ -3,6 +3,18 @@ use crate::AccountRuntimeProfileState;
 use crate::AccountRuntimeState;
 
 impl AccountPool {
+    pub(crate) fn acknowledge_runtime_state(&self, saved: &AccountRuntimeState) {
+        let mut state = self.lock_state();
+        for account in state.accounts.values_mut() {
+            if saved.profiles.iter().any(|profile| {
+                profile.profile_id == account.profile.id
+                    && profile.quota_failure_at == account.quota_failure_at
+            }) {
+                account.quota_failure_pending = false;
+            }
+        }
+    }
+
     /// Three-way merge under the pool mutex. Disk changes win selection conflicts, while
     /// unchanged local observations never overwrite another process's newer quota state.
     pub(crate) fn merge_runtime_state(
@@ -37,6 +49,24 @@ impl AccountPool {
                 .profiles
                 .iter()
                 .find(|entry| entry.profile_id == account.profile.id);
+            if account.quota_failure_pending {
+                // Import the shared logical clock before publishing an unsaved local refusal.
+                // This also orders it after a concurrent recovery when the wall clock moved back.
+                let next =
+                    account
+                        .quota_failure_at
+                        .max(account.quota_reset_at)
+                        .max(incoming.and_then(|profile| {
+                            profile.quota_failure_at.max(profile.quota_reset_at)
+                        }))
+                        .map(|time| {
+                            time.checked_add_signed(chrono::Duration::nanoseconds(1))
+                                .unwrap_or(DateTime::<Utc>::MAX_UTC)
+                        });
+                account.quota_failure_at =
+                    Some(Utc::now().max(next.unwrap_or(DateTime::<Utc>::MIN_UTC)));
+                changed = true;
+            }
             if let Some(record) = profiles.and_then(|profiles| {
                 profiles
                     .iter()
@@ -62,6 +92,9 @@ impl AccountPool {
                     };
                 }
             }
+            if account.profile.disabled {
+                account.quota_failure_pending = false;
+            }
             let local = AccountRuntimeProfileState {
                 reset_credit_excluded_until: incoming
                     .and_then(|entry| entry.reset_credit_excluded_until),
@@ -78,6 +111,8 @@ impl AccountPool {
                 backend_resets_at: account.backend_resets_at,
                 preemptive_rotation_until: account.preemptive_rotation_until,
                 quota_reset_at: account.quota_reset_at,
+                quota_reset_observed_at: account.quota_reset_observed_at,
+                quota_failure_at: account.quota_failure_at,
                 rate_limits: account.rate_limits.clone(),
                 window_warmup: account.window_warmup.clone(),
             };
@@ -127,7 +162,23 @@ impl AccountPool {
             }
             if let Some(incoming) = incoming {
                 result.quota_reset_at = local.quota_reset_at.max(incoming.quota_reset_at);
-                result.rate_limits = match incoming.quota_reset_at.cmp(&local.quota_reset_at) {
+                // Keep the real cutoff paired with the winning logical reset epoch.
+                result.quota_reset_observed_at =
+                    match incoming.quota_reset_at.cmp(&local.quota_reset_at) {
+                        std::cmp::Ordering::Greater => incoming.quota_reset_observed_at,
+                        std::cmp::Ordering::Less => local.quota_reset_observed_at,
+                        std::cmp::Ordering::Equal => local
+                            .quota_reset_observed_at
+                            .max(incoming.quota_reset_observed_at),
+                    };
+                result.quota_failure_at = local.quota_failure_at.max(incoming.quota_failure_at);
+                let local_reset = local
+                    .quota_reset_at
+                    .filter(|reset| Some(*reset) > incoming.quota_failure_at);
+                let incoming_reset = incoming
+                    .quota_reset_at
+                    .filter(|reset| Some(*reset) > local.quota_failure_at);
+                result.rate_limits = match incoming_reset.cmp(&local_reset) {
                     std::cmp::Ordering::Greater => {
                         result.exhausted_until = incoming.exhausted_until;
                         result.backend_resets_at = incoming.backend_resets_at;
@@ -145,23 +196,39 @@ impl AccountPool {
                     std::cmp::Ordering::Equal => {
                         let mut local_limits = local.rate_limits.clone();
                         let mut incoming_limits = incoming.rate_limits.clone();
-                        if let Some(reset_at) = result.quota_reset_at {
+                        if let Some(reset_at) =
+                            result.quota_reset_observed_at.or(result.quota_reset_at)
+                        {
                             local_limits.discard_windows_before(reset_at);
                             incoming_limits.discard_windows_before(reset_at);
                         }
                         merge_rate_limits_monotonic(&local_limits, incoming_limits)
                     }
                 };
+                // A refusal received after the recovery request began wins across processes.
+                let failure = if local.quota_failure_at > incoming.quota_failure_at {
+                    &local
+                } else {
+                    incoming
+                };
+                if local.quota_failure_at != incoming.quota_failure_at
+                    && failure.quota_failure_at >= result.quota_reset_at
+                {
+                    result.exhausted_until = failure.exhausted_until;
+                    result.backend_resets_at = failure.backend_resets_at;
+                    result.preemptive_rotation_until = failure.preemptive_rotation_until;
+                }
             }
             if let Some(observation) = result.window_warmup.as_mut() {
                 observation.infer_legacy_phase();
             }
-            if let Some(reset_at) = result.quota_reset_at {
+            if let Some(reset_at) = result.quota_reset_observed_at.or(result.quota_reset_at) {
                 result.rate_limits.discard_windows_before(reset_at);
             }
             if result.window_warmup.as_ref().is_some_and(|observation| {
                 result
-                    .quota_reset_at
+                    .quota_reset_observed_at
+                    .or(result.quota_reset_at)
                     .is_some_and(|reset| reset >= observation.attempted_at)
             }) {
                 result.window_warmup = None;
@@ -170,6 +237,14 @@ impl AccountPool {
                 account.quota_reset_at = result.quota_reset_at;
                 account.last_active_generation = None;
                 active_quota_reset |= active_profile.as_ref() == Some(&account.profile.id);
+                changed = true;
+            }
+            if account.quota_reset_observed_at != result.quota_reset_observed_at {
+                account.quota_reset_observed_at = result.quota_reset_observed_at;
+                changed = true;
+            }
+            if account.quota_failure_at != result.quota_failure_at {
+                account.quota_failure_at = result.quota_failure_at;
                 changed = true;
             }
             result.preemptive_rotation_until = result

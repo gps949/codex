@@ -39,7 +39,8 @@ impl AccountRuntimeStateStore {
         {
             let now = Utc::now();
             if profile
-                .quota_reset_at
+                .quota_reset_observed_at
+                .or(profile.quota_reset_at)
                 .is_some_and(|reset| reset >= attempted_at)
                 || profile.window_warmup.as_ref().is_some_and(|current| {
                     if current.attempted_at == attempted_at {
@@ -62,6 +63,8 @@ impl AccountRuntimeStateStore {
                 exhausted_until: None,
                 preemptive_rotation_until: None,
                 quota_reset_at: None,
+                quota_reset_observed_at: None,
+                quota_failure_at: None,
                 rate_limits: AccountRateLimits::default(),
                 window_warmup: Some(observation),
 

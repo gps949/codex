@@ -153,9 +153,15 @@ pub struct AccountPoolSnapshot {
     /// from an authoritative backend exhaustion and never discards its remaining quota.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preemptive_rotation_until: Option<DateTime<Utc>>,
-    /// Latest confirmed quota reset, used to reject observations from older windows.
+    /// Logical epoch of the latest confirmed quota reset, used for cross-process ordering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_reset_at: Option<DateTime<Utc>>,
+    /// Real request cutoff for quota and warmup observations; old records use quota_reset_at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_observed_at: Option<DateTime<Utc>>,
+    /// Latest authoritative refusal, including a repeated refusal with an unchanged cooldown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_failure_at: Option<DateTime<Utc>>,
 }
 
 /// Outcome of an identity-preserving standby 5h-window warmup attempt.
@@ -242,7 +248,7 @@ pub enum AccountAvailabilityMutation {
     PoolExhausted,
     /// The observation updated its exact inactive profile without changing the active identity.
     InactiveProfileUpdated { active: Option<AccountLease> },
-    /// This generation already recorded the same unavailable state; no mutation was needed.
+    /// This generation already recorded the same unavailable state; only its refusal barrier advanced.
     AlreadyUnavailable { active: Option<AccountLease> },
     /// The profile has since been activated under a newer generation, so the observation is stale.
     StaleIgnored { active: Option<AccountLease> },
@@ -277,6 +283,10 @@ struct ManagedAccount {
     window_warmup: Option<WindowWarmupObservation>,
     preemptive_rotation_until: Option<DateTime<Utc>>,
     quota_reset_at: Option<DateTime<Utc>>,
+    quota_reset_observed_at: Option<DateTime<Utc>>,
+    quota_failure_at: Option<DateTime<Utc>>,
+    /// Restamped after shared state is imported, then acknowledged only after a successful write.
+    quota_failure_pending: bool,
 }
 
 struct AccountPoolState {
@@ -316,6 +326,11 @@ pub struct AccountPool {
 
 #[path = "account_pool_sync.rs"]
 mod shared_state;
+
+#[path = "account_pool_confirmed_recovery.rs"]
+mod confirmed_recovery;
+pub(crate) use confirmed_recovery::QuotaProbeGuard;
+pub(crate) use confirmed_recovery::QuotaResetOrigin;
 
 #[path = "account_pool_quota.rs"]
 mod quota;
@@ -379,6 +394,9 @@ impl AccountPool {
                 window_warmup: None,
                 preemptive_rotation_until: None,
                 quota_reset_at: None,
+                quota_reset_observed_at: None,
+                quota_failure_at: None,
+                quota_failure_pending: false,
             },
         );
         drop(state);
@@ -728,7 +746,8 @@ impl AccountPool {
         if account.window_warmup.as_ref().is_some_and(|current| {
             current.attempted_at <= Utc::now() && current.compare_progress(&observation).is_gt()
         }) || account
-            .quota_reset_at
+            .quota_reset_observed_at
+            .or(account.quota_reset_at)
             .is_some_and(|reset| reset >= observation.attempted_at)
         {
             return Ok(());
@@ -863,6 +882,10 @@ impl AccountPool {
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
         let availability_changed = account.availability != new_availability
             || account.preemptive_rotation_until.take().is_some();
+        if availability_changed {
+            account.quota_failure_at = Some(next_failure_at(account));
+            account.quota_failure_pending = true;
+        }
         account.availability = new_availability;
         account.backend_resets_at = None;
         if disabled {
@@ -895,39 +918,12 @@ impl AccountPool {
         profile_id: &AccountProfileId,
         reset_at: DateTime<Utc>,
     ) -> Result<(), AccountPoolError> {
-        let mut state = self.lock_state();
-        let is_active = state.active_profile.as_ref() == Some(profile_id);
-        let generation = if is_active {
-            state.generation.wrapping_add(1)
-        } else {
-            state.generation
-        };
-        let account = state
-            .accounts
-            .get_mut(profile_id)
-            .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
-        if account
-            .quota_reset_at
-            .is_some_and(|current| current >= reset_at)
-        {
-            return Ok(());
-        }
-        account.quota_reset_at = Some(reset_at);
-        account.backend_resets_at = None;
-        account.rate_limits = AccountRateLimits {
-            observed_at: Some(reset_at),
-            ..AccountRateLimits::default()
-        };
-        account.window_warmup = None;
-        account.preemptive_rotation_until = None;
-        account.last_active_generation = is_active.then_some(generation);
-        if matches!(account.availability, AccountAvailability::Exhausted { .. }) {
-            account.availability = AccountAvailability::Available;
-        }
-        state.generation = generation;
-        drop(state);
-        self.notify_change();
-        Ok(())
+        self.apply_quota_reset_with_cutoff(
+            profile_id,
+            reset_at,
+            reset_at,
+            QuotaResetOrigin::Confirmed,
+        )
     }
 
     pub fn update_rate_limits(
@@ -940,10 +936,11 @@ impl AccountPool {
             .accounts
             .get_mut(profile_id)
             .ok_or_else(|| AccountPoolError::UnknownProfile(profile_id.clone()))?;
-        if account.quota_reset_at.is_some() && rate_limits.observed_at <= account.quota_reset_at {
+        let cutoff = account.quota_reset_observed_at.or(account.quota_reset_at);
+        if cutoff.is_some() && rate_limits.observed_at <= cutoff {
             return Ok(());
         }
-        if let Some(reset_at) = account.quota_reset_at {
+        if let Some(reset_at) = cutoff {
             rate_limits.discard_windows_before(reset_at);
         }
         let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
@@ -973,10 +970,11 @@ impl AccountPool {
         if account.last_active_generation != Some(lease.generation) {
             return Ok(());
         }
-        if account.quota_reset_at.is_some() && rate_limits.observed_at <= account.quota_reset_at {
+        let cutoff = account.quota_reset_observed_at.or(account.quota_reset_at);
+        if cutoff.is_some() && rate_limits.observed_at <= cutoff {
             return Ok(());
         }
-        if let Some(reset_at) = account.quota_reset_at {
+        if let Some(reset_at) = cutoff {
             rate_limits.discard_windows_before(reset_at);
         }
         let merged = merge_rate_limits_monotonic(&account.rate_limits, rate_limits);
@@ -1006,6 +1004,8 @@ impl AccountPool {
                 window_warmup: account.window_warmup.clone(),
                 preemptive_rotation_until: account.preemptive_rotation_until,
                 quota_reset_at: account.quota_reset_at,
+                quota_reset_observed_at: account.quota_reset_observed_at,
+                quota_failure_at: account.quota_failure_at,
             })
             .collect::<Vec<_>>();
         snapshots.sort_by(|left, right| {
@@ -1116,7 +1116,7 @@ impl AccountPool {
                     .any(|window| window.used_percent.is_finite() && window.used_percent >= 0.0)
             })
             .map(|mut limits| {
-                if let Some(reset_at) = account.quota_reset_at {
+                if let Some(reset_at) = account.quota_reset_observed_at.or(account.quota_reset_at) {
                     limits.discard_windows_before(reset_at);
                 }
                 merge_rate_limits_monotonic(&account.rate_limits, limits)
@@ -1124,12 +1124,14 @@ impl AccountPool {
         let rate_limits_changed = rate_limits
             .as_ref()
             .is_some_and(|rate_limits| account.rate_limits != *rate_limits);
+        // Every accepted refusal invalidates metadata requests already in flight, even when
+        // the scheduler deadline and cached percentages did not change.
+        account.quota_failure_at = Some(next_failure_at(account));
+        account.quota_failure_pending = true;
         if !availability_changed && !rate_limits_changed {
             let active = active_lease(&state);
             drop(state);
-            if refreshed {
-                self.notify_change();
-            }
+            self.notify_change();
             return Ok(AccountAvailabilityMutation::AlreadyUnavailable { active });
         }
         if let Some(rate_limits) = rate_limits {
@@ -1175,6 +1177,18 @@ impl AccountPool {
             *revision = revision.wrapping_add(1);
         });
     }
+}
+
+fn next_failure_at(account: &ManagedAccount) -> DateTime<Utc> {
+    let next = account
+        .quota_failure_at
+        .max(account.quota_reset_at)
+        .map(|previous| {
+            previous
+                .checked_add_signed(chrono::Duration::nanoseconds(1))
+                .unwrap_or(DateTime::<Utc>::MAX_UTC)
+        });
+    Utc::now().max(next.unwrap_or(DateTime::<Utc>::MIN_UTC))
 }
 
 fn make_lease(account: &ManagedAccount, generation: u64) -> AccountLease {

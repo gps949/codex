@@ -278,6 +278,7 @@ async fn replayed_reset_preserves_newer_quota_and_warmup_and_import_clears_old_e
         .unwrap();
     let mut expected_snapshot = snapshot.clone();
     expected_snapshot.quota_reset_at = Some(reset_at);
+    expected_snapshot.quota_reset_observed_at = Some(reset_at);
     expected_snapshot.window_warmup = Some(observation);
     assert_eq!(snapshot, expected_snapshot);
 }

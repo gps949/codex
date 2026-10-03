@@ -17,8 +17,12 @@ use crate::WindowWarmupObservation;
 
 #[path = "account_runtime_entitlement.rs"]
 mod entitlement;
+#[path = "account_runtime_quota_probe.rs"]
+mod quota_probe;
 #[path = "account_runtime_warmup_claim.rs"]
 mod warmup_claim;
+pub use quota_probe::AccountQuotaEvidence;
+pub use quota_probe::AccountQuotaProbe;
 
 const ACCOUNT_RUNTIME_STATE_VERSION: u32 = 1;
 const ACCOUNT_RUNTIME_STATE_FILE: &str = "account-runtime-state.json";
@@ -55,9 +59,15 @@ pub struct AccountRuntimeProfileState {
     /// Soft scheduling preference after an early switch; remaining quota stays usable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preemptive_rotation_until: Option<DateTime<Utc>>,
-    /// Backend-confirmed reset epoch shared with other processes.
+    /// Logical backend-confirmed reset epoch shared with other processes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_reset_at: Option<DateTime<Utc>>,
+    /// Real request cutoff for old observations; absent legacy records use quota_reset_at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_observed_at: Option<DateTime<Utc>>,
+    /// Arrival time of the latest authoritative refusal; survives identical cooldown updates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_failure_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub rate_limits: AccountRateLimits,
     /// Latest identity-preserving 5h-window warmup observation. Shared across
@@ -94,6 +104,14 @@ impl AccountRuntimeStateStore {
         }
         let _lock = crate::account_file::lock(&self.codex_home)?;
         self.load_unlocked()
+    }
+
+    /// Reads shared observations without queuing behind another process's transaction.
+    pub fn try_load(&self) -> Result<Option<AccountRuntimeState>, AccountRuntimeStateError> {
+        let Some(_lock) = crate::account_file::try_lock(&self.codex_home)? else {
+            return Ok(None);
+        };
+        self.load_unlocked().map(Some)
     }
 
     fn load_unlocked(&self) -> Result<AccountRuntimeState, AccountRuntimeStateError> {
@@ -178,18 +196,32 @@ impl AccountRuntimeStateStore {
 
     /// Serializes only restart-safe observations from the live pool.
     pub fn save_pool(&self, pool: &AccountPool) -> Result<(), AccountRuntimeStateError> {
-        let snapshots = pool.snapshots();
         let _lock = crate::account_file::lock(&self.codex_home)?;
         let previous = self.load_unlocked()?;
+        let merged = pool.merge_runtime_state(&previous, &previous, None);
+        let snapshots = pool.snapshots();
         let mut state = runtime_state_from_snapshots(&snapshots);
         for profile in &mut state.profiles {
-            profile.reset_credit_excluded_until = previous
+            profile.reset_credit_excluded_until = merged
                 .profiles
                 .iter()
                 .find(|previous| previous.profile_id == profile.profile_id)
                 .and_then(|previous| previous.reset_credit_excluded_until);
         }
-        self.save_unlocked(&state)
+        state.active_profile_id = merged.active_profile_id;
+        state.selection_revision = merged.selection_revision;
+        for profile in merged.profiles {
+            if !state
+                .profiles
+                .iter()
+                .any(|local| local.profile_id == profile.profile_id)
+            {
+                state.profiles.push(profile);
+            }
+        }
+        self.save_unlocked(&state)?;
+        pool.acknowledge_runtime_state(&state);
+        Ok(())
     }
 
     /// Blocks until this process owns the home-scoped window-warmup lock.
@@ -234,6 +266,9 @@ impl AccountRuntimeStateStore {
             if profile
                 .quota_reset_at
                 .is_some_and(|current| current >= reset_at)
+                || profile
+                    .quota_failure_at
+                    .is_some_and(|failure| failure >= reset_at)
             {
                 return Ok(());
             }
@@ -241,6 +276,7 @@ impl AccountRuntimeStateStore {
             profile.backend_resets_at = None;
             profile.preemptive_rotation_until = None;
             profile.quota_reset_at = Some(reset_at);
+            profile.quota_reset_observed_at = Some(reset_at);
             profile.rate_limits = AccountRateLimits {
                 observed_at: Some(reset_at),
                 ..AccountRateLimits::default()
@@ -253,6 +289,8 @@ impl AccountRuntimeStateStore {
                 exhausted_until: None,
                 preemptive_rotation_until: None,
                 quota_reset_at: Some(reset_at),
+                quota_reset_observed_at: Some(reset_at),
+                quota_failure_at: None,
                 rate_limits: AccountRateLimits {
                     observed_at: Some(reset_at),
                     ..AccountRateLimits::default()
@@ -273,8 +311,17 @@ impl AccountRuntimeStateStore {
     ) -> Result<(), AccountRuntimeStateError> {
         let state = self.load()?;
         for profile in state.profiles {
-            if let Some(reset_at) = profile.quota_reset_at {
-                let _ = pool.apply_quota_reset(&profile.profile_id, reset_at);
+            if let Some(reset_at) = profile
+                .quota_reset_at
+                .filter(|reset| Some(*reset) > profile.quota_failure_at)
+            {
+                let cutoff = profile.quota_reset_observed_at.unwrap_or(reset_at);
+                let _ = pool.apply_quota_reset_with_cutoff(
+                    &profile.profile_id,
+                    reset_at,
+                    cutoff,
+                    crate::account_pool::QuotaResetOrigin::Shared,
+                );
             }
             let _ = pool.update_rate_limits(&profile.profile_id, profile.rate_limits);
             let Some(observation) = profile.window_warmup else {
@@ -316,7 +363,8 @@ impl AccountRuntimeStateStore {
             if profile.window_warmup.as_ref().is_some_and(|current| {
                 current.attempted_at <= Utc::now() && current.compare_progress(&observation).is_gt()
             }) || profile
-                .quota_reset_at
+                .quota_reset_observed_at
+                .or(profile.quota_reset_at)
                 .is_some_and(|reset| reset >= observation.attempted_at)
             {
                 return Ok(());
@@ -329,6 +377,8 @@ impl AccountRuntimeStateStore {
                 exhausted_until: None,
                 preemptive_rotation_until: None,
                 quota_reset_at: None,
+                quota_reset_observed_at: None,
+                quota_failure_at: None,
                 rate_limits: AccountRateLimits::default(),
                 window_warmup: Some(observation),
 
@@ -345,6 +395,17 @@ impl AccountRuntimeStateStore {
         self.synchronize_pool(pool, &mut previous)
     }
 
+    /// Imports and publishes shared state only when the home transaction lock is idle.
+    /// A busy writer leaves the live pool and its pending refusal acknowledgements unchanged.
+    pub fn try_synchronize(&self, pool: &AccountPool) -> Result<bool, AccountRuntimeStateError> {
+        let Some(_lock) = crate::account_file::try_lock(&self.codex_home)? else {
+            return Ok(false);
+        };
+        let mut previous = self.load_unlocked()?;
+        self.synchronize_pool_unlocked(pool, &mut previous)?;
+        Ok(true)
+    }
+
     /// Applies external selections and merges observations as one cross-process transaction.
     pub(crate) fn synchronize_pool(
         &self,
@@ -352,6 +413,14 @@ impl AccountRuntimeStateStore {
         previous: &mut AccountRuntimeState,
     ) -> Result<(), AccountRuntimeStateError> {
         let _lock = crate::account_file::lock(&self.codex_home)?;
+        self.synchronize_pool_unlocked(pool, previous)
+    }
+
+    fn synchronize_pool_unlocked(
+        &self,
+        pool: &AccountPool,
+        previous: &mut AccountRuntimeState,
+    ) -> Result<(), AccountRuntimeStateError> {
         let remote = self.load_unlocked()?;
         let profiles = crate::AccountProfileStore::new(self.codex_home.clone());
         let records = profiles
@@ -363,6 +432,7 @@ impl AccountRuntimeStateStore {
         if merged != remote {
             self.save_unlocked(&merged)?;
         }
+        pool.acknowledge_runtime_state(&merged);
         *previous = merged;
         Ok(())
     }
@@ -438,10 +508,11 @@ impl AccountRuntimeStateStore {
             .iter_mut()
             .find(|profile| &profile.profile_id == profile_id)
         {
-            if profile.quota_reset_at.is_some() && limits.observed_at <= profile.quota_reset_at {
+            let cutoff = profile.quota_reset_observed_at.or(profile.quota_reset_at);
+            if cutoff.is_some() && limits.observed_at <= cutoff {
                 return Ok(());
             }
-            if let Some(reset_at) = profile.quota_reset_at {
+            if let Some(reset_at) = cutoff {
                 limits.discard_windows_before(reset_at);
             }
             profile.rate_limits =
@@ -453,6 +524,8 @@ impl AccountRuntimeStateStore {
                 exhausted_until: None,
                 preemptive_rotation_until: None,
                 quota_reset_at: None,
+                quota_reset_observed_at: None,
+                quota_failure_at: None,
                 rate_limits: limits,
                 window_warmup: None,
 
@@ -504,6 +577,8 @@ fn runtime_state_from_snapshots(snapshots: &[AccountPoolSnapshot]) -> AccountRun
                     .preemptive_rotation_until
                     .filter(|reset| *reset > now),
                 quota_reset_at: snapshot.quota_reset_at,
+                quota_reset_observed_at: snapshot.quota_reset_observed_at,
+                quota_failure_at: snapshot.quota_failure_at,
                 rate_limits: snapshot.rate_limits.clone(),
                 window_warmup: snapshot.window_warmup.clone(),
             })
@@ -541,6 +616,10 @@ pub enum AccountRuntimeStateError {
 }
 
 #[cfg(test)]
+#[path = "account_runtime_quota_probe_tests.rs"]
+mod quota_probe_tests;
+
+#[cfg(test)]
 mod tests {
     use chrono::Duration;
     use tempfile::TempDir;
@@ -573,6 +652,8 @@ mod tests {
                     exhausted_until: Some(Utc::now() - Duration::minutes(1)),
                     preemptive_rotation_until: None,
                     quota_reset_at: None,
+                    quota_reset_observed_at: None,
+                    quota_failure_at: None,
                     rate_limits: AccountRateLimits::default(),
                     window_warmup: None,
 
@@ -600,6 +681,8 @@ mod tests {
                 exhausted_until: Some(reset),
                 preemptive_rotation_until: None,
                 quota_reset_at: None,
+                quota_reset_observed_at: None,
+                quota_failure_at: None,
                 rate_limits: AccountRateLimits::default(),
                 window_warmup: None,
 

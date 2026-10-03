@@ -37,18 +37,22 @@ pub struct AccountRateLimits {
 
 impl AccountRateLimits {
     pub(crate) fn discard_windows_before(&mut self, reset_at: DateTime<Utc>) {
+        let now = Utc::now();
         let primary = self.primary_observed_at();
         let secondary = self.secondary_observed_at();
-        if primary.is_none_or(|observed| observed <= reset_at) {
+        if primary.is_none_or(|observed| observed <= reset_at || observed > now) {
             self.primary = None;
         }
-        if secondary.is_none_or(|observed| observed <= reset_at) {
+        if secondary.is_none_or(|observed| observed <= reset_at || observed > now) {
             self.secondary = None;
         }
         let times = AccountWindowObservationTimes {
             primary: self.primary.as_ref().and(primary),
             secondary: self.secondary.as_ref().and(secondary),
         };
+        // A clock correction must not retain a future snapshot watermark that later merges
+        // would use to reject real observations from the recovered window.
+        self.observed_at = self.observed_at.filter(|observed| *observed <= now);
         let shared = self
             .primary
             .as_ref()

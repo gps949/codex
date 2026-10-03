@@ -1,3 +1,4 @@
+mod quota_probe;
 mod workspace_routing;
 
 use chrono::Utc;

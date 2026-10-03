@@ -165,6 +165,8 @@ async fn restoring_a_fully_cooling_down_pool_succeeds() {
                 exhausted_until: Some(resets_at),
                 preemptive_rotation_until: None,
                 quota_reset_at: None,
+                quota_reset_observed_at: None,
+                quota_failure_at: None,
                 rate_limits: Default::default(),
                 window_warmup: None,
 
@@ -176,6 +178,8 @@ async fn restoring_a_fully_cooling_down_pool_succeeds() {
                 exhausted_until: Some(resets_at),
                 preemptive_rotation_until: None,
                 quota_reset_at: None,
+                quota_reset_observed_at: None,
+                quota_failure_at: None,
                 rate_limits: Default::default(),
                 window_warmup: None,
 
@@ -582,6 +586,8 @@ async fn restore_runtime_state_keeps_warmup_retry_deadline() {
                     exhausted_until: None,
                     preemptive_rotation_until: None,
                     quota_reset_at: None,
+                    quota_reset_observed_at: None,
+                    quota_failure_at: None,
                     rate_limits: Default::default(),
                     window_warmup: None,
 
@@ -593,6 +599,8 @@ async fn restore_runtime_state_keeps_warmup_retry_deadline() {
                     exhausted_until: None,
                     preemptive_rotation_until: None,
                     quota_reset_at: None,
+                    quota_reset_observed_at: None,
+                    quota_failure_at: None,
                     rate_limits: idle_primary_limits(),
                     window_warmup: Some(failed_warmup(retry_after)),
 
