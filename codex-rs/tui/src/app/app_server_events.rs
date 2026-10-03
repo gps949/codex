@@ -78,6 +78,7 @@ impl App {
                 }
                 self.agents_overview.request_id = None;
                 self.agents_overview.refresh_pending = false;
+                self.agents_overview.initialized = false;
                 self.agents_overview.refresh_notifications.clear();
                 self.agents_overview.activity.clear();
                 self.agents_overview.last_messages.clear();
@@ -319,6 +320,7 @@ impl App {
                 self.agents_overview.usage_disabled = false;
                 self.repaint_agents_overview();
                 self.chat_widget.cyber_policy_notice = Default::default();
+                self.chat_widget.invalidate_security_setup();
                 if let Some(crate::pager_overlay::Overlay::Analytics(view)) = &mut self.overlay {
                     view.refresh();
                 }
@@ -356,6 +358,12 @@ impl App {
                     self.chat_widget.apply_account_pool_read_response(pool);
                 }
                 if self.chat_widget.has_chatgpt_account() {
+                    crate::security_setup::prefetch(
+                        &self.config,
+                        app_server_client,
+                        self.app_event_tx.clone(),
+                        self.chat_widget.security_setup_request_id,
+                    );
                     crate::daybreak::prefetch_notice(
                         &self.config,
                         app_server_client,

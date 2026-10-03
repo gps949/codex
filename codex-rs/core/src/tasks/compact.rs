@@ -14,6 +14,7 @@ use codex_features::Feature;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 
@@ -87,10 +88,17 @@ impl SessionTask for CompactTask {
                 }
             }
         };
-        if let Err(err) = result
-            && matches!(err.details(), CodexErrorDetails::TurnAborted)
-        {
-            return Err(err);
+        if let Err(err) = result {
+            if matches!(err.details(), CodexErrorDetails::TurnAborted) {
+                return Err(err);
+            }
+            let error = err.to_codex_protocol_error();
+            if matches!(error, CodexErrorInfo::UsageLimitExceeded) {
+                // Compaction already emitted the error; notify extensions without emitting it twice.
+                session
+                    .emit_turn_error_lifecycle(ctx.as_ref(), error, err.details())
+                    .await;
+            }
         }
         Ok(None)
     }
