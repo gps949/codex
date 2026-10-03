@@ -173,6 +173,15 @@ fn router(state: WebState) -> Router {
                 )
             }),
         )
+        .route(
+            "/primary.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/primary.js"),
+                )
+            }),
+        )
         .route("/api/session", post(pair))
         .nest("/api", api)
         .layer(DefaultBodyLimit::max(32 * 1024))

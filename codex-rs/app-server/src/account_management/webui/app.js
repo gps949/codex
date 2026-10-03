@@ -31,7 +31,11 @@
 
   function element(tag, text = "", className = "") {
     const node = document.createElement(tag);
-    if (text !== "") node.textContent = String(text);
+    if (text !== "")
+      node.textContent = String(text).replace(
+        /[\u0000-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/g,
+        " ",
+      );
     if (className) node.className = className;
     return node;
   }
@@ -396,6 +400,11 @@
   function renderInventory() {
     const inventory = state.inventory;
     const focused = document.activeElement?.dataset.focusKey;
+    window.AccountManagerPrimary.render(
+      inventory.primaryLogin,
+      confirmOperation,
+      { busy: state.busy },
+    );
     const selected = accountById(inventory.activeProfileId);
     const manualApi = inventory.apiSelection?.type === "manual";
     const api = manualApi
@@ -557,11 +566,14 @@
         state.inventory.apiSelection?.type !== "manual"
       )
         identity.append(element("span", t("Selected"), "badge active"));
+      if (state.inventory.primaryLogin?.profileId === account.profileId)
+        identity.append(element("span", t("Host sign-in"), "badge"));
       identity.append(
         element(
           "p",
-          [account.plan, account.email].filter(Boolean).join(" · ") ||
-            t("Subscription account"),
+          [account.plan, account.email === account.label ? null : account.email]
+            .filter(Boolean)
+            .join(" · ") || t("Subscription account"),
           "account-meta muted",
         ),
       );
@@ -918,6 +930,19 @@
             ),
           );
         const actions = element("div", "", "actions detail-actions");
+        const hostSignIn = button("Use for host sign-in", () =>
+          confirmOperation(
+            "Use for host sign-in",
+            "Use this exact subscription profile for Remote Control. Inference selection is unchanged. The phone must use the matching account and workspace; reconnect or pair again after a host owner change.",
+            { type: "primaryUse", profileId: id },
+            [
+              ["Account", account.label],
+              ["Profile ID", id],
+              ["Email", account.email],
+            ],
+          ),
+        );
+        hostSignIn.disabled = account.loginState !== "signedIn";
         const retry = button("Retry without credit", () =>
           confirmOperation(
             "Retry without credit",
@@ -956,6 +981,7 @@
               : "Complete login",
             () => showLogin(id),
           ),
+          hostSignIn,
           button("Edit label & priority", () => showEdit(id)),
           button(account.disabled ? "Enable account" : "Disable account", () =>
             confirmOperation(
@@ -994,7 +1020,7 @@
     let label, priority;
     openDialog(
       t("Edit account"),
-      "A lower priority number is preferred. Clearing the label displays the profile ID.",
+      "A lower priority number is preferred. A blank label uses the account email, then the profile ID.",
       (body) => {
         body.append(definitions([["Profile ID", id]]));
         label = field(
@@ -1002,7 +1028,7 @@
           "label",
           "Label",
           "text",
-          account.label === id ? "" : account.label,
+          account.customLabel ?? "",
           "Up to 80 characters.",
           { maxLength: 80 },
         );
@@ -1016,13 +1042,16 @@
           { min: 0, max: 4294967295, step: 1, required: true },
         );
       },
-      () =>
-        perform({
+      () => {
+        const nextLabel = label.value.trim();
+        return perform({
           type: "update",
           profileId: id,
-          label: label.value.trim(),
+          label:
+            nextLabel === (account.customLabel ?? "").trim() ? null : nextLabel,
           priority: Number(priority.value),
-        }),
+        });
+      },
       "Save account",
     );
   }
