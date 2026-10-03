@@ -10,7 +10,11 @@ impl AccountManager {
         let store = self.store();
         let state = AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf()).load()?;
         let paused = codex_login::AccountPoolRuntime::is_home_suspended(&self.config.codex_home);
-        let refreshes = self.refreshes.lock().await.clone();
+        let refreshes = self
+            .refreshes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let mut accounts = Vec::new();
         for record in store.load_profile_records()? {
             let saved = state
@@ -80,7 +84,11 @@ impl AccountManager {
                 plan: auth
                     .as_ref()
                     .and_then(codex_login::CodexAuth::account_plan_type)
-                    .map(|plan| format!("{plan:?}")),
+                    .map(|plan| {
+                        let value = serde_json::to_value(plan).unwrap_or_default();
+                        serde_json::from_value::<codex_protocol::auth::KnownPlan>(value)
+                            .map_or_else(|_| "Unknown".into(), |plan| plan.display_name().into())
+                    }),
                 email: auth
                     .as_ref()
                     .and_then(codex_login::CodexAuth::get_account_email),
@@ -98,19 +106,14 @@ impl AccountManager {
             });
         }
         accounts.sort_by_key(|account| (account.priority, account.profile_id.clone()));
-        let login_jobs = self
-            .logins
-            .lock()
-            .await
-            .values()
-            .map(|job| job.progress.clone())
-            .collect();
+        let login_jobs = self.login_progress().await;
         let config = codex_core::config::ConfigBuilder::default()
             .codex_home(self.config.codex_home.to_path_buf())
             .build()
             .await?;
         let (api_accounts, api_state) = self.api_inventory()?;
         Ok(AccountManagerInventory {
+            host_now: Utc::now().timestamp(),
             paused,
             active_profile_id: (!paused)
                 .then_some(state.active_profile_id)

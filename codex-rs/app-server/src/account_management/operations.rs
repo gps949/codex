@@ -22,8 +22,7 @@ impl AccountManager {
             | AccountManagerOperation::ApiRemove { .. }
             | AccountManagerOperation::ApiFallback { .. }) => return self.api_operation(operation),
             AccountManagerOperation::Refresh { profile_ids } => {
-                self.refresh_profiles(profile_ids).await?;
-                "Quota check completed. Each account shows its own result.".into()
+                self.refresh_profiles(profile_ids).await?
             }
             AccountManagerOperation::Use { profile_id } => {
                 self.select(&profile_id, AccountSelectionMode::AvailableOnly)?;

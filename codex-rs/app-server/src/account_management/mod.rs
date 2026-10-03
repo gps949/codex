@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 /// Shared administration operations used by terminal and browser clients.
 pub struct AccountManager {
     config: Arc<Config>,
-    refreshes: Mutex<HashMap<String, RefreshStatus>>,
+    refreshes: Arc<std::sync::Mutex<HashMap<String, RefreshStatus>>>,
     logins: Mutex<HashMap<String, login::LoginJob>>,
     login_shutdown: std::sync::atomic::AtomicBool,
 }
@@ -31,7 +31,7 @@ impl AccountManager {
     pub fn new(config: Config) -> Arc<Self> {
         Arc::new(Self {
             config: Arc::new(config),
-            refreshes: Mutex::new(HashMap::new()),
+            refreshes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             logins: Mutex::new(HashMap::new()),
             login_shutdown: std::sync::atomic::AtomicBool::new(false),
         })
@@ -53,6 +53,7 @@ impl AccountManager {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountManagerInventory {
+    pub host_now: i64,
     pub paused: bool,
     pub active_profile_id: Option<String>,
     pub accounts: Vec<ManagedAccountView>,
@@ -110,6 +111,7 @@ pub struct ManagedRateLimits {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshStatus {
+    pub in_progress: bool,
     pub attempted_at: i64,
     pub succeeded: bool,
     pub message: String,

@@ -48,13 +48,13 @@ async fn account_management_refresh_confirms_external_reset_without_generating_r
     let server = MockServer::start().await;
     let reset = chrono::Utc::now() + chrono::Duration::hours(2);
     Mock::given(method("GET")).and(path("/backend-api/wham/usage"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(400)).set_body_json(serde_json::json!({
             "account_id":"fixture-account", "user_id":"fixture-owner", "plan_type":"pro",
             "rate_limit":{"allowed":true,"limit_reached":false,
                 "primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":reset.timestamp(),"reset_after_seconds":7200},
                 "secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":reset.timestamp(),"reset_after_seconds":7200}},
             "spend_control":{"reached":false}
-        }))).mount(&server).await;
+        }))).expect(2).mount(&server).await;
     app_test_support::mount_workspace_routing(&server).await;
     Mock::given(method("GET"))
         .and(path("/api/codex/config/bundle"))
@@ -86,11 +86,43 @@ async fn account_management_refresh_confirms_external_reset_without_generating_r
         .await?;
     config.chatgpt_base_url = format!("{}/backend-api", server.uri());
     let manager = AccountManager::new(config);
-    manager
+    let refreshing = {
+        let manager = Arc::clone(&manager);
+        let id = profile.id.to_string();
+        tokio::spawn(async move {
+            manager
+                .execute(AccountManagerOperation::Refresh {
+                    profile_ids: Some(vec![id.clone(), id]),
+                })
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if manager
+                .refreshes
+                .lock()
+                .unwrap()
+                .get(profile.id.as_str())
+                .is_some_and(|status| status.in_progress)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let joined = manager
         .execute(AccountManagerOperation::Refresh {
             profile_ids: Some(vec![profile.id.to_string()]),
         })
         .await?;
+    assert!(
+        joined.message.contains("1 already checking"),
+        "{}",
+        joined.message
+    );
+    refreshing.await??;
     let inventory = manager.inventory().await?;
     assert!(
         inventory.accounts[0].refresh.as_ref().unwrap().succeeded,
@@ -115,6 +147,54 @@ async fn account_management_refresh_confirms_external_reset_without_generating_r
             .unwrap()
             .iter()
             .all(|request| request.method.as_str() == "GET")
+    );
+    let interrupted = {
+        let manager = Arc::clone(&manager);
+        let id = profile.id.to_string();
+        tokio::spawn(async move {
+            manager
+                .execute(AccountManagerOperation::Refresh {
+                    profile_ids: Some(vec![id]),
+                })
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path() == "/backend-api/wham/usage")
+                .count()
+                == 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    interrupted.abort();
+    assert!(matches!(interrupted.await, Err(error) if error.is_cancelled()));
+    let latest = manager.inventory().await?;
+    assert!(!latest.accounts[0].refresh.as_ref().unwrap().in_progress);
+    assert!(
+        latest.accounts[0]
+            .refresh
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("interrupted")
+    );
+    assert_eq!(
+        latest.accounts[0]
+            .rate_limits
+            .primary
+            .as_ref()
+            .map(|window| window.used_percent),
+        Some(0.0)
     );
     assert_eq!(
         runtime.load()?.active_profile_id.as_ref(),

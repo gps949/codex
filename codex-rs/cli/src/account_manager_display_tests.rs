@@ -44,6 +44,7 @@ fn inventory() -> AccountManagerInventory {
     })
     .collect();
     AccountManagerInventory {
+        host_now: 1800000000,
         paused: false,
         active_profile_id: Some("fixture-0".into()),
         accounts,

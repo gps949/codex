@@ -14,6 +14,19 @@ pub(super) struct LoginJob {
 mod tests;
 
 impl AccountManager {
+    /// Reads device-login progress without contacting the backend or refreshing credentials.
+    pub async fn login_progress(&self) -> Vec<LoginProgress> {
+        let mut jobs: Vec<_> = self
+            .logins
+            .lock()
+            .await
+            .values()
+            .map(|job| job.progress.clone())
+            .collect();
+        jobs.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
+        jobs
+    }
+
     pub(super) async fn start_login(
         self: &Arc<Self>,
         profile_id: Option<String>,

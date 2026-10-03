@@ -66,12 +66,20 @@ impl AccountManager {
         ))
     }
 
-    pub(super) async fn refresh_profiles(&self, ids: Option<Vec<String>>) -> anyhow::Result<()> {
+    pub(super) async fn refresh_profiles(
+        &self,
+        ids: Option<Vec<String>>,
+    ) -> anyhow::Result<String> {
         let records = self.store().load_profile_records()?;
         let ids = match ids {
             Some(ids) => {
                 for id in &ids {
-                    self.profile(id)?;
+                    anyhow::ensure!(
+                        records
+                            .iter()
+                            .any(|record| record.profile.id.as_str() == id),
+                        "Account profile no longer exists"
+                    );
                 }
                 ids
             }
@@ -83,11 +91,44 @@ impl AccountManager {
                 .map(|record| record.profile.id.to_string())
                 .collect(),
         };
-        let mut jobs = futures::stream::iter(ids)
-            .map(|id| async move {
-                let attempted_at = Utc::now().timestamp();
+        let ids: std::collections::HashSet<_> = ids.into_iter().collect();
+        let mut pending = Vec::new();
+        let mut skipped = 0;
+        {
+            let mut statuses = self
+                .refreshes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for id in ids {
+                if statuses.get(&id).is_some_and(|status| status.in_progress) {
+                    skipped += 1;
+                    continue;
+                }
+                let count = statuses
+                    .get(&id)
+                    .and_then(|status| status.reset_credit_count);
+                statuses.insert(
+                    id.clone(),
+                    RefreshStatus {
+                        in_progress: true,
+                        attempted_at: Utc::now().timestamp(),
+                        succeeded: false,
+                        message: "Checking fresh quota…".into(),
+                        reset_credit_count: count,
+                    },
+                );
+                pending.push(RefreshPermit {
+                    statuses: Arc::clone(&self.refreshes),
+                    id,
+                    completed: false,
+                });
+            }
+        }
+        let mut jobs = futures::stream::iter(pending)
+            .map(|mut permit| async move {
                 let result =
-                    tokio::time::timeout(Duration::from_secs(10), self.refresh_profile(&id)).await;
+                    tokio::time::timeout(Duration::from_secs(10), self.refresh_profile(&permit.id))
+                        .await;
                 let (succeeded, message, count) = match result {
                     Ok(Ok((recovered, count))) => (
                         true,
@@ -106,19 +147,36 @@ impl AccountManager {
                         None,
                     ),
                 };
-                self.refreshes.lock().await.insert(
-                    id,
-                    RefreshStatus {
-                        attempted_at,
-                        succeeded,
-                        message,
-                        reset_credit_count: count,
-                    },
-                );
+                let mut statuses = self
+                    .refreshes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(status) = statuses.get_mut(&permit.id) {
+                    status.in_progress = false;
+                    status.succeeded = succeeded;
+                    status.message = message;
+                    if succeeded {
+                        status.reset_credit_count = count;
+                    }
+                }
+                permit.completed = true;
+                drop(statuses);
+                drop(permit);
+                succeeded
             })
             .buffer_unordered(4);
-        while jobs.next().await.is_some() {}
-        Ok(())
+        let mut updated = 0;
+        let mut failed = 0;
+        while let Some(succeeded) = jobs.next().await {
+            if succeeded {
+                updated += 1;
+            } else {
+                failed += 1;
+            }
+        }
+        Ok(format!(
+            "Quota check: {updated} updated, {failed} failed, {skipped} already checking. Each account shows its own result."
+        ))
     }
 
     async fn refresh_profile(&self, id: &str) -> anyhow::Result<(bool, Option<u64>)> {
@@ -355,5 +413,27 @@ impl AccountManager {
         drop(_lock);
         self.refresh_profiles(Some(vec![id.into()])).await?;
         Ok(message.into())
+    }
+}
+
+// Owns a refresh reservation even while it waits for the concurrency budget.
+struct RefreshPermit {
+    statuses: Arc<std::sync::Mutex<HashMap<String, RefreshStatus>>>,
+    id: String,
+    completed: bool,
+}
+
+impl Drop for RefreshPermit {
+    fn drop(&mut self) {
+        if !self.completed
+            && let Some(status) = self
+                .statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_mut(&self.id)
+        {
+            status.in_progress = false;
+            status.message = "Quota check interrupted; refresh to try again".into();
+        }
     }
 }
