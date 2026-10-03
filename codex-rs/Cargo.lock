@@ -2577,6 +2577,7 @@ dependencies = [
  "sys-locale",
  "tar",
  "tempfile",
+ "textwrap 0.16.2",
  "tikv-jemallocator",
  "tokio",
  "tokio-tungstenite",
@@ -2585,6 +2586,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "unicode-segmentation",
+ "unicode-width 0.2.1",
  "url",
  "vt100",
  "which 8.0.0",
@@ -3827,6 +3829,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "urlencoding",
+ "uuid",
  "webbrowser",
  "wiremock",
 ]
