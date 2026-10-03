@@ -63,7 +63,7 @@ Quota bars show **used** quota for each account. Unknown quota stays unknown. Ea
 
 **Refresh quota** contacts each enabled account's usage endpoint. Progress shows accounts still checking and the completion summary counts updates and failures. Repeated refreshes join existing per-account checks. Inspect each account's result if a request failed. A failed refresh retains the old values. Current quota percentages are advisory; request refusals remain authoritative until a fresh, complete, matching backend response confirms recovery.
 
-Labels and exact profile IDs are separate. Search labels, email or IDs; open details for less frequently used information. Desktop tables become cards on narrow screens.
+Labels and exact profile IDs are separate. Without a custom label, the full account email is the display name; a missing email falls back to the profile ID. Search labels, email or IDs; open details for less frequently used information. Desktop tables become cards on narrow screens. Accounts sharing an email still have distinct profile IDs.
 
 ## Restore an exhausted pool
 
@@ -74,6 +74,8 @@ If you already redeemed a reset credit elsewhere:
 3. If the backend response is incomplete, use **Retry without credit** for the intended account. This clears its local cooldown for a new request; the backend can still reject usage. It does not consume a credit.
 
 An exhausted new turn also makes a bounded passive usage check. A turn already waiting for quota checks periodically, so it can discover an external reset without waiting for the old cached deadline. Cancellation still stops waiting. This is in-process continuation; stopping the host process does not persist a running task.
+
+Earlier accounts can re-enter during the same long task when their cooldown ends; having failed once does not permanently exclude them from that task. A final bounded recovery check also reaches beyond the ordinary small background batch before declaring whole-pool exhaustion. Recovery stops on usable free quota. Repeated inference refusals despite positive usage metadata are limited to prevent a retry loop; incomplete coverage is reported as unconfirmed, rather than proof that all accounts remain exhausted.
 
 If a new refusal or relogin races a refresh, the newer account state wins. The next fresh check can retry. A workspace entitlement or login failure is not treated as ordinary quota recovery.
 
@@ -87,7 +89,28 @@ Use Add account for device login. Open the verification URL and enter the code; 
 
 Edit labels and priority, enable or disable scheduling, and remove profiles from the same page. Removing local credentials attempts server revocation; local removal does not prove that the remote revocation succeeded. Pending-login cancellation cleans the selected credential storage without revoking credentials that were copied into an existing profile.
 
+**Edit label & priority** shows only the saved custom label in its name field. Leave it empty for an automatic email name. Changing priority alone keeps that choice; clearing an existing name restores the email. In the standalone terminal manager, **E** edits while Enter retains the current custom label, and **N** explicitly clears it. A CLI equivalent is `codex account set <profile-id> --clear-label`.
+
 The standalone terminal manager offers numbered accounts, login tasks and reset credits with explicit action menus. It defaults to English; use `--lang zh-CN` at startup or press **G** to switch between English and Simplified Chinese. Commands, confirmation words, account names and identifiers keep their original values. Verification codes appear while you wait at the main menu. Credit errors retain the same operation ID for review and retry; record the printed ID before closing the manager. Invalid input returns to the menu with an explanation. The browser interface provides the most detailed credit and quota layout.
+
+## Choose the Remote Control host sign-in
+
+The **Host sign-in / Remote Control** panel shows the login source separately from the inference selection. In account details, choose **Use for host sign-in**, verify the displayed account, email and exact profile ID, then confirm. In the terminal manager, choose the account and press **H**, then type `APPLY`. A completed subscription login is required; an inference cooldown or disabled inference scheduling does not prevent using its identity for host sign-in.
+
+This source stays fixed while pool inference rotates. It refers to the selected profile's credentials instead of copying tokens into the root home. Adding the first pool account does not import the root login, and enrollment does not select a host identity automatically. With no explicit selection, an existing root login remains the default host source.
+
+**Use root login** returns to credentials saved by `codex login`. **Sign out host** retains the pool's saved credentials and inference selection. The corresponding CLI commands are:
+
+```sh
+codex account primary status
+codex account primary use <label-or-email-or-profile-id>
+codex account primary root
+codex account primary logout
+```
+
+Removing a profile selected for host sign-in is blocked. Select another source or sign out first. Older `legacy-root` entries are retained during upgrade; removing that pool entry keeps root credentials. New enrollment does not create an imported entry.
+
+Stored host credentials being available is a local status, not confirmation of a device connection. The official phone app must use the matching account and workspace; an identity change can require reconnecting or pairing again. If the selected login becomes unavailable or changes owner, host authentication stops instead of silently choosing a different pool identity. Repair the selected login or explicitly choose another source.
 
 ## Choose settings without learning the config format
 

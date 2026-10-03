@@ -24,13 +24,9 @@ codex account list
 codex
 ```
 
-每次登录时选对账号与工作区。首次创建账号池会登记已有的根 ChatGPT 登录；重复添加同一用户、同一工作区会更新原配置档。远程主机没有浏览器时可运行 `codex account add --label "Work" --device-auth`。
+每次登录时选对账号与工作区。重复添加同一用户、同一工作区会更新原配置档。首次创建账号池不再自动导入已有的根登录。远程主机没有浏览器时可运行 `codex account add --label "Work" --device-auth`。
 
-用 `account list` 核对最终名称。如果导入的账号仍叫 Existing login，可以先重命名，再使用下文示例：
-
-```sh
-codex account set "Existing login" --label "Personal"
-```
+名称可以不填：直接运行 `codex account add`，登录完成后会显示账号邮箱，没有邮箱时使用档案 ID。同一邮箱的个人账号与 Business 席位建议分别设置自定义名称。用 `account list` 核对名称；`codex account set "Work" --clear-label` 可以恢复自动名称。
 
 添加成功后账号池自动生效，继续正常使用 Codex 即可。输入 `/account` 可以查看账号与选择方式。
 
@@ -45,6 +41,23 @@ codex account manage
 它会打开配对后的浏览器管理页，集中展示订阅账号额度、可用状态、刷新结果，并提供编辑、登录、重置券兑换、账号池设置，以及独立的 API 账号管理。只有终端的主机可用 `codex account manage --tui`。账号池为空或全部耗尽时仍能进入管理。手机访问方式和恢复步骤见[账号管理指南](ACCOUNT_MANAGER.zh-CN.md)。
 
 终端里的 `codex account list`、`codex account status` 使用对齐表格或窄屏卡片。`--details` 展开缓存时间和解释，`--format json` 返回结构化数据，`--format tsv` 明确使用制表符。auto 模式通过管道输出时保留原有 TSV 格式。
+
+## 主登录与推理账号池分开使用
+
+**主登录**决定这台主机以哪个身份连接 Remote Control；**推理账号池**提供执行任务的额度。账号池轮换推理账号时，主登录来源保持稳定。仅添加账号池账号的主机，仍需选择主登录来源，才能提供远程认证。
+
+可以直接选择已登记的订阅账号作为主登录，无需把其凭据复制到根登录：
+
+```sh
+codex account primary use "Work"
+codex account primary status
+```
+
+网页管理器提供 **Host sign-in / Remote Control（主登录 / 远程控制）** 概览和账号详情中的 **Use for host sign-in（用作主登录）**。独立终端管理器中选择账号，按 **H** 并输入 `APPLY` 确认。账号即使被停用于推理，或者额度正在冷却，仍可用作主登录；此操作不会同时将其选作推理账号。
+
+`codex account primary root` 返回 `codex login` 保存的根登录；`codex account primary logout` 只退出主登录，保留账号池凭据。重新成功执行 `codex login` 会再次选择根登录。正在用作主登录的账号不能直接移除，应先更换主登录来源或退出主登录。
+
+旧版本已有的 `legacy-root` 池条目升级后仍保留。希望账号池独立时，可明确移除此条目，根登录凭据会保留；新添加账号不再自动创建它。手机需要使用与主登录相同的账号和工作区，切换主登录身份后可能需要重连或重新配对。“已保存可用登录信息”只说明认证信息可用，不表示设备已经配对成功。
 
 ## 日常操作速查
 
@@ -62,7 +75,7 @@ codex account manage
 
 手动选择对后续请求生效，自动故障切换仍然开启；它不会永久将一个对话固定在该账号。使用同一个 `CODEX_HOME` 的进程也会共享当前选择与冷却状态。
 
-名称含空格时加引号。CLI 支持完整配置档 ID 或唯一名称；需要脚本操作或名称重复时，用 `codex account list --show-profile` 查看 ID。手机端可直接使用 `/account list` 给出的 `@selector`，也适用于邮箱相同的多个账号。
+名称含空格时加引号。CLI 支持完整档案 ID、唯一自定义名称或唯一邮箱。邮箱对应多个席位，或与其他账号的名称重合时，会拒绝不明确的匹配，请使用完整 ID 或不同名称；`codex account list --show-profile` 可查看 ID。手机端可直接使用 `/account list` 给出的 `@selector`，也适用于邮箱相同的多个账号。JSON/TSV 保留存储中的可空名称，不会把自动显示的邮箱误写成自定义名称。
 
 CLI 的 `use` 和手机端 `/account use` 会遵守额度冷却。确认账号额度已经恢复后，可以用 `codex account use "Work" --force` 或手机端 `/account retry "Work"` 明确重试。它仅清除本地冷却以便重新探测，服务端的真实配额限制仍然有效。TUI 中冷却账号会明确标为 `Retry`，选中后可查看重试说明。
 
@@ -90,6 +103,8 @@ codex account set "Work" --priority 10
 **Reset credits** 默认保留，不会自动兑换。自动兑换需要主动开启，只在全池耗尽且服务端确认的最近自然重置超过等待门槛、或自然重置时间未知时考虑。本地探测时间仅表示何时可以再试，不代表额度会免费恢复。最后失败账号没有信用次数时会继续检查其他耗尽账号，确认恢复即停止；兑换结果不明确时暂停，不再兑换其他账号。手动兑换会消耗该账号有限的信用次数；刷新额度或使用 `--force` 选择账号都不会产生新配额。
 
 所有账号耗尽后，Codex 可以**等待恢复并安全续跑**，默认最长等待六小时。原主机进程需要一直运行；结束进程会结束等待。用户可随时取消。已经显示的部分输出或尚未处理完整的工具结果可能需要先核对，无法直接自动续跑。
+
+长任务中，较早用过的账号在冷却结束后可以重新参与选择。报告全池耗尽前，还会进行有时间限制的额度恢复检查，覆盖日常小批量检查之外的账号。已确认恢复的免费额度优先于重置券和付费兜底；当 usage 接口持续说可用、推理请求仍拒绝时，会限制重试，避免无限轮换。超时或只检查了部分账号，不会当成已确认所有订阅耗尽。
 
 手机端标为 **Used** 和 CLI 的 `5H%` / `WEEK%` 表示已用；TUI 中带 **left** 的标签表示剩余百分比。Primary 通常是滚动五小时窗口，Secondary 通常是每周窗口，任一窗口都可能限制账号。需要分别看每个账号的两个窗口；不同套餐的百分比相加无法得到有意义的账号池余额。未知和缓存数值仅是观察结果，刷新失败不表示账号使用率为 0%。
 
@@ -169,7 +184,7 @@ codex account config set-auto-reset-credit-min-wait-minutes 60
 codex remote-control start
 ```
 
-按输出提示配对。需要时，`codex remote-control pair` 可生成短时有效的配对码。远程控制身份与主机根登录关联，执行账号池轮换不会要求手机重新配对。
+按输出提示配对。需要时，`codex remote-control pair` 可生成短时有效的配对码。远程控制使用 `codex account primary status` 展示的主登录来源；执行账号池轮换不会要求手机重新配对。
 
 在支持远程功能的 ChatGPT iOS 或 Android 客户端里，可以输入：
 
@@ -208,7 +223,7 @@ fork 通过手机端已有界面提供账号池标题、状态回复与控制，
 
 重新登录会先暂存新凭据，核对同一用户与工作区后再替换；要添加不同用户或席位，请用 `account add`。修复登录通常无需删除账号再重新添加。
 
-`codex logout` 会暂停账号池，并在重启后保留暂停，已登记配置档继续保留。`codex account remove "Work"` 删除一个配置档，通常也会删除或撤销其存储的凭据；加 `--keep-credentials` 可保留凭据。仅想暂留账号时使用可恢复的 `disable`。
+仅想退出主登录、保留账号池时，使用 `codex account primary logout`。主登录来源为根登录时，原有 `codex logout` 仍会暂停账号池，并在重启后保留暂停，已登记配置档继续保留。`codex account remove "Work"` 删除一个档案，通常也会删除或撤销其存储的凭据；加 `--keep-credentials` 可保留凭据。仅想暂留账号时使用可恢复的 `disable`。
 
 ## 更新
 
@@ -221,5 +236,7 @@ curl -fsSL https://raw.githubusercontent.com/gps949/codex/feature/native-multi-a
 macOS/Linux 安装脚本会检查发布的 SHA256，将主程序与辅助程序一起安装，并停止过期的受管理后台。手机用户需要随后重新启动远程控制。`codex update` 会引导至 fork 发布页。
 
 账号配置档与凭据存放在主机 `CODEX_HOME` 内，凭据遵循文件或系统钥匙串配置，请妥善保管该目录。配置 API-key provider 不会将 API key 转变为订阅账号池配置档。
+
+[Jev/Clef 决策模型研究](DECISION_MODELS.zh-CN.md)说明了工具筛选、推理强度建议等潜在改善、调用费用和需要实测的部分。本版没有启用这些模型，也不会用它们代替身份、额度或调度规则。
 
 跨工作区并发路由、旧不透明压缩历史自动迁移，以及真实个人/Business/手机使用仍需要后续完善或验收。自动化模拟用例与发行包完整性检查无法代替这些真实账号场景。

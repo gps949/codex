@@ -24,13 +24,9 @@ codex account list
 codex
 ```
 
-Select the intended account and workspace during each login. An existing root ChatGPT login is registered when the pool is first created. Adding the same user and workspace again refreshes its existing profile. On a host without a browser, use `codex account add --label "Work" --device-auth`.
+Select the intended account and workspace during each login. Adding the same user and workspace again refreshes its existing profile. The pool no longer imports an existing root login when it is created. On a host without a browser, use `codex account add --label "Work" --device-auth`.
 
-Check the resulting labels with `account list`. If an imported account is still named Existing login, rename it before using the examples below:
-
-```sh
-codex account set "Existing login" --label "Personal"
-```
+Labels are optional: `codex account add` displays the account's email after login, falling back to its profile ID if no email is available. Set a custom label to distinguish personal and Business profiles with the same email. Check the resulting names with `account list`; `codex account set "Work" --clear-label` restores the automatic name.
 
 Pooling starts automatically after enrollment. You can keep using Codex normally; `/account` shows the available profiles and selection controls.
 
@@ -45,6 +41,23 @@ codex account manage
 It opens a paired browser page with subscription quota, availability, refresh results, account editing, login, reset credits, pool settings and separate API accounts. On a terminal-only host use `codex account manage --tui`. The manager remains available when the pool is empty or exhausted. For phone access and recovery steps, see the [account manager guide](ACCOUNT_MANAGER.md).
 
 In a terminal, `codex account list` and `codex account status` use aligned tables or compact cards. Add `--details` for cache times and explanations, `--format json` for structured data, or `--format tsv` for tab-separated output. Piped auto output keeps the existing TSV format.
+
+## Keep Remote Control sign-in separate
+
+The **host sign-in** identifies this computer to Remote Control. The **inference pool** supplies quota for tasks. Pool rotation changes inference accounts while keeping the host sign-in source stable. A computer with only enrolled pool accounts still needs a host sign-in source before Remote authentication is available.
+
+Use an enrolled subscription profile as the host sign-in without copying its credentials into the root login:
+
+```sh
+codex account primary use "Work"
+codex account primary status
+```
+
+The browser manager exposes **Host sign-in / Remote Control** and **Use for host sign-in** in account details. In the standalone terminal manager, choose an account and press **H**, then confirm with `APPLY`. A profile can serve as host sign-in even when it is disabled for inference or cooling down. Choosing it does not select it for inference.
+
+Use `codex account primary root` to return to the root credentials created by `codex login`, or `codex account primary logout` to sign out the host while retaining pool credentials. A new successful `codex login` selects the root login again. Removing the profile currently used for host sign-in is blocked until you choose another source or sign out.
+
+Older `legacy-root` pool entries stay visible after upgrading. Remove that entry explicitly if you want a separate pool; its removal retains root credentials. New enrollments do not create it. The phone must match the selected host account and workspace; changing that identity can require reconnecting or pairing again. Stored authentication being ready does not prove that a Remote device connection is paired.
 
 ## Everyday controls
 
@@ -62,7 +75,7 @@ In a terminal, `codex account list` and `codex account status` use aligned table
 
 Selection applies to subsequent requests and keeps automatic failover enabled. It does not permanently pin a thread to an account. Pools sharing the same `CODEX_HOME` also share their active selection and cooldown state.
 
-Use quoted labels with spaces. CLI selectors accept an exact profile ID or a unique label. `codex account list --show-profile` reveals IDs for scripts or duplicate labels. Mobile accepts the `@selector` shown by `/account list`, which also distinguishes accounts sharing an email.
+Use quoted labels with spaces. CLI selectors accept an exact profile ID, a unique custom label, or a unique account email. If an email matches several seats or another account's label, use an exact ID or distinct labels; ambiguous matches are rejected. `codex account list --show-profile` reveals IDs for scripts or duplicate names. Mobile accepts the `@selector` shown by `/account list`, which also distinguishes accounts sharing an email. JSON/TSV keep the stored nullable label rather than turning an automatic email into a custom label.
 
 CLI `use` and mobile `/account use` respect a quota cooldown. If you have confirmed that an account's quota recovered, explicitly retry it with `codex account use "Work" --force` or `/account retry "Work"` on mobile. This clears a local cooldown so Codex can probe again; the server's actual quota limit still applies. Cooling accounts in the TUI are explicitly labeled `Retry`, with the retry effect shown when selected.
 
@@ -90,6 +103,8 @@ A model-specific limit keeps the account available for other models; follow the 
 **Reset credits** are saved by default. Automatic redemption is opt-in and only considered after the whole pool is exhausted, when the next backend-confirmed natural reset is farther away than the configured threshold or no natural reset is known. A local retry deadline is only a time to probe again; it does not prove a free reset. If the last failed account has no credit, other exhausted accounts are checked until one recovers; an ambiguous redemption stops the pass. A manual redemption uses a limited credit for that account; refreshing quota or selecting it with `--force` does not create new quota.
 
 When all accounts run out, Codex can **wait and continue safely** after quota recovers. The default maximum wait is six hours. The original host process must remain running; stopping it ends the wait. You can cancel at any time. Visible partial output and unresolved tool results can require reconciliation instead of automatic continuation.
+
+An account used earlier in a long task can re-enter after its cooldown ends. Before reporting whole-pool exhaustion, Codex also makes a bounded metadata recovery pass, including accounts beyond the ordinary small background batch. Confirmed free quota is preferred to reset credits or paid fallback. If the usage endpoint says an account is available but inference keeps refusing it, retries are limited instead of rotating indefinitely. A timeout or partial check is not treated as proof that every subscription is exhausted.
 
 Mobile percentages labeled **Used** and CLI `5H%` / `WEEK%` show usage. TUI labels ending in **left** show the remaining percentage. Primary is usually a rolling 5-hour window and secondary is usually weekly; either window can limit an account. Compare each account's windows separately: adding percentages across plans does not produce a meaningful pool balance. Unknown or cached values remain observations; a failed refresh does not mean an account has 0% usage.
 
@@ -169,7 +184,7 @@ Configure profiles on the remote host first, then start remote control from the 
 codex remote-control start
 ```
 
-Follow the pairing information that it prints. If needed, `codex remote-control pair` creates a short-lived pairing code. The remote-control account is tied to the host's root login; execution-pool rotation does not re-pair the phone.
+Follow the pairing information that it prints. If needed, `codex remote-control pair` creates a short-lived pairing code. Remote Control follows the host sign-in source shown by `codex account primary status`; execution-pool rotation does not re-pair the phone.
 
 In a supported ChatGPT iOS or Android remote client:
 
@@ -208,7 +223,7 @@ The fork supplies pool captions, status replies, and controls through interfaces
 
 Re-login stages the new credentials before replacement and verifies the same user and workspace. For a different account or seat, use `account add`. Removing and re-adding a profile is usually unnecessary to repair login.
 
-`codex logout` pauses pooling across restarts while retaining enrolled profiles. `codex account remove "Work"` removes one profile and normally deletes/revokes its stored credentials; `--keep-credentials` retains them. `disable` is the reversible way to reserve an account without removing its login.
+Use `codex account primary logout` for a host-only sign-out that keeps the pool. When root login is the active source, the existing `codex logout` flow still pauses pooling across restarts while retaining enrolled profiles. `codex account remove "Work"` removes one profile and normally deletes/revokes its stored credentials; `--keep-credentials` retains them. `disable` is the reversible way to reserve an account without removing its login.
 
 ## Update
 
@@ -221,5 +236,7 @@ curl -fsSL https://raw.githubusercontent.com/gps949/codex/feature/native-multi-a
 The macOS/Linux installer validates published SHA256 checksums, installs the helpers with the main binary, and stops a stale managed daemon. Restart remote control afterward if you use it. `codex update` directs you to the fork's releases.
 
 Account profiles and credentials stay on the host under `CODEX_HOME`; credential storage follows the configured file/keyring mode. Keep that directory private. API-key provider configuration does not turn an API key into a subscription-pool profile.
+
+The [Jev/Clef decision-model research](DECISION_MODELS.md) explains potential tool-selection and reasoning-effort improvements, their cost, and what needs measurement. These models are not enabled in this release and do not replace account identity, quota, or scheduling rules.
 
 Cross-workspace concurrent routing, automatic migration of old opaque compacted history, and real Personal/Business/mobile acceptance still need further work. Automated fixture coverage and release archive checks do not establish those real-account behaviors.
