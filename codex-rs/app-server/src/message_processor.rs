@@ -176,6 +176,8 @@ pub(crate) struct ConnectionSessionState {
     pub(crate) origin: crate::transport::ConnectionOrigin,
     pub(crate) mcp_event_streams: McpEventStreams,
     initialized: OnceLock<InitializedConnectionSessionState>,
+    /// Serializes native-control registration with the early disconnect cleanup.
+    native_controls_lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug)]
@@ -195,6 +197,7 @@ impl ConnectionSessionState {
             rpc_gate: Arc::new(ConnectionRpcGate::new()),
             mcp_event_streams: McpEventStreams::default(),
             initialized: OnceLock::new(),
+            native_controls_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -843,6 +846,14 @@ impl MessageProcessor {
     }
 
     pub(crate) async fn drain_background_tasks(&self) {
+        if let Err(error) = self
+            .account_processor
+            .native_account_manager
+            .shutdown()
+            .await
+        {
+            tracing::warn!(%error, "native account controls shutdown cleanup failed");
+        }
         self.models_refresh_worker.shutdown();
         if let Some(worker) = &self.turn_cost_worker {
             worker.shutdown();
@@ -867,7 +878,24 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         session_state: &ConnectionSessionState,
     ) {
-        session_state.rpc_gate.close().await;
+        {
+            let _lifecycle = Arc::clone(&session_state.native_controls_lifecycle)
+                .lock_owned()
+                .await;
+            session_state.rpc_gate.close().await;
+            self.outgoing
+                .disconnect_connection_control_scopes(connection_id)
+                .await;
+            if let Err(error) = self
+                .account_processor
+                .native_account_manager
+                .unregister(connection_id)
+                .await
+            {
+                tracing::warn!(%error, "native account controls disconnect cleanup failed");
+            }
+        }
+
         self.account_processor
             .gateway_connection_closed(connection_id);
         self.request_serialization_queues.discard_closed().await;
@@ -951,10 +979,32 @@ impl MessageProcessor {
                 .await?;
             // Deferred outbound initialization still establishes the client identity here.
             // Register it for later verified pool updates even when lib.rs marks it ready.
-            if let Some(client_name) = session.app_server_client_name() {
-                self.account_processor
-                    .register_remote_client(connection_id, client_name)
+            {
+                let _lifecycle = Arc::clone(&session.native_controls_lifecycle)
+                    .lock_owned()
                     .await;
+                if session.rpc_gate.is_closed() {
+                    return Ok(());
+                }
+                self.outgoing
+                    .register_connection_owned_scope(connection_id)
+                    .await;
+                self.account_processor
+                    .native_account_manager
+                    .register_connection(
+                        connection_id,
+                        crate::native_account_capabilities::NativeAccountCapabilities::capture(
+                            session.app_server_client_name().unwrap_or_default(),
+                            session.client_version().unwrap_or_default(),
+                            session.experimental_api_enabled(),
+                            &session.client_mcp_extensions(),
+                        ),
+                    );
+                if let Some(client_name) = session.app_server_client_name() {
+                    self.account_processor
+                        .register_remote_client(connection_id, client_name)
+                        .await;
+                }
             }
             if connection_initialized {
                 self.connection_initialized(connection_id, session.request_attestation())
@@ -1304,6 +1354,13 @@ impl MessageProcessor {
             }
             ClientRequest::ThreadUnsubscribe { params, .. } => {
                 let thread_id = params.thread_id.clone();
+                if let Ok(thread_id) = ThreadId::from_string(&thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread_for_owner(connection_id, thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
                 let response = self
                     .thread_processor
                     .thread_unsubscribe(&request_id, params)
@@ -1336,11 +1393,25 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::ThreadArchive { params, .. } => {
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
                 self.thread_processor
                     .thread_archive(request_id.clone(), params)
                     .await
             }
             ClientRequest::ThreadDelete { params, .. } => {
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
                 self.thread_processor
                     .thread_delete(request_id.clone(), params)
                     .await
@@ -1398,11 +1469,19 @@ impl MessageProcessor {
                 .reorder(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::ThreadQueueStart { params, .. } => self
-                .thread_queue_processor
-                .start(&request_id, params)
-                .await
-                .map(|response| Some(response.into())),
+            ClientRequest::ThreadQueueStart { params, .. } => {
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
+                self.thread_queue_processor
+                    .start(&request_id, params)
+                    .await
+                    .map(|response| Some(response.into()))
+            }
             ClientRequest::ThreadMetadataUpdate { params, .. } => {
                 self.thread_processor.thread_metadata_update(params).await
             }
@@ -1453,6 +1532,13 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::ThreadCompactStart { params, .. } => {
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
                 self.thread_processor
                     .thread_compact_start(&request_id, params)
                     .await
@@ -1473,6 +1559,13 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::ThreadRevert { params, .. } => {
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
                 self.thread_processor
                     .thread_revert(
                         request_id.clone(),
@@ -1527,6 +1620,13 @@ impl MessageProcessor {
                 self.thread_processor.thread_items_list(params).await
             }
             ClientRequest::ThreadShellCommand { params, .. } => {
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
                 self.thread_processor
                     .thread_shell_command(&request_id, params)
                     .await
@@ -1636,7 +1736,14 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::TurnStart { params, .. } => {
-                if let Some(response) = self
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
+                match self
                     .account_processor
                     .try_handle_mobile_slash_turn(
                         request_id.clone(),
@@ -1647,16 +1754,20 @@ impl MessageProcessor {
                     )
                     .await?
                 {
-                    Ok(Some(response.into()))
-                } else {
-                    self.turn_processor
-                        .turn_start(
-                            request_id.clone(),
-                            params,
-                            app_server_client_name.clone(),
-                            client_version.clone(),
-                        )
-                        .await
+                    crate::request_processors::MobileSlashTurnResult::Completed(response) => {
+                        Ok(Some((*response).into()))
+                    }
+                    crate::request_processors::MobileSlashTurnResult::NativeHandled => Ok(None),
+                    crate::request_processors::MobileSlashTurnResult::Unrecognized => {
+                        self.turn_processor
+                            .turn_start(
+                                request_id.clone(),
+                                params,
+                                app_server_client_name.clone(),
+                                client_version.clone(),
+                            )
+                            .await
+                    }
                 }
             }
             ClientRequest::ThreadInjectItems { params, .. } => {
@@ -1665,6 +1776,13 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::TurnSteer { params, .. } => {
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
                 self.turn_processor.turn_steer(&request_id, params).await
             }
             ClientRequest::TurnSettingsUpdate { params, .. } => {
@@ -1673,11 +1791,33 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::TurnInterrupt { params, .. } => {
-                self.turn_processor
-                    .turn_interrupt(&request_id, params)
-                    .await
+                let handled = if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .try_interrupt(connection_id, thread_id, &params.turn_id)
+                        .await
+                        .map_err(invalid_request)?
+                } else {
+                    false
+                };
+                if handled {
+                    Ok(Some(
+                        codex_app_server_protocol::TurnInterruptResponse {}.into(),
+                    ))
+                } else {
+                    self.turn_processor
+                        .turn_interrupt(&request_id, params)
+                        .await
+                }
             }
             ClientRequest::ThreadRealtimeStart { params, .. } => {
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
                 self.turn_processor
                     .thread_realtime_start(&request_id, params)
                     .await
@@ -1709,6 +1849,13 @@ impl MessageProcessor {
                 self.turn_processor.thread_realtime_list_voices().await
             }
             ClientRequest::ReviewStart { params, .. } => {
+                if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
+                    self.account_processor
+                        .native_account_manager
+                        .cancel_thread(thread_id)
+                        .await
+                        .map_err(invalid_request)?;
+                }
                 self.turn_processor.review_start(&request_id, params).await
             }
             ClientRequest::McpServerOauthLogin { params, .. } => {

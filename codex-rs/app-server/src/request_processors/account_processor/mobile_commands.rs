@@ -3,6 +3,7 @@
 use super::*;
 use crate::mobile_account_bridge::MobileSlashCommand;
 use crate::mobile_account_status as view;
+use crate::native_account_capabilities::NativeAccountLanguage;
 use crate::request_processors::config_processor::ConfigRequestProcessor;
 use crate::request_serialization::RequestSerializationAccess;
 use crate::request_serialization::RequestSerializationQueueKey;
@@ -10,6 +11,12 @@ use crate::request_serialization::RequestSerializationQueues;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigEdit;
 use codex_app_server_protocol::MergeStrategy;
+
+pub(crate) enum MobileSlashTurnResult {
+    Unrecognized,
+    Completed(Box<TurnStartResponse>),
+    NativeHandled,
+}
 
 impl AccountRequestProcessor {
     pub(crate) async fn try_handle_mobile_slash_turn(
@@ -19,9 +26,9 @@ impl AccountRequestProcessor {
         client_name: Option<&str>,
         config_processor: &ConfigRequestProcessor,
         queues: &RequestSerializationQueues,
-    ) -> Result<Option<TurnStartResponse>, JSONRPCErrorError> {
+    ) -> Result<MobileSlashTurnResult, JSONRPCErrorError> {
         let Some(command) = mobile_slash_command(&params.input, client_name) else {
-            return Ok(None);
+            return Ok(MobileSlashTurnResult::Unrecognized);
         };
         let thread_id = ThreadId::from_string(&params.thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
@@ -32,13 +39,54 @@ impl AccountRequestProcessor {
             .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
         super::super::thread_input::ensure_direct_input_allowed(thread.as_ref()).await?;
         // A synthetic turn must not replace the mobile client's real running turn.
-        if matches!(
-            thread.agent_status().await,
-            codex_protocol::protocol::AgentStatus::Running
-        ) {
+        if thread.active_turn_environment_selections().await.is_some()
+            || matches!(
+                thread.agent_status().await,
+                codex_protocol::protocol::AgentStatus::Running
+            )
+        {
             return Err(invalid_request(
                 "A turn is running. Open the Status panel or wait for it to finish.",
             ));
+        }
+        if command == MobileSlashCommand::Account
+            && let Some(V2UserInput::Text { text, .. }) = params.input.first()
+        {
+            let mut words = text.split_whitespace();
+            words.next();
+            let verb = words.next().unwrap_or_default();
+            if matches!(verb, "manage" | "capabilities") {
+                let language = NativeAccountLanguage::parse(words.next().unwrap_or_default())
+                    .filter(|_| words.next().is_none())
+                    .ok_or_else(|| invalid_request(format!("Usage: /account {verb} [en|zh-CN]")))?;
+                if verb == "manage" {
+                    self.native_account_manager
+                        .start(
+                            &request_id,
+                            Arc::clone(&thread),
+                            &params,
+                            Arc::clone(&self.native_account_inventory),
+                            Arc::clone(&self.outgoing),
+                            language,
+                        )
+                        .await
+                        .map_err(invalid_request)?;
+                    return Ok(MobileSlashTurnResult::NativeHandled);
+                }
+                let text = self
+                    .native_account_manager
+                    .describe(request_id.connection_id, language);
+                return Ok(MobileSlashTurnResult::Completed(Box::new(
+                    complete_mobile_slash_turn(
+                        &self.outgoing,
+                        &request_id,
+                        thread_id,
+                        &params,
+                        text,
+                    )
+                    .await,
+                )));
+            }
         }
         let text = match self
             .mobile_account_reply(&params, command, config_processor, queues)
@@ -47,9 +95,9 @@ impl AccountRequestProcessor {
             Ok(text) => text,
             Err(error) => error.message,
         };
-        Ok(Some(
+        Ok(MobileSlashTurnResult::Completed(Box::new(
             complete_mobile_slash_turn(&self.outgoing, &request_id, thread_id, &params, text).await,
-        ))
+        )))
     }
 
     async fn mobile_account_reply(

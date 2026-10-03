@@ -28,6 +28,7 @@ use codex_protocol::ThreadId;
 mod bedrock_setup;
 mod gateway_oauth;
 mod mobile_commands;
+pub(crate) use mobile_commands::MobileSlashTurnResult;
 mod pool_quota;
 mod pool_updates;
 mod profile_workspace_routing;
@@ -113,6 +114,8 @@ pub(crate) struct AccountRequestProcessor {
     config_manager: ConfigManager,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
     remote_client_registry: Arc<RemoteClientRegistry>,
+    pub(crate) native_account_manager: Arc<crate::native_account_manager::NativeAccountManager>,
+    native_account_inventory: Arc<crate::account_management::AccountManager>,
     /// Aborts the accountPool/updated push task when the last processor clone drops.
     _pool_updates_task: Arc<AbortOnDrop>,
     workspace_routing: Arc<Mutex<Option<workspace_routing::CachedWorkspaceRouting>>>,
@@ -157,6 +160,10 @@ impl AccountRequestProcessor {
         );
         let processor = Arc::new(Self {
             _gateway_notifications: Arc::new(gateway_notifications),
+            native_account_manager: Arc::clone(&outgoing.native_account_manager),
+            native_account_inventory: crate::account_management::AccountManager::new(
+                (*config).clone(),
+            ),
             auth_manager,
             execution_account_pool,
             thread_manager,

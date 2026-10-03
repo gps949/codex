@@ -153,6 +153,7 @@ pub(crate) async fn apply_bespoke_event_handling(
     } = event;
     match msg {
         EventMsg::TurnStarted(payload) => {
+            let _native_ordering = outgoing.prepare_real_turn().await;
             // While not technically necessary as it was already done on TurnComplete, be extra cautios and abort any pending server requests.
             outgoing.abort_pending_server_requests().await;
             thread_watch_manager

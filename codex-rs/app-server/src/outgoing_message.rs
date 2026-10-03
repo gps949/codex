@@ -130,6 +130,10 @@ pub(crate) struct OutgoingMessageSender {
     pub(crate) remote_clients: Arc<crate::mobile_account_bridge::RemoteClientRegistry>,
     verification_auth: OnceLock<Arc<codex_login::AuthManager>>,
     verification_connections: Mutex<HashSet<ConnectionId>>,
+    /// Only initialized, live connections retain scopes; disconnect removes and cancels them.
+    connection_owned_scopes: Mutex<HashMap<ConnectionId, tokio_util::sync::CancellationToken>>,
+    pub(crate) native_account_manager: Arc<crate::native_account_manager::NativeAccountManager>,
+    pub(crate) native_account_ordering: crate::native_account_ordering::NativeAccountOrdering,
     next_server_request_id: AtomicI64,
     sender: mpsc::Sender<OutgoingEnvelope>,
     request_id_to_callback: Mutex<HashMap<RequestId, PendingCallbackEntry>>,
@@ -148,6 +152,9 @@ pub(crate) struct ThreadScopedOutgoingMessageSender {
 }
 
 struct PendingCallbackEntry {
+    owned_owner: Option<ConnectionId>,
+    owned_scope: Option<tokio_util::sync::CancellationToken>,
+    owned_cancellation: Option<tokio_util::sync::CancellationToken>,
     verification_owner: Option<ConnectionId>,
     verification_auth_revision: Option<u64>,
     verification_identity: Option<user_verification_auth::Identity>,
@@ -155,6 +162,15 @@ struct PendingCallbackEntry {
     thread_id: Option<ThreadId>,
     request: ServerRequest,
     _diagnostics_guard: GaugeGuard,
+}
+
+#[derive(Clone)]
+enum ServerRequestOwnership {
+    Shared,
+    ConnectionOwned {
+        owner: ConnectionId,
+        cancellation: tokio_util::sync::CancellationToken,
+    },
 }
 
 impl ThreadScopedOutgoingMessageSender {
@@ -195,6 +211,24 @@ impl ThreadScopedOutgoingMessageSender {
                 request_id,
                 response,
             );
+    }
+
+    /// Finish native controls before forwarding a real turn, including queued work.
+    pub(crate) async fn prepare_real_turn(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        let ordering = self
+            .outgoing
+            .native_account_ordering
+            .lock_thread(self.thread_id)
+            .await;
+        while let Err(error) = self
+            .outgoing
+            .native_account_manager
+            .cancel_thread(self.thread_id)
+            .await
+        {
+            tracing::warn!(%error, "waiting for native account controls to finish before a real turn");
+        }
+        ordering
     }
 
     pub(crate) async fn send_server_notification(&self, notification: ServerNotification) {
@@ -247,6 +281,9 @@ impl OutgoingMessageSender {
             remote_clients: Arc::default(),
             verification_auth: OnceLock::new(),
             verification_connections: Mutex::new(HashSet::new()),
+            connection_owned_scopes: Mutex::new(HashMap::new()),
+            native_account_manager: Arc::default(),
+            native_account_ordering: Default::default(),
             next_server_request_id: AtomicI64::new(0),
             sender,
             request_id_to_callback: Mutex::new(HashMap::new()),
@@ -275,7 +312,7 @@ impl OutgoingMessageSender {
     }
 
     pub(crate) async fn connection_closed(&self, connection_id: ConnectionId) {
-        self.disconnect_user_verification_connection(connection_id)
+        self.disconnect_connection_control_scopes(connection_id)
             .await;
         let mut request_contexts = self.request_contexts.lock().await;
         request_contexts.retain(|request_id, _| request_id.connection_id != connection_id);
@@ -329,11 +366,74 @@ impl OutgoingMessageSender {
         RequestId::Integer(self.next_server_request_id.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// Called after initialization succeeds, while the owning connection remains open.
+    pub(crate) async fn register_connection_owned_scope(&self, owner: ConnectionId) {
+        self.connection_owned_scopes
+            .lock()
+            .await
+            .entry(owner)
+            .or_default();
+    }
+
+    /// Wake owned waiters before draining RPCs, without cancelling shared approvals.
+    pub(crate) async fn disconnect_connection_owned_scope(&self, owner: ConnectionId) {
+        if let Some(scope) = self.connection_owned_scopes.lock().await.remove(&owner) {
+            scope.cancel();
+        }
+        self.request_id_to_callback
+            .lock()
+            .await
+            .retain(|_, entry| entry.owned_owner != Some(owner));
+    }
+
+    /// Revoke both control owners before waiting for their shared callback table.
+    pub(crate) async fn disconnect_connection_control_scopes(&self, owner: ConnectionId) {
+        self.verification_connections.lock().await.remove(&owner);
+        self.disconnect_connection_owned_scope(owner).await;
+        self.disconnect_user_verification_connection(owner).await;
+    }
+
+    /// Cancels registration and a blocked dispatch without orphaning its callback.
+    pub(crate) async fn send_connection_owned_request_with_cancellation(
+        &self,
+        owner: ConnectionId,
+        request: ServerRequestPayload,
+        thread_id: ThreadId,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> (RequestId, oneshot::Receiver<ClientRequestResult>) {
+        self.send_request_with_ownership(
+            Some(std::slice::from_ref(&owner)),
+            request,
+            Some(thread_id),
+            ServerRequestOwnership::ConnectionOwned {
+                owner,
+                cancellation,
+            },
+        )
+        .await
+    }
+
     pub(crate) async fn send_request_to_connections(
         &self,
         connection_ids: Option<&[ConnectionId]>,
         request: ServerRequestPayload,
         thread_id: Option<ThreadId>,
+    ) -> (RequestId, oneshot::Receiver<ClientRequestResult>) {
+        self.send_request_with_ownership(
+            connection_ids,
+            request,
+            thread_id,
+            ServerRequestOwnership::Shared,
+        )
+        .await
+    }
+
+    async fn send_request_with_ownership(
+        &self,
+        connection_ids: Option<&[ConnectionId]>,
+        request: ServerRequestPayload,
+        thread_id: Option<ThreadId>,
+        ownership: ServerRequestOwnership,
     ) -> (RequestId, oneshot::Receiver<ClientRequestResult>) {
         let id = self.next_request_id();
         let outgoing_message_id = id.clone();
@@ -357,6 +457,26 @@ impl OutgoingMessageSender {
                     || verification_identity != self.verification_identity())
         };
         let (tx_approve, rx_approve) = oneshot::channel();
+        let (owned_owner, owned_scope, owned_cancellation) = match ownership {
+            ServerRequestOwnership::Shared => (None, None, None),
+            ServerRequestOwnership::ConnectionOwned {
+                owner,
+                cancellation,
+            } => {
+                let scope = self
+                    .connection_owned_scopes
+                    .lock()
+                    .await
+                    .get(&owner)
+                    .cloned();
+                let Some(scope) =
+                    scope.filter(|scope| !scope.is_cancelled() && !cancellation.is_cancelled())
+                else {
+                    return (outgoing_message_id, rx_approve);
+                };
+                (Some(owner), Some(scope), Some(cancellation))
+            }
+        };
         // One app owns this ceremony. Reconnect and other subscribers cannot answer it.
         let verification_owner = if user_verification {
             let eligible = self.verification_connections.lock().await;
@@ -379,6 +499,9 @@ impl OutgoingMessageSender {
             request_id_to_callback.insert(
                 id,
                 PendingCallbackEntry {
+                    owned_owner,
+                    owned_scope: owned_scope.clone(),
+                    owned_cancellation: owned_cancellation.clone(),
                     verification_owner,
                     verification_auth_revision,
                     verification_identity: verification_identity.clone(),
@@ -388,6 +511,21 @@ impl OutgoingMessageSender {
                     _diagnostics_guard: PENDING_SERVER_REQUESTS.track(),
                 },
             );
+        }
+        // The captured live scope survives removal, so disconnect before insertion cannot
+        // resurrect a callback even if that connection ID is subsequently registered again.
+        if owned_scope
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            || owned_cancellation
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            self.request_id_to_callback
+                .lock()
+                .await
+                .remove(&outgoing_message_id);
+            return (outgoing_message_id, rx_approve);
         }
         // Disconnect may finish its callback cleanup before registration acquires the lock.
         // Recheck afterward so that ordering cannot leave an orphaned verification callback.
@@ -403,38 +541,64 @@ impl OutgoingMessageSender {
         }
 
         let outgoing_message = OutgoingMessage::Request(request.clone());
-        let send_result = match connection_ids {
-            None => {
-                self.sender
-                    .send(OutgoingEnvelope::Broadcast {
-                        message: outgoing_message,
-                    })
-                    .await
-            }
-            Some(connection_ids) => {
-                let mut send_error = None;
-                for connection_id in connection_ids {
-                    if let Err(err) = self
-                        .sender
-                        .send(OutgoingEnvelope::ToConnection {
-                            connection_id: *connection_id,
-                            message: outgoing_message.clone(),
-                            write_complete_tx: None,
+        let dispatch = async {
+            match connection_ids {
+                None => {
+                    self.sender
+                        .send(OutgoingEnvelope::Broadcast {
+                            message: outgoing_message,
                         })
                         .await
-                    {
-                        send_error = Some(err);
-                        break;
-                    } else {
-                        self.analytics_events_client
-                            .track_server_request(connection_id.0, request.clone());
+                }
+                Some(connection_ids) => {
+                    let mut send_error = None;
+                    for connection_id in connection_ids {
+                        if let Err(err) = self
+                            .sender
+                            .send(OutgoingEnvelope::ToConnection {
+                                connection_id: *connection_id,
+                                message: outgoing_message.clone(),
+                                write_complete_tx: None,
+                            })
+                            .await
+                        {
+                            send_error = Some(err);
+                            break;
+                        } else {
+                            if owned_owner.is_none() {
+                                self.analytics_events_client
+                                    .track_server_request(connection_id.0, request.clone());
+                            }
+                        }
+                    }
+                    match send_error {
+                        Some(err) => Err(err),
+                        None => Ok(()),
                     }
                 }
-                match send_error {
-                    Some(err) => Err(err),
-                    None => Ok(()),
-                }
             }
+        };
+        let send_result = if let Some(scope) = owned_scope {
+            tokio::select! {
+                biased;
+                _ = scope.cancelled() => {
+                    self.request_id_to_callback.lock().await.remove(&outgoing_message_id);
+                    return (outgoing_message_id, rx_approve);
+                }
+                _ = async {
+                    if let Some(cancellation) = owned_cancellation {
+                        cancellation.cancelled().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.request_id_to_callback.lock().await.remove(&outgoing_message_id);
+                    return (outgoing_message_id, rx_approve);
+                }
+                result = dispatch => result,
+            }
+        } else {
+            dispatch.await
         };
 
         if let Err(err) = send_result {
@@ -477,7 +641,8 @@ impl OutgoingMessageSender {
         match entry {
             Some((id, entry)) => {
                 let completed_at_ms = now_unix_timestamp_ms();
-                if entry.verification_owner.is_none()
+                if entry.owned_owner.is_none()
+                    && entry.verification_owner.is_none()
                     && let Ok(response) = entry.request.response_from_result(result.clone())
                 {
                     tracing::info!("<- response: {response:?}");
@@ -567,6 +732,23 @@ impl OutgoingMessageSender {
     ) -> Option<(RequestId, PendingCallbackEntry)> {
         let mut callbacks = self.request_id_to_callback.lock().await;
         let entry = callbacks.get(id)?;
+        if let Some(owner) = entry.owned_owner {
+            if owner != connection_id {
+                return None;
+            }
+            if entry
+                .owned_scope
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+                || entry
+                    .owned_cancellation
+                    .as_ref()
+                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            {
+                callbacks.remove(id);
+                return None;
+            }
+        }
         if let Some(owner) = entry.verification_owner {
             if owner != connection_id {
                 return None;
@@ -589,8 +771,10 @@ impl OutgoingMessageSender {
         let mut requests = request_id_to_callback
             .values()
             .filter_map(|entry| {
-                (entry.thread_id == Some(thread_id) && entry.verification_owner.is_none())
-                    .then_some(entry.request.clone())
+                (entry.thread_id == Some(thread_id)
+                    && entry.owned_owner.is_none()
+                    && entry.verification_owner.is_none())
+                .then_some(entry.request.clone())
             })
             .collect::<Vec<_>>();
         requests.sort_by(|left, right| left.id().cmp(right.id()));
@@ -946,6 +1130,10 @@ fn timestamped_server_notification(notification: ServerNotification) -> Outgoing
         emitted_at_ms: Some(now_unix_timestamp_ms().try_into().unwrap_or_default()),
     })
 }
+
+#[cfg(test)]
+#[path = "outgoing_owned_request_tests.rs"]
+mod outgoing_owned_request_tests;
 
 #[cfg(test)]
 #[path = "user_verification_ownership_tests.rs"]
