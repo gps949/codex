@@ -253,6 +253,12 @@ impl AccountProfileStore {
         id: &AccountProfileId,
     ) -> Result<bool, AccountProfileStoreError> {
         let _lock = crate::account_file::lock(&self.codex_home)?;
+        if crate::primary_login::PrimaryLoginStore::is_profile_selected_unlocked(
+            &self.codex_home,
+            id,
+        )? {
+            return Err(io::Error::other("This profile is selected for host sign-in. Choose another host login or run codex account primary logout before removing it.").into());
+        }
         let mut manifest = self.load_manifest()?;
         let before = manifest.profiles.len();
         manifest.profiles.retain(|profile| &profile.id != id);
@@ -271,6 +277,13 @@ impl AccountProfileStore {
     ) -> Result<bool, AccountProfileStoreError> {
         if id.as_str() == LEGACY_ROOT_PROFILE_ID {
             return Err(AccountProfileStoreError::CannotPurgeLegacyRoot);
+        }
+        let _lock = crate::account_file::lock(&self.codex_home)?;
+        if crate::primary_login::PrimaryLoginStore::is_profile_selected_unlocked(
+            &self.codex_home,
+            id,
+        )? {
+            return Err(io::Error::other("Cannot delete credentials selected for host sign-in. Select another host login first.").into());
         }
         let path = self.credential_home_for(id);
         match fs::remove_dir_all(path) {
