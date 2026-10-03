@@ -17,6 +17,7 @@
     page: 0,
     redemption: null,
     sessionToken: "",
+    stopped: false,
   };
   const resetStorageKey = "codex.accountManager.resetOperation";
   const sessionStorageKey = "codex.accountManager.sessionToken";
@@ -294,9 +295,11 @@
     return result;
   }
   function setPaired(paired) {
+    if (state.stopped) return;
     state.paired = paired;
     $("pair-panel").hidden = paired;
     $("dashboard").hidden = !paired;
+    $("stop-manager").hidden = !paired;
     $("connection-state").textContent = paired
       ? t("Connected")
       : t("Pairing required");
@@ -308,12 +311,13 @@
         /* Memory is cleared even when storage is unavailable. */
       }
       clearTimeout(state.timer);
+      window.AccountManagerLifecycle.disconnect();
       if ($("action-dialog").open) $("action-dialog").close();
-    }
+    } else window.AccountManagerLifecycle.connect(state.sessionToken);
   }
   function scheduleRead() {
     clearTimeout(state.timer);
-    if (state.paired && !document.hidden)
+    if (state.paired && !state.stopped && !document.hidden)
       state.timer = setTimeout(
         () => {
           readInventory().catch(() => {});
@@ -332,10 +336,12 @@
       );
   }
   async function readInventory() {
+    if (state.stopped) return;
     if (state.reading) return state.reading;
     state.reading = (async () => {
       try {
         const inventory = await request("/api/inventory");
+        if (state.stopped) return;
         if (!Array.isArray(inventory.accounts))
           throw new Error(
             t("The account manager returned an invalid inventory."),
@@ -356,6 +362,7 @@
         );
         return inventory;
       } catch (error) {
+        if (state.stopped) return;
         state.readFailed = true;
         $("global-error").textContent = t(
           "Could not read account status: {message}",
@@ -721,6 +728,7 @@
       $("dialog-submit").textContent = $("dialog-submit").dataset.label;
     $("action-form").setAttribute("aria-busy", String(busy));
     $("language").disabled = busy || $("action-dialog").open;
+    $("stop-manager").disabled = busy;
     scheduleRead();
     for (const id of [
       "add-account",
@@ -2234,6 +2242,37 @@
   $("read-status").addEventListener("click", () => {
     readInventory().catch(() => {});
   });
+  $("stop-manager").addEventListener("click", () => {
+    openDialog(
+      t("Stop account manager?"),
+      "This stops the account manager for every browser tab and cancels pending logins. Work in Codex sessions continues. Existing account changes finish before the process exits.",
+      (body) =>
+        body.append(
+          element(
+            "p",
+            t("Start codex account manage again to reopen the panel."),
+          ),
+        ),
+      async () => {
+        setBusy(true);
+        try {
+          await request("/api/shutdown", {});
+          window.AccountManagerLifecycle.stop();
+          clearTimeout(state.timer);
+          setPaired(false);
+          state.stopped = true;
+          $("action-dialog").close();
+          $("pair-panel").hidden = true;
+          $("read-status").disabled = true;
+          $("connection-state").textContent = t("Manager stopped");
+          notice("Account manager stopped. You can close this tab.");
+        } finally {
+          setBusy(false);
+        }
+      },
+      "Stop manager",
+    );
+  });
   $("add-account").addEventListener("click", () => showLogin());
   $("edit-settings").addEventListener("click", showSettings);
   $("add-api-account").addEventListener("click", () => showApiEditor());
@@ -2273,6 +2312,11 @@
   $("language").addEventListener("change", () => {
     if ($("action-dialog").open || state.busy) return;
     messages.setLanguage($("language").value);
+    if (state.stopped) {
+      $("connection-state").textContent = t("Manager stopped");
+      notice("Account manager stopped. You can close this tab.");
+      return;
+    }
     setPaired(state.paired);
     if (state.inventory) renderInventory();
     notice(state.paired ? "Account status is ready." : "Pairing required");

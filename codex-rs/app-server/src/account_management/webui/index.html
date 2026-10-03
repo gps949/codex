@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/app.css" />
     <script src="/messages.js" defer></script>
     <script src="/guidance.js" defer></script>
+    <script src="/lifecycle.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -41,6 +42,15 @@
               data-i18n="Read status"
             >
               Read status
+            </button>
+            <button
+              id="stop-manager"
+              class="link"
+              type="button"
+              data-i18n="Stop manager"
+              hidden
+            >
+              Stop manager
             </button>
           </div>
         </div>
@@ -329,6 +339,14 @@
           <ol id="activity-list"></ol>
         </details>
         <footer>
+          <p
+            id="exit-note"
+            data-i18n="Stop manager ends this host process and cancels pending logins for all tabs. Closing the last tab allows 30 seconds to reopen; a missing heartbeat expires after 5 minutes."
+          >
+            Stop manager ends this host process and cancels pending logins for
+            all tabs. Closing the last tab allows 30 seconds to reopen; a
+            missing heartbeat expires after 5 minutes.
+          </p>
           <p
             data-i18n="Changes are shared with all clients using this Codex home. Requests already in progress keep their current account."
           >

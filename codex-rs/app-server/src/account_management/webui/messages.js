@@ -8,9 +8,25 @@
   } catch {
     /* Language preference can remain in memory. */
   }
+  // An explicit launch language overrides the remembered preference for this tab.
+  const requestedLanguage = new URLSearchParams(location.search).get("lang");
+  if (requestedLanguage === "en") language = "en";
+  else if (["zh-CN", "zh-cn", "zh"].includes(requestedLanguage))
+    language = "zh-CN";
   // Keep each translation pair on one line for review.
   // prettier-ignore
   const chinese = {
+    "Stop manager": "停止管理面板",
+    "Stop account manager?": "停止账号管理面板？",
+    "This stops the account manager for every browser tab and cancels pending logins. Work in Codex sessions continues. Existing account changes finish before the process exits.": "这会停止所有浏览器标签页共用的管理服务，并取消尚未完成的登录。Codex 会话继续运行，已经开始的账号修改会在进程退出前完成。",
+    "Start codex account manage again to reopen the panel.": "重新运行 codex account manage 即可打开面板。",
+    "Manager stopped": "管理服务已停止",
+    "Account manager stopped. You can close this tab.": "账号管理服务已停止，可以关闭此标签页。",
+    "Stop manager ends this host process and cancels pending logins for all tabs. Closing the last tab allows 30 seconds to reopen; a missing heartbeat expires after 5 minutes.": "点击“停止管理面板”会退出主机上的管理进程并取消所有标签页的待完成登录。关闭最后一个标签页后有 30 秒重新打开的宽限期；心跳丢失 5 分钟后连接租约失效。",
+    "Invalid browser tab ID": "浏览器标签页标识无效",
+    "Account manager is shutting down": "账号管理服务正在退出",
+    "This browser tab has left the manager": "此浏览器标签页已经退出管理服务",
+    "Too many account manager tabs": "账号管理标签页数量过多",
     "Eligible credits": "满足条件的重置券",
     "{count} quota checks are still running or unconfirmed. Read host status before repeating them.": "{count} 个额度检查仍在运行或结果待确认，重复检查前请先读取主机状态。",
     "Account selected for subsequent requests.": "已选择账号，后续请求将使用它。",
