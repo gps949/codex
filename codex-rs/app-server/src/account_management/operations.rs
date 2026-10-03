@@ -15,6 +15,25 @@ impl AccountManager {
     ) -> anyhow::Result<AccountManagerResult> {
         let mut data = serde_json::Value::Null;
         let message = match operation {
+            AccountManagerOperation::PrimaryUse { profile_id } => {
+                codex_login::PrimaryLoginStore::new(self.config.codex_home.to_path_buf())
+                    .select_profile(
+                        &self.config.auth_config(),
+                        &codex_login::AccountProfileId::new(profile_id)?,
+                    )
+                    .await?;
+                "Host sign-in selected. Inference selection is unchanged. Remote Control may need reconnection or pairing for the new owner.".into()
+            }
+            AccountManagerOperation::PrimaryRoot => {
+                codex_login::PrimaryLoginStore::new(self.config.codex_home.to_path_buf())
+                    .use_root()?;
+                "Host sign-in now uses root login. Inference selection is unchanged.".into()
+            }
+            AccountManagerOperation::PrimaryLogout => {
+                codex_login::PrimaryLoginStore::new(self.config.codex_home.to_path_buf())
+                    .sign_out()?;
+                "Host signed out. Pool credentials were retained.".into()
+            }
             operation @ (AccountManagerOperation::ApiAdd { .. }
             | AccountManagerOperation::ApiUpdate { .. }
             | AccountManagerOperation::ApiReplaceKey { .. }
@@ -82,6 +101,8 @@ impl AccountManager {
                 keep_credentials,
             } => {
                 let record = self.profile(&profile_id)?;
+                // Reject selected host identities before any token revocation.
+                self.store().remove_profile_metadata(&record.profile.id)?;
                 if !keep_credentials && record.profile.id.as_str() != "legacy-root" {
                     let mut auth_config = self.config.auth_config();
                     auth_config.codex_home = record.profile.credential_home.clone();
@@ -93,7 +114,6 @@ impl AccountManager {
                     // Revocation is best effort; successful local removal does not prove server revocation.
                     manager.logout_with_revoke().await?;
                 }
-                self.store().remove_profile_metadata(&record.profile.id)?;
                 AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf())
                     .remove_profile(&record.profile.id)?;
                 if !keep_credentials && record.profile.id.as_str() != "legacy-root" {

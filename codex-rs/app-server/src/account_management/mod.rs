@@ -4,7 +4,9 @@ mod api_accounts;
 mod inventory;
 mod login;
 mod operations;
+mod primary;
 mod quota;
+pub use primary::PrimaryLoginView;
 mod web;
 
 pub use web::AccountManagerWebOptions;
@@ -54,6 +56,7 @@ impl AccountManager {
 #[serde(rename_all = "camelCase")]
 pub struct AccountManagerInventory {
     pub host_now: i64,
+    pub primary_login: Option<PrimaryLoginView>,
     pub paused: bool,
     pub active_profile_id: Option<String>,
     pub accounts: Vec<ManagedAccountView>,
@@ -77,6 +80,7 @@ pub struct ApiAccountView {
 pub struct ManagedAccountView {
     pub profile_id: String,
     pub label: String,
+    pub custom_label: Option<String>,
     pub priority: u32,
     pub disabled: bool,
     pub login_state: String,
@@ -133,6 +137,12 @@ pub struct LoginProgress {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AccountManagerOperation {
+    PrimaryUse {
+        #[serde(rename = "profileId")]
+        profile_id: String,
+    },
+    PrimaryRoot,
+    PrimaryLogout,
     ApiAdd {
         label: String,
         #[serde(rename = "baseUrl")]

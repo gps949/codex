@@ -23,13 +23,20 @@ impl AccountManager {
                 .find(|saved| saved.profile_id == record.profile.id);
             let mut auth_config = self.config.auth_config();
             auth_config.codex_home = record.profile.credential_home.clone();
-            let auth = AuthManager::shared_from_auth_config(
-                auth_config,
-                /*enable_codex_api_key_env*/ false,
-            )
-            .await
-            .ok()
-            .and_then(|manager| manager.auth_cached());
+            let auth = if record.state == AccountProfileState::PendingLogin {
+                None
+            } else {
+                AuthManager::shared_from_auth_config(
+                    auth_config,
+                    /*enable_codex_api_key_env*/ false,
+                )
+                .await
+                .ok()
+                .and_then(|manager| manager.auth_cached())
+            };
+            let email = auth
+                .as_ref()
+                .and_then(codex_login::CodexAuth::get_account_email);
             let cooldown = saved
                 .and_then(|saved| saved.exhausted_until)
                 .filter(|until| *until > Utc::now());
@@ -66,13 +73,13 @@ impl AccountManager {
             let refresh = refreshes.get(record.profile.id.as_str()).cloned();
             accounts.push(ManagedAccountView {
                 profile_id: record.profile.id.to_string(),
-                label: record
-                    .profile
-                    .label
-                    .as_deref()
-                    .filter(|label| !label.trim().is_empty())
-                    .unwrap_or(record.profile.id.as_str())
-                    .to_string(),
+                label: codex_login::account_display::account_display_name(
+                    record.profile.label.as_deref(),
+                    email.as_deref(),
+                    record.profile.id.as_str(),
+                )
+                .to_string(),
+                custom_label: record.profile.label.clone(),
                 priority: record.profile.priority,
                 disabled: record.profile.disabled,
                 login_state: login_state.into(),
@@ -89,9 +96,7 @@ impl AccountManager {
                         serde_json::from_value::<codex_protocol::auth::KnownPlan>(value)
                             .map_or_else(|_| "Unknown".into(), |plan| plan.display_name().into())
                     }),
-                email: auth
-                    .as_ref()
-                    .and_then(codex_login::CodexAuth::get_account_email),
+                email,
                 rate_limits: ManagedRateLimits {
                     primary: limits.primary.as_ref().map(window),
                     secondary: limits.secondary.as_ref().map(window),
@@ -114,6 +119,7 @@ impl AccountManager {
         let (api_accounts, api_state) = self.api_inventory()?;
         Ok(AccountManagerInventory {
             host_now: Utc::now().timestamp(),
+            primary_login: Some(self.primary_login_view()),
             paused,
             active_profile_id: (!paused)
                 .then_some(state.active_profile_id)

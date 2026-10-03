@@ -1,6 +1,108 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+fn save_profile_email(profile: &codex_login::AccountProfile, email: &str) -> anyhow::Result<()> {
+    use base64::Engine as _;
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::json!({
+            "email": email, "https://api.openai.com/auth": {
+                "chatgpt_user_id": "fixture-owner", "chatgpt_account_id": "fixture-account",
+                "chatgpt_plan_type": "pro"
+            }
+        })
+        .to_string(),
+    );
+    std::fs::write(
+        profile.credential_home.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "tokens": {"id_token": format!("e30.{claims}.sig"), "access_token": "synthetic-access", "refresh_token": "synthetic-refresh", "account_id": "fixture-account"},
+            "last_refresh": "2099-01-01T00:00:00Z"
+        }))?,
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_manager_names_track_email_without_persisting_derived_names() -> anyhow::Result<()>
+{
+    let home = tempfile::TempDir::new()?;
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    let profile = store.allocate_profile(/*label*/ None, /*priority*/ 10)?;
+    save_profile_email(&profile, "original@example.com")?;
+    store.complete_profile(&profile.id)?;
+    let pending = store.allocate_profile(/*label*/ None, /*priority*/ 20)?;
+    save_profile_email(&pending, "pending@example.com")?;
+    let config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    let manager = AccountManager::new(config);
+    let inventory = manager.inventory().await?;
+    assert_eq!(
+        (
+            inventory.accounts[0].label.as_str(),
+            inventory.accounts[0].custom_label.as_deref()
+        ),
+        ("original@example.com", None)
+    );
+    assert_eq!(
+        (
+            inventory.accounts[1].label.as_str(),
+            inventory.accounts[1].email.as_deref()
+        ),
+        (pending.id.as_str(), None)
+    );
+    manager
+        .execute(AccountManagerOperation::Update {
+            profile_id: profile.id.to_string(),
+            label: None,
+            priority: Some(11),
+            disabled: None,
+        })
+        .await?;
+    assert_eq!(store.load_profile_records()?[0].profile.label, None);
+    manager
+        .execute(AccountManagerOperation::Update {
+            profile_id: profile.id.to_string(),
+            label: Some("Work".into()),
+            priority: None,
+            disabled: None,
+        })
+        .await?;
+    save_profile_email(&profile, "new@example.com")?;
+    let inventory = manager.inventory().await?;
+    assert_eq!(
+        (
+            inventory.accounts[0].label.as_str(),
+            inventory.accounts[0].custom_label.as_deref(),
+            inventory.accounts[0].email.as_deref()
+        ),
+        ("Work", Some("Work"), Some("new@example.com"))
+    );
+    manager
+        .execute(AccountManagerOperation::Update {
+            profile_id: profile.id.to_string(),
+            label: Some(String::new()),
+            priority: None,
+            disabled: None,
+        })
+        .await?;
+    let inventory = manager.inventory().await?;
+    assert_eq!(
+        (
+            inventory.accounts[0].label.as_str(),
+            inventory.accounts[0].custom_label.as_deref()
+        ),
+        ("new@example.com", None)
+    );
+    assert_eq!(store.load_profile_records()?[0].profile.label, None);
+    assert_eq!(
+        serde_json::to_value(&inventory.accounts[0])?["customLabel"],
+        serde_json::Value::Null
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn account_manager_inventory_remains_available_without_usable_accounts() -> anyhow::Result<()>
 {
@@ -199,6 +301,82 @@ async fn account_management_refresh_confirms_external_reset_without_generating_r
     assert_eq!(
         runtime.load()?.active_profile_id.as_ref(),
         Some(&profile.id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_manager_primary_operations_keep_inference_and_credentials_independent()
+-> anyhow::Result<()> {
+    let home = tempfile::TempDir::new()?;
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    let profile = store.allocate_profile(/*label*/ None, /*priority*/ 10)?;
+    save_profile_email(&profile, "remote@example.com")?;
+    store.complete_profile(&profile.id)?;
+    let auth_before = std::fs::read(profile.credential_home.join("auth.json"))?;
+    let manifest_before = std::fs::read(store.manifest_path())?;
+    let config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    let manager = AccountManager::new(config);
+    let use_host: AccountManagerOperation =
+        serde_json::from_value(serde_json::json!({"type": "primaryUse", "profileId": profile.id}))?;
+    manager.execute(use_host).await?;
+    let view = manager
+        .inventory()
+        .await?
+        .primary_login
+        .expect("primary view");
+    assert_eq!(
+        (
+            view.source,
+            view.profile_id,
+            view.label,
+            view.email,
+            view.ready
+        ),
+        (
+            "profile".into(),
+            Some(profile.id.to_string()),
+            "remote@example.com".into(),
+            Some("remote@example.com".into()),
+            true
+        )
+    );
+    assert!(!home.path().join("auth.json").exists());
+    assert!(!home.path().join("account-runtime-state.json").exists());
+    assert_eq!(std::fs::read(store.manifest_path())?, manifest_before);
+    assert_eq!(
+        std::fs::read(profile.credential_home.join("auth.json"))?,
+        auth_before
+    );
+    assert!(
+        manager
+            .execute(AccountManagerOperation::Remove {
+                profile_id: profile.id.to_string(),
+                keep_credentials: true
+            })
+            .await
+            .is_err()
+    );
+    manager
+        .execute(AccountManagerOperation::PrimaryLogout)
+        .await?;
+    assert_eq!(
+        manager.inventory().await?.primary_login.unwrap().source,
+        "signedOut"
+    );
+    manager
+        .execute(AccountManagerOperation::PrimaryRoot)
+        .await?;
+    assert_eq!(
+        manager.inventory().await?.primary_login.unwrap().source,
+        "root"
+    );
+    assert_eq!(
+        std::fs::read(profile.credential_home.join("auth.json"))?,
+        auth_before
     );
     Ok(())
 }
