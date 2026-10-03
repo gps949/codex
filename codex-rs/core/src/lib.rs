@@ -9,6 +9,7 @@ mod account_pool_recovery;
 mod account_transition;
 mod account_window_warmup;
 mod account_window_warmup_request;
+mod api_account_execution;
 mod apply_patch;
 mod apps;
 mod client;
