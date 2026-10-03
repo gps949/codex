@@ -18,6 +18,7 @@ use crate::execution_auth::recovery_coordinator::RecoveryProbeAttempt;
 use crate::execution_auth::recovery_coordinator::RecoveryProbeKey;
 use crate::execution_auth::recovery_coordinator::RecoveryProbeMode;
 use crate::execution_auth::recovery_coordinator::RecoveryProbeVerdict;
+use crate::execution_auth::recovery_coordinator::quota_owner_key;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProbeOutcome {
@@ -33,6 +34,14 @@ pub(crate) enum SpendingRecoveryCoverage {
     Recovered,
     CompleteUnchanged,
     Incomplete,
+}
+
+/// Final discovery distinguishes fresh backend denials from incomplete permission reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FinalRecoveryOutcome {
+    Recovered,
+    ConfirmedExhausted,
+    Incomplete { checked: usize, total: usize },
 }
 
 enum PassOutcome {
@@ -58,6 +67,19 @@ pub(crate) async fn coverage_for_spending(
     config: &Config,
     cancellation: &CancellationToken,
 ) -> SpendingRecoveryCoverage {
+    match probe_for_final_recovery(execution_auth, config, cancellation).await {
+        FinalRecoveryOutcome::Recovered => SpendingRecoveryCoverage::Recovered,
+        FinalRecoveryOutcome::ConfirmedExhausted => SpendingRecoveryCoverage::CompleteUnchanged,
+        FinalRecoveryOutcome::Incomplete { .. } => SpendingRecoveryCoverage::Incomplete,
+    }
+}
+
+/// Checks all remaining seats before ending a request, within one four-second discovery bound.
+pub(crate) async fn probe_for_final_recovery(
+    execution_auth: &ExecutionAuth,
+    config: &Config,
+    cancellation: &CancellationToken,
+) -> FinalRecoveryOutcome {
     match probe_pass(
         execution_auth,
         config,
@@ -66,9 +88,37 @@ pub(crate) async fn coverage_for_spending(
     )
     .await
     {
-        PassOutcome::Recovered => SpendingRecoveryCoverage::Recovered,
-        PassOutcome::CompleteUnchanged => SpendingRecoveryCoverage::CompleteUnchanged,
-        PassOutcome::Busy | PassOutcome::Incomplete => SpendingRecoveryCoverage::Incomplete,
+        PassOutcome::Recovered => FinalRecoveryOutcome::Recovered,
+        PassOutcome::CompleteUnchanged => FinalRecoveryOutcome::ConfirmedExhausted,
+        PassOutcome::Busy | PassOutcome::Incomplete => {
+            let Some(pool) = execution_auth.account_pool() else {
+                return FinalRecoveryOutcome::Incomplete {
+                    checked: 0,
+                    total: 0,
+                };
+            };
+            let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
+            let keys = candidate_keys(&pool, &store, config);
+            let checked = keys
+                .as_ref()
+                .map_or(0, |keys| execution_auth.recovery_probes.checked(keys));
+            let total = keys.as_ref().map_or_else(
+                || {
+                    pool.snapshots()
+                        .iter()
+                        .filter(|snapshot| {
+                            !snapshot.profile.disabled
+                                && matches!(
+                                    snapshot.availability,
+                                    AccountAvailability::Exhausted { .. }
+                                )
+                        })
+                        .count()
+                },
+                Vec::len,
+            );
+            FinalRecoveryOutcome::Incomplete { checked, total }
+        }
     }
 }
 
@@ -206,7 +256,7 @@ async fn probe_pass(
                             return None;
                         }
                         if observed.ordinary_usage_allowed == Some(true) {
-                            return store
+                            let recovered = store
                                 .reconcile_quota_probe(
                                     &pool,
                                     probe,
@@ -219,7 +269,22 @@ async fn probe_pass(
                                 )
                                 .ok()
                                 .filter(|recovered| *recovered)
-                                .map(|_| RecoveryProbeVerdict::Recovered);
+                                .is_some();
+                            if recovered
+                                && let Some(snapshot) = pool
+                                    .snapshots()
+                                    .into_iter()
+                                    .find(|snapshot| &snapshot.profile.id == id)
+                                && let (Some(account), Some(user)) =
+                                    (observed.account_id.as_deref(), observed.user_id.as_deref())
+                            {
+                                leader_ref.recovered(
+                                    &key,
+                                    snapshot,
+                                    quota_owner_key(account, user),
+                                );
+                            }
+                            return recovered.then_some(RecoveryProbeVerdict::Recovered);
                         }
                         // A denied ordinary Codex permission is evidence only for this exact seat.
                         // Query success alone, missing owners or model-specific buckets prove nothing.
@@ -323,7 +388,8 @@ fn candidate_keys(
         .modified()
         .ok()?;
     let managers = pool.auth_managers();
-    pool.snapshots()
+    let mut keys = pool
+        .snapshots()
         .into_iter()
         .filter(|snapshot| {
             !snapshot.profile.disabled
@@ -350,13 +416,36 @@ fn candidate_keys(
                 Some((metadata.modified().ok()?, metadata.len()))
             });
             Some(RecoveryProbeKey {
+                quota_owner: manager.auth_cached().and_then(|auth| {
+                    Some(quota_owner_key(
+                        &auth.get_account_id()?,
+                        &auth.get_chatgpt_user_id()?,
+                    ))
+                }),
                 snapshot,
                 auth_revision,
                 manifest_version,
                 credential_versions,
             })
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()?;
+    let now = chrono::Utc::now();
+    keys.sort_by_key(|key| {
+        let due = key
+            .snapshot
+            .rate_limits
+            .primary
+            .iter()
+            .chain(key.snapshot.rate_limits.secondary.iter())
+            .any(|window| window.resets_at.is_some_and(|reset| reset <= now));
+        (
+            !due,
+            key.snapshot.quota_failure_at,
+            key.snapshot.profile.priority,
+            key.snapshot.profile.id.as_str().to_owned(),
+        )
+    });
+    Some(keys)
 }
 
 #[cfg(test)]

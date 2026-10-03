@@ -89,20 +89,163 @@ fn usage_response(request: &wiremock::Request, recovered_seat: Option<&str>) -> 
     }))
 }
 
+fn last_candidate_owner(fixture: &RecoveryFixture) -> String {
+    let pool = fixture.execution.account_pool().expect("pool");
+    let store = AccountRuntimeStateStore::new(fixture.config.codex_home.to_path_buf());
+    candidate_keys(&pool, &store, &fixture.config)
+        .expect("candidate keys")
+        .last()
+        .expect("last candidate")
+        .snapshot
+        .profile
+        .label
+        .clone()
+        .expect("synthetic owner label")
+}
+
 #[tokio::test]
 async fn successive_failed_turns_recover_the_fifth_seat_without_waiting() -> anyhow::Result<()> {
     let server = MockServer::start().await;
+    let fixture = exhausted_fixture(&server, /*count*/ 5).await?;
+    let restored_owner = last_candidate_owner(&fixture);
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/usage"))
-        .respond_with(|request: &wiremock::Request| usage_response(request, Some("seat-4")))
+        .respond_with(move |request: &wiremock::Request| {
+            usage_response(request, Some(restored_owner.as_str()))
+        })
         .expect(/*requests*/ 5)
         .mount(&server)
         .await;
-    let fixture = exhausted_fixture(&server, /*count*/ 5).await?;
     let cancellation = CancellationToken::new();
     assert!(!probe_for_recovery(&fixture.execution, &fixture.config, &cancellation).await);
     assert!(probe_for_recovery(&fixture.execution, &fixture.config, &cancellation).await);
     assert!(fixture.execution.active_lease().is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn final_recovery_checks_the_fifth_seat_in_the_same_pass() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let fixture = exhausted_fixture(&server, /*count*/ 5).await?;
+    let restored_owner = last_candidate_owner(&fixture);
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(move |request: &wiremock::Request| {
+            usage_response(request, Some(restored_owner.as_str()))
+        })
+        .expect(/*requests*/ 5)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        probe_for_final_recovery(
+            &fixture.execution,
+            &fixture.config,
+            &CancellationToken::new()
+        )
+        .await,
+        FinalRecoveryOutcome::Recovered,
+    );
+    assert!(fixture.execution.active_lease().is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn final_recovery_reenters_an_earlier_seat_after_its_natural_deadline() -> anyhow::Result<()>
+{
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(/*status*/ 500))
+        .expect(/*requests*/ 0)
+        .mount(&server)
+        .await;
+    let fixture = exhausted_fixture(&server, /*count*/ 3).await?;
+    let pool = fixture.execution.account_pool().expect("pool");
+    let first = pool
+        .snapshots()
+        .first()
+        .expect("first seat")
+        .profile
+        .id
+        .clone();
+    pool.reset_rate_limits(&first)?;
+    let old = pool.lease()?;
+    let deadline = Utc::now() + chrono::Duration::milliseconds(200);
+    pool.mark_exhausted(&old, Some(deadline))?;
+    let store = AccountRuntimeStateStore::new(fixture.config.codex_home.to_path_buf());
+    store.synchronize(&pool)?;
+    tokio::time::sleep((deadline - Utc::now()).to_std().unwrap_or_default()).await;
+
+    assert_eq!(
+        probe_for_final_recovery(
+            &fixture.execution,
+            &fixture.config,
+            &CancellationToken::new()
+        )
+        .await,
+        FinalRecoveryOutcome::Recovered,
+    );
+    let current = pool.lease()?;
+    assert_eq!(current.profile().id, first);
+    assert!(current.generation() > old.generation());
+    assert!(matches!(
+        pool.mark_exhausted(&old, Some(Utc::now() + chrono::Duration::days(2)))?,
+        codex_login::AccountAvailabilityMutation::StaleIgnored { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn final_recovery_does_not_report_unknown_permissions_as_exhausted() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+            "plan_type": "pro", "rate_limit": {"allowed": false, "limit_reached": true},
+        })))
+        .expect(/*requests*/ 5)
+        .mount(&server)
+        .await;
+    let fixture = exhausted_fixture(&server, /*count*/ 5).await?;
+    assert_eq!(
+        probe_for_final_recovery(
+            &fixture.execution,
+            &fixture.config,
+            &CancellationToken::new()
+        )
+        .await,
+        FinalRecoveryOutcome::Incomplete {
+            checked: 0,
+            total: 5
+        },
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovered_permission_cannot_immediately_reauthorize_a_refused_request()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(|request: &wiremock::Request| usage_response(request, Some("seat-0")))
+        .expect(/*requests*/ 1)
+        .mount(&server)
+        .await;
+    let fixture = exhausted_fixture(&server, /*count*/ 1).await?;
+    let cancellation = CancellationToken::new();
+    assert!(probe_for_recovery(&fixture.execution, &fixture.config, &cancellation).await);
+    let pool = fixture.execution.account_pool().expect("pool");
+    let lease = pool.lease()?;
+    pool.mark_exhausted(&lease, Some(Utc::now() + chrono::Duration::hours(2)))?;
+    AccountRuntimeStateStore::new(fixture.config.codex_home.to_path_buf()).synchronize(&pool)?;
+    assert_eq!(
+        probe_for_final_recovery(&fixture.execution, &fixture.config, &cancellation).await,
+        FinalRecoveryOutcome::Incomplete {
+            checked: 0,
+            total: 1
+        },
+    );
+    assert!(fixture.execution.active_lease().is_none());
     Ok(())
 }
 
@@ -138,9 +281,13 @@ async fn concurrent_and_immediate_retry_probes_share_one_metadata_pass() -> anyh
 async fn spending_coverage_checks_a_restored_fifth_seat_before_any_paid_transition()
 -> anyhow::Result<()> {
     let server = MockServer::start().await;
+    let fixture = exhausted_fixture(&server, /*count*/ 5).await?;
+    let restored_owner = last_candidate_owner(&fixture);
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/usage"))
-        .respond_with(|request: &wiremock::Request| usage_response(request, Some("seat-4")))
+        .respond_with(move |request: &wiremock::Request| {
+            usage_response(request, Some(restored_owner.as_str()))
+        })
         .expect(/*requests*/ 5)
         .mount(&server)
         .await;
@@ -149,7 +296,6 @@ async fn spending_coverage_checks_a_restored_fifth_seat_before_any_paid_transiti
         .expect(/*requests*/ 0)
         .mount(&server)
         .await;
-    let fixture = exhausted_fixture(&server, /*count*/ 5).await?;
     let cancellation = CancellationToken::new();
     assert!(!probe_for_recovery(&fixture.execution, &fixture.config, &cancellation).await);
     assert_eq!(
