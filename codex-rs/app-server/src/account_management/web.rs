@@ -15,7 +15,13 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::get;
 use axum::routing::post;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
+use std::time::Instant;
+
+#[path = "web_lifecycle.rs"]
+mod lifecycle;
+use lifecycle::WebLifecycle;
 
 /// Explicit browser origins are required when binding beyond loopback.
 pub struct AccountManagerWebOptions {
@@ -28,6 +34,7 @@ struct WebState {
     manager: Arc<AccountManager>,
     token: Arc<String>,
     origins: Arc<Vec<String>>,
+    lifecycle: WebLifecycle,
 }
 
 /// Serves the embedded interface and calls `ready` with a one-time pairing URL.
@@ -78,14 +85,29 @@ pub async fn serve(
         manager: Arc::clone(&manager),
         token: Arc::new(token),
         origins: Arc::new(origins),
+        lifecycle: WebLifecycle::new(Instant::now()),
     };
     let app = router(state.clone());
     ready(&format!("{}/#pair={}", state.origins[0], state.token));
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await;
+    let stop = state.lifecycle.shutdown();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(stop.clone().cancelled_owned())
+        .into_future();
+    tokio::pin!(server);
+    let result = tokio::select! {
+        result = &mut server => result,
+        _ = async {
+            tokio::select! {
+                _ = state.lifecycle.wait() => {},
+                _ = exit_signal() => {},
+            }
+        } => {
+            stop.cancel();
+            // Cancel device-login waits before HTTP drain, then let credential transactions finish.
+            manager.shutdown_logins().await;
+            server.await
+        }
+    };
     manager.shutdown_logins().await;
     result.map_err(Into::into)
 }
@@ -94,6 +116,9 @@ fn router(state: WebState) -> Router {
     let api = Router::new()
         .route("/inventory", get(inventory))
         .route("/operation", post(operation))
+        .route("/heartbeat", post(heartbeat))
+        .route("/leave", post(leave))
+        .route("/shutdown", post(shutdown))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             authorize,
@@ -127,6 +152,15 @@ fn router(state: WebState) -> Router {
                 (
                     [("content-type", "text/javascript; charset=utf-8")],
                     include_str!("webui/guidance.js"),
+                )
+            }),
+        )
+        .route(
+            "/lifecycle.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/lifecycle.js"),
                 )
             }),
         )
@@ -186,12 +220,30 @@ async fn authorize(State(state): State<WebState>, request: Request, next: Next) 
         )
             .into_response();
     }
+    if state.lifecycle.shutdown().is_cancelled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"Account manager is shutting down"})),
+        )
+            .into_response();
+    }
+    let _activity = match request.uri().path() {
+        "/inventory" | "/operation" | "/api/inventory" | "/api/operation" => {
+            match state.lifecycle.activity() {
+                Ok(activity) => Some(activity),
+                Err(error) => return api_error(error),
+            }
+        }
+        _ => None,
+    };
     next.run(request).await
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PairRequest {
     token: String,
+    client_id: Option<String>,
 }
 
 async fn pair(
@@ -202,7 +254,56 @@ async fn pair(
     if !origin_allowed(&headers, &state) || !token_matches(&request.token, &state.token) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    if state.lifecycle.shutdown().is_cancelled() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    if let Some(tab) = request.client_id
+        && let Err(error) = state.lifecycle.renew(&tab, Instant::now())
+    {
+        return api_error(error);
+    }
     Json(serde_json::json!({"paired":true,"sessionToken":state.token.as_str()})).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TabRequest {
+    client_id: String,
+}
+
+async fn heartbeat(State(state): State<WebState>, Json(request): Json<TabRequest>) -> Response {
+    match state.lifecycle.renew(&request.client_id, Instant::now()) {
+        Ok(()) => Json(serde_json::json!({"alive":true})).into_response(),
+        Err(error) => api_error(error),
+    }
+}
+
+async fn leave(State(state): State<WebState>, Json(request): Json<TabRequest>) -> Response {
+    match state.lifecycle.leave(&request.client_id, Instant::now()) {
+        Ok(()) => Json(serde_json::json!({"left":true})).into_response(),
+        Err(error) => api_error(error),
+    }
+}
+
+async fn shutdown(State(state): State<WebState>) -> Response {
+    state.lifecycle.shutdown().cancel();
+    Json(serde_json::json!({"stopped":true})).into_response()
+}
+
+async fn exit_signal() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 async fn inventory(State(state): State<WebState>) -> Response {
@@ -216,7 +317,19 @@ async fn operation(
     State(state): State<WebState>,
     Json(operation): Json<AccountManagerOperation>,
 ) -> Response {
-    match state.manager.execute(operation).await {
+    let result = match operation {
+        operation @ (AccountManagerOperation::Refresh { .. }
+        | AccountManagerOperation::Credits { .. }) => {
+            tokio::select! {
+                result = state.manager.execute(operation) => result,
+                _ = state.lifecycle.shutdown().cancelled_owned() => {
+                    Err(anyhow::anyhow!("Account manager is shutting down"))
+                }
+            }
+        }
+        operation => state.manager.execute(operation).await,
+    };
+    match result {
         Ok(result) => Json(result).into_response(),
         Err(error) => api_error(error),
     }

@@ -1,0 +1,6 @@
+---
+source: app-server/src/account_management/web_tests.rs
+expression: "format!(\"Stop button: {}\\nExit guidance: {}\",\nexit_button.split_whitespace().collect::<Vec<_>>().join(\" \"),\nexit_note.split_whitespace().collect::<Vec<_>>().join(\" \"))"
+---
+Stop button: class="link" type="button" data-i18n="Stop manager" hidden > Stop manager
+Exit guidance: data-i18n="Stop manager ends this host process and cancels pending logins for all tabs. Closing the last tab allows 30 seconds to reopen; a missing heartbeat expires after 5 minutes." > Stop manager ends this host process and cancels pending logins for all tabs. Closing the last tab allows 30 seconds to reopen; a missing heartbeat expires after 5 minutes.

@@ -257,12 +257,40 @@ impl AccountManager {
     }
 
     pub(super) async fn read_credits(&self, id: &str) -> anyhow::Result<serde_json::Value> {
-        let (client, _, _) = self.profile_client(id).await?;
+        let profile = self.profile(id)?;
+        let (client, manager, auth) = self.profile_client(id).await?;
+        let owner = manager
+            .auth_change_state_receiver()
+            .borrow()
+            .owner_generation;
         let details = tokio::time::timeout(
             Duration::from_secs(10),
             client.list_rate_limit_reset_credits(),
         )
         .await??;
+        manager.reload().await;
+        let current_profile = self.profile(id)?;
+        let current = manager.auth_cached();
+        let pool = self.execution_pool().await?;
+        let store = AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf());
+        anyhow::ensure!(
+            !current_profile.profile.disabled
+                && current_profile.state == AccountProfileState::Ready
+                && current_profile.profile.credential_home == profile.profile.credential_home
+                && manager
+                    .auth_change_state_receiver()
+                    .borrow()
+                    .owner_generation
+                    == owner
+                && current
+                    .as_ref()
+                    .is_some_and(|current| current.get_account_id() == auth.get_account_id()
+                        && current.get_chatgpt_user_id() == auth.get_chatgpt_user_id())
+                && pool.as_ref().is_some_and(|pool| store
+                    .validate_profile_auth(pool, &profile.profile.id, &auth)
+                    .unwrap_or(false)),
+            "Account identity changed during the credit check; refresh before viewing credits"
+        );
         let credits: Vec<_> = details.credits.into_iter().map(|credit| serde_json::json!({
             "id":credit.id,"resetType":credit.reset_type,"status":credit.status,"grantedAt":credit.granted_at,
             "expiresAt":credit.expires_at,"title":credit.title,"description":credit.description,
