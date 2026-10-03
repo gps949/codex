@@ -7,6 +7,7 @@ use crate::AccountProfileId;
 use crate::AccountProfileState;
 use crate::AccountProfileStore;
 use crate::AccountProfileStoreError;
+use crate::account_store::AccountProfileEnrollment;
 use crate::auth::AuthDotJson;
 use crate::auth::AuthKeyringBackendKind;
 use crate::auth::load_auth_dot_json;
@@ -66,7 +67,23 @@ pub fn find_existing_profile_with_identity(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     auth_keyring_backend_kind: AuthKeyringBackendKind,
 ) -> Result<Option<AccountProfile>, AccountProfileStoreError> {
-    for record in store.load_profile_records()? {
+    find_matching_profile(
+        store.load_profile_records()?,
+        exclude_profile_id,
+        identity,
+        auth_credentials_store_mode,
+        auth_keyring_backend_kind,
+    )
+}
+
+fn find_matching_profile(
+    records: Vec<crate::AccountProfileRecord>,
+    exclude_profile_id: &AccountProfileId,
+    identity: &AccountLoginIdentity,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_keyring_backend_kind: AuthKeyringBackendKind,
+) -> Result<Option<AccountProfile>, AccountProfileStoreError> {
+    for record in records {
         if &record.profile.id == exclude_profile_id || record.state != AccountProfileState::Ready {
             continue;
         }
@@ -122,6 +139,32 @@ pub fn reconcile_duplicate_new_login(
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     auth_keyring_backend_kind: AuthKeyringBackendKind,
 ) -> Result<Option<AccountProfile>, AccountProfileStoreError> {
+    let mut transaction = store.enrollment_transaction()?;
+    reconcile_duplicate_login(
+        &mut transaction,
+        new_profile,
+        auth_credentials_store_mode,
+        auth_keyring_backend_kind,
+    )
+}
+
+/// Reconciles a completed new login while the caller retains the transaction through promotion.
+pub(crate) fn reconcile_duplicate_login(
+    transaction: &mut AccountProfileEnrollment<'_>,
+    new_profile: &AccountProfile,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_keyring_backend_kind: AuthKeyringBackendKind,
+) -> Result<Option<AccountProfile>, AccountProfileStoreError> {
+    let records = transaction.records()?;
+    let record = records
+        .iter()
+        .find(|record| record.profile.id == new_profile.id)
+        .ok_or_else(|| AccountProfileStoreError::UnknownProfile(new_profile.id.clone()))?;
+    if record.state != AccountProfileState::PendingLogin {
+        return Err(AccountProfileStoreError::ProfileNotPending(
+            new_profile.id.clone(),
+        ));
+    }
     let Some(identity) = load_login_identity(
         &new_profile.credential_home,
         auth_credentials_store_mode,
@@ -132,8 +175,8 @@ pub fn reconcile_duplicate_new_login(
         return Ok(None);
     };
 
-    let Some(existing) = find_existing_profile_with_identity(
-        store,
+    let Some(existing) = find_matching_profile(
+        records,
         &new_profile.id,
         &identity,
         auth_credentials_store_mode,
@@ -150,10 +193,56 @@ pub fn reconcile_duplicate_new_login(
         auth_keyring_backend_kind,
     )
     .map_err(AccountProfileStoreError::Io)?;
-    store.abandon_pending_profile(&new_profile.id)?;
+    transaction.abandon_pending_profile(&new_profile.id, |home| {
+        remove_pending_credentials(home, auth_credentials_store_mode, auth_keyring_backend_kind)
+    })?;
     Ok(Some(existing))
+}
+
+/// Deletes credentials and metadata for an unfinished login without revoking its OAuth token.
+/// Reconciliation may have copied the same token into the retained profile. Failed cleanup keeps
+/// the pending profile visible so cancellation can be retried.
+pub fn abandon_pending_login(
+    store: &AccountProfileStore,
+    profile_id: &AccountProfileId,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_keyring_backend_kind: AuthKeyringBackendKind,
+) -> Result<bool, AccountProfileStoreError> {
+    store
+        .enrollment_transaction()?
+        .abandon_pending_profile(profile_id, |home| {
+            remove_pending_credentials(home, auth_credentials_store_mode, auth_keyring_backend_kind)
+        })
+}
+
+fn remove_pending_credentials(
+    home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_keyring_backend_kind: AuthKeyringBackendKind,
+) -> std::io::Result<()> {
+    let _refresh_lock = crate::account_file::refresh_lock(home)?;
+    crate::auth::logout(home, auth_credentials_store_mode, auth_keyring_backend_kind)?;
+    if auth_credentials_store_mode != AuthCredentialsStoreMode::Ephemeral {
+        crate::auth::logout(
+            home,
+            AuthCredentialsStoreMode::Ephemeral,
+            auth_keyring_backend_kind,
+        )?;
+    }
+    if auth_credentials_store_mode != AuthCredentialsStoreMode::File {
+        crate::auth::logout(
+            home,
+            AuthCredentialsStoreMode::File,
+            auth_keyring_backend_kind,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 #[path = "account_identity_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "account_identity_keyring_tests.rs"]
+mod keyring_tests;

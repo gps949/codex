@@ -12,7 +12,7 @@ use crate::token_data::TokenData;
 use crate::token_data::parse_chatgpt_jwt_claims;
 use base64::Engine;
 
-fn chatgpt_auth_with_ids(
+pub(super) fn chatgpt_auth_with_ids(
     chatgpt_user_id: &str,
     chatgpt_account_id: &str,
     email: &str,

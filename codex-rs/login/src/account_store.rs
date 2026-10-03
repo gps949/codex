@@ -146,17 +146,21 @@ impl AccountProfileStore {
         &self,
         id: &AccountProfileId,
     ) -> Result<AccountProfile, AccountProfileStoreError> {
-        let _lock = crate::account_file::lock(&self.codex_home)?;
-        let mut manifest = self.load_manifest()?;
-        let stored = manifest
-            .profiles
-            .iter_mut()
-            .find(|profile| &profile.id == id)
-            .ok_or_else(|| AccountProfileStoreError::UnknownProfile(id.clone()))?;
-        stored.state = AccountProfileState::Ready;
-        let resolved = stored.clone();
-        self.save_manifest(&manifest)?;
-        self.resolve_profile(resolved)
+        self.enrollment_transaction()?.complete_profile(id)
+    }
+
+    /// Holds one home-wide metadata transaction through seat reconciliation and promotion.
+    /// OAuth requests and callback waits must finish before starting this transaction.
+    pub(crate) fn enrollment_transaction(
+        &self,
+    ) -> Result<AccountProfileEnrollment<'_>, AccountProfileStoreError> {
+        let lock = crate::account_file::lock(&self.codex_home)?;
+        let manifest = self.load_manifest()?;
+        Ok(AccountProfileEnrollment {
+            store: self,
+            manifest,
+            _lock: lock,
+        })
     }
 
     /// Removes an unfinished managed profile and its credential directory. Ready profiles require
@@ -166,31 +170,8 @@ impl AccountProfileStore {
         &self,
         id: &AccountProfileId,
     ) -> Result<bool, AccountProfileStoreError> {
-        let _lock = crate::account_file::lock(&self.codex_home)?;
-        let mut manifest = self.load_manifest()?;
-        let Some(index) = manifest
-            .profiles
-            .iter()
-            .position(|profile| &profile.id == id)
-        else {
-            return Ok(false);
-        };
-        let profile = &manifest.profiles[index];
-        if profile.state != AccountProfileState::PendingLogin {
-            return Err(AccountProfileStoreError::ProfileNotPending(id.clone()));
-        }
-        if profile.credential_location == CredentialLocation::LegacyRoot {
-            return Err(AccountProfileStoreError::CannotPurgeLegacyRoot);
-        }
-
-        manifest.profiles.remove(index);
-        self.save_manifest(&manifest)?;
-        let path = self.credential_home_for(id);
-        match fs::remove_dir_all(path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-            Err(error) => Err(error.into()),
-        }
+        self.enrollment_transaction()?
+            .abandon_pending_profile(id, |_| Ok(()))
     }
 
     /// Adds the existing root credentials as a compatibility profile without moving or copying
@@ -372,6 +353,75 @@ impl AccountProfileStore {
             }
         }
         Ok(())
+    }
+}
+
+/// A manifest lock held while completed OAuth credentials are reconciled with existing seats.
+pub(crate) struct AccountProfileEnrollment<'store> {
+    store: &'store AccountProfileStore,
+    manifest: AccountProfilesManifest,
+    _lock: fs::File,
+}
+
+impl AccountProfileEnrollment<'_> {
+    pub(crate) fn records(&self) -> Result<Vec<AccountProfileRecord>, AccountProfileStoreError> {
+        self.manifest
+            .profiles
+            .iter()
+            .cloned()
+            .map(|profile| self.store.resolve_record(profile))
+            .collect()
+    }
+
+    pub(crate) fn complete_profile(
+        &mut self,
+        id: &AccountProfileId,
+    ) -> Result<AccountProfile, AccountProfileStoreError> {
+        let stored = self
+            .manifest
+            .profiles
+            .iter_mut()
+            .find(|profile| &profile.id == id)
+            .ok_or_else(|| AccountProfileStoreError::UnknownProfile(id.clone()))?;
+        stored.state = AccountProfileState::Ready;
+        let resolved = stored.clone();
+        self.store.save_manifest(&self.manifest)?;
+        self.store.resolve_profile(resolved)
+    }
+
+    pub(crate) fn abandon_pending_profile(
+        &mut self,
+        id: &AccountProfileId,
+        clean_credentials: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<bool, AccountProfileStoreError> {
+        let Some(index) = self
+            .manifest
+            .profiles
+            .iter()
+            .position(|profile| &profile.id == id)
+        else {
+            return Ok(false);
+        };
+        let profile = &self.manifest.profiles[index];
+        if profile.state != AccountProfileState::PendingLogin {
+            return Err(AccountProfileStoreError::ProfileNotPending(id.clone()));
+        }
+        if profile.credential_location == CredentialLocation::LegacyRoot {
+            return Err(AccountProfileStoreError::CannotPurgeLegacyRoot);
+        }
+
+        let path = self.store.credential_home_for(id);
+        // Keyring keys use the canonical directory. Delete them before removing the directory,
+        // and retain the pending record if any cleanup fails so the user can retry it.
+        clean_credentials(&path)?;
+        match fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.manifest.profiles.remove(index);
+        self.store.save_manifest(&self.manifest)?;
+        Ok(true)
     }
 }
 
