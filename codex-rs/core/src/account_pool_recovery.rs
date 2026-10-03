@@ -14,6 +14,8 @@ use crate::failover_turn::earliest_exhausted_reset;
 
 #[path = "account_pool_metadata_recovery.rs"]
 mod metadata;
+pub(crate) use metadata::SpendingRecoveryCoverage;
+pub(crate) use metadata::coverage_for_spending;
 pub(crate) use metadata::probe_for_recovery;
 
 /// Cumulative waiting allowance shared by every sampling step of one user turn.
@@ -103,7 +105,6 @@ pub(crate) async fn wait_for_recovery(
     let deadline = waiting.started + waiting.allowance;
     let mut changes = execution_auth.active_auth_change_receiver();
     let mut next_probe = Instant::now();
-    let mut probe_cursor = 0;
     loop {
         if cancellation.is_cancelled() {
             return false;
@@ -132,13 +133,10 @@ pub(crate) async fn wait_for_recovery(
             let outcome = tokio::select! {
                 _ = cancellation.cancelled() => return false,
                 _ = tokio::time::sleep_until(deadline) => return false,
-                recovered = metadata::probe_candidates(execution_auth, config, cancellation, probe_cursor) => recovered,
+                recovered = metadata::probe_candidates(execution_auth, config, cancellation) => recovered,
             };
             if outcome == metadata::ProbeOutcome::Recovered {
                 return true;
-            }
-            if outcome != metadata::ProbeOutcome::Busy {
-                probe_cursor = probe_cursor.wrapping_add(metadata::MAX_PROFILES_PER_PASS);
             }
             next_probe = Instant::now()
                 + if outcome == metadata::ProbeOutcome::Busy {

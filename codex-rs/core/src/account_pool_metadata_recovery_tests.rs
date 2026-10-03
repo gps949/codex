@@ -9,11 +9,234 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 use super::*;
 use crate::account_pool_recovery::RecoveryWaitBudget;
 use crate::account_pool_recovery::wait_for_recovery;
 use crate::config::ConfigBuilder;
+
+struct RecoveryFixture {
+    _home: tempfile::TempDir,
+    config: Config,
+    execution: ExecutionAuth,
+}
+
+async fn exhausted_fixture(server: &MockServer, count: usize) -> anyhow::Result<RecoveryFixture> {
+    let home = tempfile::tempdir()?;
+    let profiles = AccountProfileStore::new(home.path().to_path_buf());
+    for index in 0..count {
+        let profile = profiles.allocate_profile(Some(format!("seat-{index}")), index as u32)?;
+        let owner = format!("seat-{index}");
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json!({
+            "https://api.openai.com/auth": {"chatgpt_user_id": owner, "chatgpt_account_id": owner},
+        }).to_string());
+        std::fs::write(
+            profile.credential_home.join("auth.json"),
+            serde_json::to_vec(&json!({
+                "tokens": {"id_token": format!("e30.{payload}.sig"), "access_token": owner,
+                    "refresh_token": "synthetic-refresh", "account_id": owner},
+                "last_refresh": "2099-01-01T00:00:00Z",
+            }))?,
+        )?;
+        profiles.complete_profile(&profile.id)?;
+    }
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    config.chatgpt_base_url = format!("{}/backend-api", server.uri());
+    config.account_pool.window_warmup = Some(false);
+    let execution = ExecutionAuth::legacy(AuthManager::from_auth_for_testing(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    ));
+    assert!(execution.ensure_runtime_from_config(&config).await?);
+    let pool = execution.account_pool().expect("pool");
+    while let Ok(lease) = pool.lease() {
+        pool.mark_exhausted(&lease, Some(Utc::now() + chrono::Duration::days(2)))?;
+    }
+    AccountRuntimeStateStore::new(config.codex_home.to_path_buf()).synchronize(&pool)?;
+    Ok(RecoveryFixture {
+        _home: home,
+        config,
+        execution,
+    })
+}
+
+fn usage_response(request: &wiremock::Request, recovered_seat: Option<&str>) -> ResponseTemplate {
+    let owner = request
+        .headers
+        .get("authorization")
+        .expect("bound auth")
+        .to_str()
+        .expect("synthetic bearer")
+        .strip_prefix("Bearer ")
+        .expect("bearer");
+    let allowed = recovered_seat == Some(owner);
+    let short_reset = (Utc::now() + chrono::Duration::hours(2)).timestamp();
+    let long_reset = (Utc::now() + chrono::Duration::days(2)).timestamp();
+    ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+        "plan_type": "pro", "account_id": owner, "user_id": owner,
+        "rate_limit": {"allowed": allowed, "limit_reached": !allowed,
+            "primary_window": {"used_percent": if allowed { 0 } else { 100 },
+                "limit_window_seconds": 18000, "reset_after_seconds": 7200, "reset_at": short_reset},
+            "secondary_window": {"used_percent": if allowed { 0 } else { 100 },
+                "limit_window_seconds": 604800, "reset_after_seconds": 172800, "reset_at": long_reset}},
+    }))
+}
+
+#[tokio::test]
+async fn successive_failed_turns_recover_the_fifth_seat_without_waiting() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(|request: &wiremock::Request| usage_response(request, Some("seat-4")))
+        .expect(/*requests*/ 5)
+        .mount(&server)
+        .await;
+    let fixture = exhausted_fixture(&server, /*count*/ 5).await?;
+    let cancellation = CancellationToken::new();
+    assert!(!probe_for_recovery(&fixture.execution, &fixture.config, &cancellation).await);
+    assert!(probe_for_recovery(&fixture.execution, &fixture.config, &cancellation).await);
+    assert!(fixture.execution.active_lease().is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_and_immediate_retry_probes_share_one_metadata_pass() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(|request: &wiremock::Request| {
+            usage_response(request, /*recovered_seat*/ None).set_delay(Duration::from_millis(20))
+        })
+        .expect(/*requests*/ 4)
+        .mount(&server)
+        .await;
+    let fixture = exhausted_fixture(&server, /*count*/ 4).await?;
+    let cancellation = CancellationToken::new();
+    assert_eq!(
+        tokio::join!(
+            probe_for_recovery(&fixture.execution, &fixture.config, &cancellation),
+            probe_for_recovery(&fixture.execution, &fixture.config, &cancellation),
+        ),
+        (false, false)
+    );
+    assert!(!probe_for_recovery(&fixture.execution, &fixture.config, &cancellation).await);
+    assert_eq!(
+        coverage_for_spending(&fixture.execution, &fixture.config, &cancellation).await,
+        SpendingRecoveryCoverage::CompleteUnchanged
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn spending_coverage_checks_a_restored_fifth_seat_before_any_paid_transition()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(|request: &wiremock::Request| usage_response(request, Some("seat-4")))
+        .expect(/*requests*/ 5)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(/*status*/ 500))
+        .expect(/*requests*/ 0)
+        .mount(&server)
+        .await;
+    let fixture = exhausted_fixture(&server, /*count*/ 5).await?;
+    let cancellation = CancellationToken::new();
+    assert!(!probe_for_recovery(&fixture.execution, &fixture.config, &cancellation).await);
+    assert_eq!(
+        coverage_for_spending(&fixture.execution, &fixture.config, &cancellation).await,
+        SpendingRecoveryCoverage::Recovered
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_owner_metadata_cannot_authorize_spending_or_repeated_metadata_reads()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+            "plan_type": "pro", "rate_limit": {"allowed": false, "limit_reached": true},
+        })))
+        .expect(/*requests*/ 5)
+        .mount(&server)
+        .await;
+    let fixture = exhausted_fixture(&server, /*count*/ 5).await?;
+    let cancellation = CancellationToken::new();
+    assert_eq!(
+        coverage_for_spending(&fixture.execution, &fixture.config, &cancellation).await,
+        SpendingRecoveryCoverage::Incomplete
+    );
+    assert_eq!(
+        coverage_for_spending(&fixture.execution, &fixture.config, &cancellation).await,
+        SpendingRecoveryCoverage::Incomplete
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_new_refusal_invalidates_only_its_seats_spending_coverage() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(|request: &wiremock::Request| {
+            usage_response(request, /*recovered_seat*/ None)
+        })
+        .expect(/*requests*/ 5)
+        .mount(&server)
+        .await;
+    let fixture = exhausted_fixture(&server, /*count*/ 4).await?;
+    let cancellation = CancellationToken::new();
+    assert_eq!(
+        coverage_for_spending(&fixture.execution, &fixture.config, &cancellation).await,
+        SpendingRecoveryCoverage::CompleteUnchanged
+    );
+    let pool = fixture.execution.account_pool().expect("pool");
+    let failed = fixture
+        .execution
+        .quota_rescue_identity()
+        .expect("refused identity");
+    pool.mark_exhausted(
+        failed.account_lease().expect("account lease"),
+        Some(Utc::now() + chrono::Duration::days(2)),
+    )?;
+    assert_eq!(
+        coverage_for_spending(&fixture.execution, &fixture.config, &cancellation).await,
+        SpendingRecoveryCoverage::CompleteUnchanged
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_pools_require_manual_confirmation_before_paid_rescue() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(/*status*/ 500))
+        .expect(/*requests*/ 0)
+        .mount(&server)
+        .await;
+    let fixture = exhausted_fixture(&server, /*count*/ 65).await?;
+    assert_eq!(
+        coverage_for_spending(
+            &fixture.execution,
+            &fixture.config,
+            &CancellationToken::new()
+        )
+        .await,
+        SpendingRecoveryCoverage::Incomplete
+    );
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_shared_import_preserves_pass_deadline_and_wait_cancellation() -> anyhow::Result<()> {
