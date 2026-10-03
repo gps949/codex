@@ -11,6 +11,8 @@ mod display;
 mod actions;
 #[path = "account_manager_input.rs"]
 mod input;
+#[path = "account_manager_settings.rs"]
+mod settings;
 use input::prompt;
 
 pub(crate) async fn run(manager: Arc<AccountManager>) -> anyhow::Result<()> {
@@ -59,36 +61,7 @@ pub(crate) async fn run(manager: Arc<AccountManager>) -> anyhow::Result<()> {
                         })
                     }
                 }
-            "s" => {
-                println!("\n1 Rotation strategy  2 Early switch percent  3 Return to preferred\n4 Standby warmup  5 Warmup interval  6 Wait for quota recovery\n7 Maximum waiting minutes  8 Automatic reset credits  9 Credit waiting threshold\nEnter returns. J edits advanced JSON.");
-                let choice = prompt("Setting", "").await?;
-                if choice.is_empty() { None }
-                else if choice.eq_ignore_ascii_case("j") {
-                    println!("{}", serde_json::to_string_pretty(&inventory.settings)?);
-                    let values = prompt("Settings JSON (empty returns)", "").await?;
-                    if values.is_empty() { None } else { Some(Operation::Settings {values: serde_json::from_str(&values)?}) }
-                } else {
-                    let (key, label, fallback) = match choice.as_str() {
-                        "1" => ("rotation_strategy", "Strategy: fill_first or earliest_reset", "fill_first"),
-                        "2" => ("preemptive_switch_percent", "Early switch at used percent (0 disables)", "95"),
-                        "3" => ("return_to_preferred", "Return to preferred account? true/false", "true"),
-                        "4" => ("window_warmup", "Warm standby windows? true/false (uses a small amount of quota)", "true"),
-                        "5" => ("window_warmup_interval_minutes", "Warmup check interval in minutes", "5"),
-                        "6" => ("resume_after_reset", "Wait for quota recovery? true/false", "true"),
-                        "7" => ("max_reset_wait_minutes", "Maximum waiting minutes per turn", "360"),
-                        "8" => ("auto_reset_credits", "Automatic credits: never or when_pool_exhausted", "never"),
-                        "9" => ("auto_reset_credit_min_wait_minutes", "Only spend a credit when the natural reset is farther away (minutes)", "60"),
-                        _ => anyhow::bail!("Choose a setting from 1 to 9."),
-                    };
-                    let current = inventory.settings.get(key).filter(|value| !value.is_null())
-                        .map_or_else(|| fallback.into(), |value| value.as_str().map_or_else(|| value.to_string(), str::to_string));
-                    let value = prompt(label, &current).await?;
-                    let value = if choice == "1" { serde_json::Value::String(value.replace('-', "_")) }
-                        else if choice == "8" { serde_json::Value::String(value) }
-                        else { serde_json::from_str(&value)? };
-                    Some(Operation::Settings {values: serde_json::Value::Object(serde_json::Map::from_iter([(key.into(), value)]))})
-                }
-            }
+                "s" => settings::choose(&inventory.settings).await?,
                 "p" => {
                     actions::api_actions(&manager).await?;
                     None
