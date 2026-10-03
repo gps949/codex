@@ -113,6 +113,24 @@ fn router(state: WebState) -> Router {
             }),
         )
         .route(
+            "/messages.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/messages.js"),
+                )
+            }),
+        )
+        .route(
+            "/guidance.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/guidance.js"),
+                )
+            }),
+        )
+        .route(
             "/app.css",
             get(|| async {
                 (
