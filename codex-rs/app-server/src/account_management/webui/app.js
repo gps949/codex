@@ -2,6 +2,9 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
+  const messages = window.AccountManagerMessages;
+  const { t } = messages;
+  const guidance = window.AccountManagerGuidance;
   const state = {
     inventory: null,
     busy: false,
@@ -9,6 +12,8 @@
     reading: null,
     timer: null,
     lastRead: 0,
+    inventoryKey: "",
+    readFailed: false,
     page: 0,
     redemption: null,
     sessionToken: "",
@@ -16,20 +21,9 @@
   const resetStorageKey = "codex.accountManager.resetOperation";
   const sessionStorageKey = "codex.accountManager.sessionToken";
   const pageSize = 8;
-  const statusNames = {
-    ready: "Ready",
-    coolingDown: "Cooling down",
-    needsLogin: "Needs login",
-    disabled: "Disabled",
-    paused: "Paused",
-    pending: "Login pending",
-    signedIn: "Signed in",
-    waiting: "Waiting",
-    completed: "Completed",
-    cancelled: "Cancelled",
-    failed: "Failed",
-  };
+  const statusNames = guidance.names;
   let dialogTask = null;
+  let dialogAccountId = null;
   let dialogCompleted = false;
   let returnFocus = null;
   let returnFocusKey = null;
@@ -41,7 +35,7 @@
     return node;
   }
   function button(text, action, className = "") {
-    const node = element("button", text, className);
+    const node = element("button", t(text), className);
     node.type = "button";
     node.addEventListener("click", action);
     return node;
@@ -49,12 +43,12 @@
   function definitions(items) {
     const node = element("dl", "", "detail-list");
     for (const [key, value] of items)
-      node.append(element("dt", key), element("dd", value ?? "Unknown"));
+      node.append(element("dt", t(key)), element("dd", value ?? t("Unknown")));
     return node;
   }
   function field(body, name, label, type, value, help = "", attributes = {}) {
     const wrapper = element("div", "", "form-field");
-    const title = element("label", label);
+    const title = element("label", t(label));
     const input = element(type === "select" ? "select" : "input");
     input.id = `field-${name}`;
     input.name = name;
@@ -77,7 +71,7 @@
       wrapper.append(title);
     } else wrapper.append(title, input);
     if (help) {
-      const hint = element("small", help);
+      const hint = element("small", t(help));
       hint.id = `${input.id}-help`;
       input.setAttribute("aria-describedby", hint.id);
       wrapper.append(hint);
@@ -87,11 +81,11 @@
   }
   function date(value) {
     if (value === null || value === undefined || value === "")
-      return "Not reported";
+      return t("Not reported");
     const parsed = new Date(typeof value === "number" ? value * 1000 : value);
     return Number.isNaN(parsed.getTime())
-      ? "Unknown date"
-      : parsed.toLocaleString([], {
+      ? t("Unknown date")
+      : parsed.toLocaleString(messages.locale(), {
           year: "numeric",
           month: "short",
           day: "numeric",
@@ -100,17 +94,28 @@
           timeZoneName: "short",
         });
   }
-  function age(value) {
-    if (typeof value !== "number" || !Number.isFinite(value))
-      return "Cache age unknown";
-    const minutes = Math.max(0, Math.floor((Date.now() / 1000 - value) / 60));
-    return minutes < 1
-      ? "Cached just now"
-      : minutes < 60
-        ? `Cached ${minutes}m ago`
-        : minutes < 1440
-          ? `Cached ${Math.floor(minutes / 60)}h ago`
-          : `Cached ${Math.floor(minutes / 1440)}d ago`;
+
+  function timedText(kind, value, name = "") {
+    const node = element("small");
+    node.dataset.timeKind = kind;
+    node.dataset.timeValue = JSON.stringify(value ?? null);
+    node.dataset.windowName = name;
+    updateTime(node);
+    return node;
+  }
+  function updateTime(node) {
+    const value = JSON.parse(node.dataset.timeValue);
+    node.textContent =
+      node.dataset.timeKind === "age"
+        ? guidance.age(value)
+        : guidance.reset(value, node.dataset.windowName);
+  }
+  function updateClocks() {
+    $("metadata-age").textContent = t("Host status read at {time}", {
+      time: new Date(state.lastRead).toLocaleTimeString(messages.locale()),
+    });
+    for (const node of document.querySelectorAll("[data-time-kind]"))
+      updateTime(node);
   }
   function quota(account, name) {
     const limits = account.rateLimits || {};
@@ -119,13 +124,13 @@
     const label =
       minutes > 0
         ? minutes % 10080 === 0
-          ? `${minutes / 10080} week`
+          ? t("{count} week", { count: minutes / 10080 })
           : minutes % 1440 === 0
-            ? `${minutes / 1440} day`
+            ? t("{count} day", { count: minutes / 1440 })
             : minutes % 60 === 0
-              ? `${minutes / 60} hr`
-              : `${minutes} min`
-        : `${name === "primary" ? "Primary" : "Secondary"} window`;
+              ? t("{count} hr", { count: minutes / 60 })
+              : t("{count} min", { count: minutes })
+        : t(name === "primary" ? "Primary window" : "Secondary window");
     const node = element("div", "", "quota");
     const known =
       typeof window?.usedPercent === "number" &&
@@ -135,7 +140,11 @@
       element("span", label),
       element(
         "strong",
-        known ? `Used ${Number(window.usedPercent.toFixed(1))}%` : "Unknown",
+        known
+          ? t("Used {percent}%", {
+              percent: Number(window.usedPercent.toFixed(1)),
+            })
+          : t("Unknown"),
       ),
     );
     node.append(top);
@@ -143,7 +152,10 @@
       const bar = element("progress");
       bar.max = 100;
       bar.value = Math.min(100, Math.max(0, window.usedPercent));
-      bar.setAttribute("aria-label", `${label}: ${window.usedPercent}% used`);
+      bar.setAttribute(
+        "aria-label",
+        `${label}: ${t("Used {percent}%", { percent: window.usedPercent })}`,
+      );
       if (window.usedPercent >= 95) bar.className = "high";
       else if (window.usedPercent >= 75) bar.className = "medium";
       node.append(bar);
@@ -151,18 +163,27 @@
     const observed = Object.hasOwn(limits, `${name}ObservedAt`)
       ? limits[`${name}ObservedAt`]
       : limits.observedAt;
+    if (known)
+      node.append(
+        element(
+          "small",
+          t("Remaining {percent}% (cached)", {
+            percent: Number(
+              Math.max(0, Math.min(100, 100 - window.usedPercent)).toFixed(1),
+            ),
+          }),
+        ),
+      );
     node.append(
-      element("small", known ? age(observed) : "No cached quota"),
-      element(
-        "small",
-        window?.resetsAt
-          ? `Resets ${date(window.resetsAt)}`
-          : "Reset time unknown",
-      ),
+      known
+        ? timedText("age", observed)
+        : element("small", t("No cached quota")),
+      timedText("reset", window || null, name),
     );
     return node;
   }
   function notice(message, failed = false) {
+    message = t(message);
     $("notice").textContent = message;
     const entry = element(
       "li",
@@ -254,8 +275,8 @@
     $("pair-panel").hidden = paired;
     $("dashboard").hidden = !paired;
     $("connection-state").textContent = paired
-      ? "Connected"
-      : "Pairing required";
+      ? t("Connected")
+      : t("Pairing required");
     if (!paired) {
       state.sessionToken = "";
       try {
@@ -270,9 +291,22 @@
   function scheduleRead() {
     clearTimeout(state.timer);
     if (state.paired && !document.hidden)
-      state.timer = setTimeout(() => {
-        readInventory().catch(() => {});
-      }, 5000);
+      state.timer = setTimeout(
+        () => {
+          readInventory().catch(() => {});
+        },
+        state.readFailed
+          ? 30000
+          : state.busy ||
+              state.inventory?.loginJobs?.some(
+                (job) => job.status === "waiting",
+              ) ||
+              state.inventory?.accounts?.some(
+                (account) => account.refresh?.inProgress,
+              )
+            ? 1000
+            : 15000,
+      );
   }
   async function readInventory() {
     if (state.reading) return state.reading;
@@ -280,22 +314,33 @@
       try {
         const inventory = await request("/api/inventory");
         if (!Array.isArray(inventory.accounts))
-          throw new Error("The account manager returned an invalid inventory.");
+          throw new Error(
+            t("The account manager returned an invalid inventory."),
+          );
+        guidance.setClock(inventory.hostNow);
+        const inventoryKey = JSON.stringify({ ...inventory, hostNow: null });
+        const changed = inventoryKey !== state.inventoryKey;
         state.inventory = inventory;
+        state.inventoryKey = inventoryKey;
         state.lastRead = Date.now();
+        state.readFailed = false;
         setPaired(true);
         $("global-error").hidden = true;
-        renderInventory();
+        if (changed) renderInventory();
+        else updateClocks();
         window.dispatchEvent(
           new CustomEvent("accountmanager:inventory", { detail: inventory }),
         );
         return inventory;
       } catch (error) {
-        $("global-error").textContent =
-          `Could not read account status: ${error.message}`;
+        state.readFailed = true;
+        $("global-error").textContent = t(
+          "Could not read account status: {message}",
+          { message: error.message },
+        );
         $("global-error").hidden = false;
         if (error.status !== 401)
-          $("connection-state").textContent = "Connection interrupted";
+          $("connection-state").textContent = t("Connection interrupted");
         throw error;
       } finally {
         state.reading = null;
@@ -303,6 +348,10 @@
       }
     })();
     return state.reading;
+  }
+  async function synchronizeInventory() {
+    if (state.reading) await state.reading.catch(() => {});
+    return readInventory();
   }
   function accountById(id) {
     return state.inventory?.accounts.find(
