@@ -46,6 +46,11 @@
       node.append(element("dt", t(key)), element("dd", value ?? t("Unknown")));
     return node;
   }
+  function disclosure(title, ...children) {
+    const node = element("details", "", "control-disclosure");
+    node.append(element("summary", t(title)), ...children);
+    return node;
+  }
   function field(body, name, label, type, value, help = "", attributes = {}) {
     const wrapper = element("div", "", "form-field");
     const title = element("label", t(label));
@@ -689,8 +694,16 @@
     state.busy = busy;
     $("dialog-fields").disabled = busy;
     $("dialog-cancel").disabled = busy;
-    $("dialog-submit").disabled = busy || dialogCompleted;
+    $("dialog-submit").disabled =
+      busy ||
+      dialogCompleted ||
+      $("dialog-submit").dataset.unavailable === "true";
+    if (busy) $("dialog-submit").textContent = t("Working…");
+    else if (dialogTask)
+      $("dialog-submit").textContent = $("dialog-submit").dataset.label;
     $("action-form").setAttribute("aria-busy", String(busy));
+    $("language").disabled = busy || $("action-dialog").open;
+    scheduleRead();
     for (const id of [
       "add-account",
       "edit-settings",
@@ -702,17 +715,17 @@
     if (state.inventory) renderInventory();
   }
   function showResult(message, failed = false) {
-    $("dialog-result").textContent = message;
+    $("dialog-result").textContent = t(message);
     $("dialog-result").className = `message ${failed ? "error" : "success"}`;
     $("dialog-result").hidden = false;
-    $("dialog-cancel").textContent = dialogCompleted ? "Close" : "Cancel";
+    $("dialog-cancel").textContent = t(dialogCompleted ? "Close" : "Cancel");
   }
   function openDialog(
     title,
     description,
     build,
     submit = null,
-    submitLabel = "Confirm",
+    submitLabel = t("Confirm"),
   ) {
     if (state.busy) return;
     if (!$("action-dialog").open) {
@@ -720,22 +733,26 @@
       returnFocusKey = returnFocus?.dataset.focusKey;
     }
     dialogTask = submit;
+    dialogAccountId = null;
     dialogCompleted = false;
     $("dialog-title").textContent = title;
-    $("dialog-description").textContent = description;
+    $("dialog-description").textContent = t(description);
     $("dialog-body").replaceChildren();
     $("dialog-result").hidden = true;
     $("dialog-submit").hidden = !submit;
     $("dialog-submit").disabled = false;
-    $("dialog-submit").textContent = submitLabel;
-    $("dialog-cancel").textContent = submit ? "Cancel" : "Close";
+    $("dialog-submit").textContent = t(submitLabel);
+    $("dialog-submit").dataset.label = t(submitLabel);
+    delete $("dialog-submit").dataset.unavailable;
+    $("dialog-cancel").textContent = t(submit ? "Cancel" : "Close");
     build($("dialog-body"));
     if (!$("action-dialog").open) $("action-dialog").showModal();
+    $("language").disabled = true;
     $("dialog-title").focus();
   }
   async function perform(payload) {
     if (state.busy)
-      throw new Error("Wait for the current operation to finish.");
+      throw new Error(t("Wait for the current operation to finish."));
     setBusy(true);
     try {
       const result = await operation(payload);
@@ -743,7 +760,15 @@
       if ($("action-dialog").open)
         showResult(result.message || "Operation completed.");
       notice(result.message || "Operation completed.");
-      await readInventory().catch(() => {});
+      try {
+        await synchronizeInventory();
+      } catch {
+        const message = t(
+          "Changes saved, but status could not be synchronized. Read host status before repeating the operation.",
+        );
+        notice(message, true);
+        if ($("action-dialog").open) showResult(message, true);
+      }
       return result;
     } finally {
       setBusy(false);
@@ -759,11 +784,66 @@
     );
   }
   async function refreshQuota(ids = null) {
+    if (state.busy) return;
+    const detailId = dialogAccountId;
+    setBusy(true);
     try {
       notice("Checking backend quota…");
-      await perform({ type: "refresh", profileIds: ids });
+      const targets =
+        ids ||
+        state.inventory.accounts
+          .filter(contactAllowed)
+          .map((account) => account.profileId);
+      let checked = 0;
+      let failed = 0;
+      let succeeded = 0;
+      let pending = 0;
+      for (let offset = 0; offset < targets.length; offset += 4) {
+        notice(
+          t("Checking quota {checked}/{total}…", {
+            checked,
+            total: targets.length,
+          }),
+        );
+        const batch = targets.slice(offset, offset + 4);
+        await operation({ type: "refresh", profileIds: batch });
+        await synchronizeInventory();
+        checked += batch.length;
+        for (const id of batch) {
+          const status = accountById(id)?.refresh;
+          if (status?.inProgress || !status) pending++;
+          else if (status.succeeded) succeeded++;
+          else failed++;
+        }
+      }
+      notice(
+        t(
+          "Quota check complete: {succeeded} succeeded, {failed} failed. Failed accounts keep their cached quota.",
+          {
+            succeeded,
+            failed,
+          },
+        ),
+        failed > 0,
+      );
+      if (pending)
+        notice(
+          t(
+            "{count} quota checks are still running or unconfirmed. Read host status before repeating them.",
+            { count: pending },
+          ),
+        );
+      if (detailId && accountById(detailId)) {
+        setBusy(false);
+        showAccount(detailId);
+      }
     } catch (error) {
-      notice(`Quota refresh failed: ${error.message}`, true);
+      notice(
+        t("Quota refresh failed: {message}", { message: error.message }),
+        true,
+      );
+    } finally {
+      setBusy(false);
     }
   }
   function showAccount(id) {
@@ -781,55 +861,45 @@
       (body) => {
         body.append(
           definitions([
-            ["Profile ID", id],
-            ["Email", account.email],
-            ["Plan", account.plan],
-            ["Login", statusNames[account.loginState] || account.loginState],
-            [
-              "Availability",
-              statusNames[account.availability] || account.availability,
-            ],
-            ["Priority", account.priority],
+            ["Login", guidance.status(account.loginState)],
+            ["Availability", guidance.status(account.availability)],
             ["Reset credits", account.resetCreditCount],
-            ["Backend reset", date(account.backendResetsAt)],
           ]),
         );
         const quotas = element("div", "", "detail-quotas");
         quotas.append(quota(account, "primary"), quota(account, "secondary"));
-        body.append(quotas);
+        body.append(
+          quotas,
+          element("p", guidance.reason(account), "disclosure"),
+        );
+        const next = guidance.action(account);
+        const mainAction = button(
+          next.label,
+          () => runAccountAction(account, next.type),
+          "primary",
+        );
+        mainAction.disabled = Boolean(account.refresh?.inProgress);
+        body.append(mainAction);
         if (account.refresh)
           body.append(
             element(
               "p",
-              `Last refresh ${date(account.refresh.attemptedAt)}: ${account.refresh.message}`,
+              t("Last refresh {date}: {message}", {
+                date: date(account.refresh.attemptedAt),
+                message: t(account.refresh.message),
+              }),
               "disclosure",
             ),
           );
         const actions = element("div", "", "actions detail-actions");
-        const use = button(
-          "Use account",
-          () =>
-            confirmOperation(
-              "Use account",
-              "Use this account for subsequent requests. Requests already running keep their current identity.",
-              { type: "use", profileId: id },
-              [
-                ["Account", account.label],
-                ["Profile ID", id],
-              ],
-            ),
-          "primary",
-        );
-        use.disabled =
-          !contactAllowed(account) || account.availability === "coolingDown";
         const retry = button("Retry without credit", () =>
           confirmOperation(
             "Retry without credit",
             "Clear this account's local quota cooldown for one real request. This selects the account; the backend may still reject it. No reset credit is consumed.",
             { type: "retry", profileId: id },
             [
-              ["Account", account.label],
-              ["Profile ID", id],
+              [t("Account"), account.label],
+              [t("Profile ID"), id],
             ],
           ),
         );
@@ -838,11 +908,22 @@
         credits.disabled = !contactAllowed(account);
         const refresh = button("Refresh quota", () => refreshQuota([id]));
         refresh.disabled = !contactAllowed(account);
+        const recovery = element("div", "", "actions");
+        recovery.append(refresh, retry, credits);
+        body.append(
+          disclosure(
+            "Recovery options",
+            element(
+              "p",
+              t(
+                "Refresh checks quota. Retry allows one real request after clearing the local cooldown. A reset credit is consumed only after a separate confirmation.",
+              ),
+              "muted",
+            ),
+            recovery,
+          ),
+        );
         actions.append(
-          use,
-          retry,
-          refresh,
-          credits,
           button(
             account.loginState === "signedIn"
               ? "Sign in again"
@@ -858,16 +939,29 @@
                 : "Exclude this account from future pool selection. This does not cancel a request already in progress.",
               { type: "update", profileId: id, disabled: !account.disabled },
               [
-                ["Account", account.label],
-                ["Profile ID", id],
+                [t("Account"), account.label],
+                [t("Profile ID"), id],
               ],
             ),
           ),
           button("Remove account", () => showRemove(id), "danger"),
         );
-        body.append(actions);
+        body.append(
+          disclosure("Advanced controls", actions),
+          disclosure(
+            "Technical details",
+            definitions([
+              ["Profile ID", id],
+              ["Email", account.email],
+              ["Plan", account.plan],
+              ["Priority", account.priority],
+              ["Backend reset", date(account.backendResetsAt)],
+            ]),
+          ),
+        );
       },
     );
+    dialogAccountId = id;
   }
   function showEdit(id) {
     const account = accountById(id);
@@ -990,21 +1084,28 @@
     )
       return {
         eligible: false,
-        label: "Credit identity or scope could not be verified",
+        label: t("Credit identity or scope could not be verified"),
+      };
+    if (credit.resetType !== "codex_rate_limits")
+      return {
+        eligible: false,
+        label: t("Unsupported quota scope; no credit will be consumed"),
       };
     if (credit.status !== "available")
       return {
         eligible: false,
-        label: `Unavailable (${credit.status || "unknown status"})`,
+        label: t("Unavailable ({status})", {
+          status: credit.status || t("unknown status"),
+        }),
       };
     if (credit.expiresAt === null || credit.expiresAt === undefined)
-      return { eligible: true, label: "Available; no expiry reported" };
+      return { eligible: true, label: t("Available; no expiry reported") };
     const expiry = Date.parse(credit.expiresAt);
     if (!Number.isFinite(expiry))
-      return { eligible: false, label: "Expiry could not be verified" };
-    return expiry > Date.now()
-      ? { eligible: true, label: "Available; not expired" }
-      : { eligible: false, label: "Expired" };
+      return { eligible: false, label: t("Expiry could not be verified") };
+    return expiry > guidance.now() * 1000
+      ? { eligible: true, label: t("Available; not expired") }
+      : { eligible: false, label: t("Expired") };
   }
   function creditDetails(credit) {
     return [
@@ -1023,7 +1124,7 @@
   }
   async function loadCredits(id) {
     openDialog(
-      "Reset credits",
+      t("Reset credits"),
       "Reading credit details for the selected profile…",
       (body) =>
         body.append(
@@ -1037,9 +1138,11 @@
     try {
       const result = await operation({ type: "credits", profileId: id });
       if (result.data?.profileId !== id || !Array.isArray(result.data.credits))
-        throw new Error("Credit details did not match the selected profile.");
-      const readAt = Math.floor(Date.now() / 1000);
-      await readInventory();
+        throw new Error(
+          t("Credit details did not match the selected profile."),
+        );
+      const readAt = Math.floor(guidance.now());
+      await synchronizeInventory();
       setBusy(false);
       showCredits(id, result.data, readAt);
       notice(result.message || "Reset credits loaded.");
@@ -1053,21 +1156,27 @@
     const account = accountById(id);
     const pending = state.redemption;
     openDialog(
-      "Choose a reset credit",
+      t("Choose a reset credit"),
       "Reading credits does not consume them. Choose one available credit, then review a separate confirmation.",
       (body) => {
         body.append(
           definitions([
             ["Account", account?.label],
             ["Profile ID", id],
-            ["Available credits", data.availableCount],
+            [
+              t("Eligible credits"),
+              data.credits.filter((credit) => creditValidity(credit).eligible)
+                .length,
+            ],
           ]),
         );
         if (!contactAllowed(account))
           body.append(
             element(
               "p",
-              "Enable this account and complete login before consuming a credit.",
+              t(
+                "Enable this account and complete login before consuming a credit.",
+              ),
               "message warning",
             ),
           );
@@ -1075,7 +1184,9 @@
           body.append(
             element(
               "p",
-              "An earlier operation is unconfirmed. You may retry its same credit with the same operation ID after checking the details below.",
+              t(
+                "An earlier operation is unconfirmed. You may retry its same credit with the same operation ID after checking the details below.",
+              ),
               "disclosure",
             ),
           );
@@ -1083,7 +1194,7 @@
           body.append(
             element(
               "p",
-              "No reset credits were returned for this account.",
+              t("No reset credits were returned for this account."),
               "disclosure",
             ),
           );
@@ -1101,15 +1212,44 @@
               (pending.profileId !== id || pending.creditId !== credit.id));
           input.addEventListener("change", () => {
             selected = credit;
+            $("dialog-submit").disabled = false;
+            delete $("dialog-submit").dataset.unavailable;
           });
           const content = element("div");
-          content.append(element("strong", credit.title || "Reset credit"));
+          content.append(element("strong", credit.title || t("Reset credit")));
           if (credit.description)
             content.append(element("p", credit.description));
-          content.append(definitions(creditDetails(credit)));
+          content.append(
+            definitions([
+              ["Validity", creditValidity(credit).label],
+              ["Expires", date(credit.expiresAt)],
+              ["Scope", guidance.creditScope(credit.resetType)],
+            ]),
+            disclosure("Technical details", definitions(creditDetails(credit))),
+          );
           choice.append(input, content);
           body.append(choice);
         }
+        $("dialog-submit").disabled = true;
+        $("dialog-submit").dataset.unavailable = "true";
+        if (
+          !data.credits.some(
+            (credit) =>
+              creditValidity(credit).eligible &&
+              contactAllowed(account) &&
+              (!pending ||
+                (pending.profileId === id && pending.creditId === credit.id)),
+          )
+        )
+          body.append(
+            element(
+              "p",
+              t(
+                "No eligible reset credits. Refresh quota to check for recovery, or wait for a natural reset; neither action spends a credit.",
+              ),
+              "message warning",
+            ),
+          );
         const prior = data.credits.find(
           (credit) => credit.id === pending?.creditId,
         );
@@ -1125,7 +1265,7 @@
       },
       () => {
         if (!selected)
-          throw new Error("Select an available credit before continuing.");
+          throw new Error(t("Select an available credit before continuing."));
         showRedemption(id, selected);
       },
       "Review selected credit",
