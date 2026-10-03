@@ -2,17 +2,26 @@
 source: cli/src/account_cmd/display_tests.rs
 expression: output
 ---
-ACCOUNT               PROFILE        NOW  LOGIN   AVAILABILITY  PLAN  PRI  5H USED  WEEK USED
-a***@example.com Pr…  acct-…00001-1  *    cached  eligible      Pro   10   0% (5m)  9% (clock skew)
+a***@example.com Primary  [current]
+  Profile: acct-…00001-1
+  Login: stored
+  Pool: eligible
+  Plan: Pro; priority: 10
+  5h used: 0%
+  week used: unknown
+  Updated: clock skew (oldest sample)
   Profile: acct-00000000000000000001-1
   Email: a***@example.com
-  Primary observed: 2026-01-01 11:55 UTC (5m ago)
-  Primary reset: start unconfirmed
-  Secondary observed: 2026-01-01 13:00 UTC (clock skew)
-  Secondary reset: unknown
+  Primary (5h):
+    Last sample: 0% used
+    Updated: 2026-01-01 11:55 UTC (5m ago)
+    Reset: start unconfirmed
+  Secondary (week):
+    Last sample: 9% used
+    Updated: 2026-01-01 13:00 UTC (clock skew)
+    Reset: unknown
+    Current usage: unknown; observation is future-dated.
   Warmup: unknown
-Quota: cached usage (age per window).
-Login: stored credentials, unverified.
-Availability: cached scheduling state.
-* current; use unique label or full ID.
-Full metadata: --format json.
+
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; priority: lower is preferred; login validity not checked.

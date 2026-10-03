@@ -1,0 +1,15 @@
+---
+source: cli/src/account_cmd/display_tests.rs
+expression: "format!(\"Unknown primary sample time:\\n{unknown_time}\\nFuture-dated primary sample:\\n{future}\")"
+---
+Unknown primary sample time:
+ACCOUNT   NOW  PLAN  PRIORITY  LOGIN   POOL      5H USED  WEEK USED  UPDATED
+Work Pro  *    Pro         10  stored  eligible      37%        45%  unknown
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; more: --details / --show-profile
+
+Future-dated primary sample:
+ACCOUNT   NOW  PLAN  PRIORITY  LOGIN   POOL      5H USED  WEEK USED  UPDATED
+Work Pro  *    Pro         10  stored  eligible  unknown        45%  clock skew
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; more: --details / --show-profile

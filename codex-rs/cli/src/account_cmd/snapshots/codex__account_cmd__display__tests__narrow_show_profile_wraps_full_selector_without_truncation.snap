@@ -1,15 +1,16 @@
 ---
 source: cli/src/account_cmd/display_tests.rs
-expression: "render(&data, AccountView::Pool, options(AccountOutputFormat::Table), 40)"
+expression: output
 ---
 Work Pro  [current]
+  Profile:
+acct-1234567890abcdef1234567890abcdef-1
   Login: stored
-  Pool: cooldown
-  Local retry: in 2h0m
-  Plan: Pro; priority: 10
-  5h used: 100%
+  Pool: eligible
+  Plan: Pro; priority: 4294967295
+  Primary used: unknown
   Secondary used: unknown
-  Updated: 5m ago (oldest sample)
+  Updated: unknown (oldest sample)
 
 Cached status; UPDATED = oldest quota
 sample; retry = local.

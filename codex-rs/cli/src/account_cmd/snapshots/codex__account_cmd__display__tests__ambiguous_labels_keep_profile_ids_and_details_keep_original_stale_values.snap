@@ -1,0 +1,32 @@
+---
+source: cli/src/account_cmd/display_tests.rs
+expression: output
+---
+ACCOUNT   PROFILE        NOW  PLAN  PRIORITY  LOGIN   POOL      5H USED  SECONDARY USED  UPDATED
+Work Pro  acct-…00001-1  *    Pro         10  stored  eligible    stale         unknown  20m ago
+  Profile: acct-00000000000000000001-1
+  Email: a***@example.com
+  Primary (5h):
+    Last sample: 99.8% used
+    Updated: 2026-01-01 11:40 UTC (20m ago)
+    Reset: passed; awaiting refresh
+    Current usage: unknown; reset passed, refresh needed.
+  Secondary (duration unreported):
+    Last sample: unknown
+    Updated: unknown
+    Reset: unknown
+  Warmup: unknown
+Work Pro  acct-…00002-1  -    Pro         10  stored  eligible  unknown         unknown  unknown
+  Profile: acct-00000000000000000002-1
+  Email: a***@example.com
+  Primary (duration unreported):
+    Last sample: unknown
+    Updated: unknown
+    Reset: unknown
+  Secondary (duration unreported):
+    Last sample: unknown
+    Updated: unknown
+    Reset: unknown
+  Warmup: unknown
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; priority: lower is preferred; login validity not checked.

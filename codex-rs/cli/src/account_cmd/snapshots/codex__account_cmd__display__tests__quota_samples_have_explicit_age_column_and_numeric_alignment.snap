@@ -1,0 +1,10 @@
+---
+source: cli/src/account_cmd/display_tests.rs
+expression: output
+---
+ACCOUNT     NOW  PLAN  PRIORITY  LOGIN   POOL         5H USED  WEEK USED  UPDATED
+ceo         *    Team        10  stored  eligible         32%        51%  2m ago
+polaris949  -    Plus        20  stored  eligible          0%        31%  <1m ago
+admin       -    Team        30  stored  retry 3h29m      95%        63%  25m ago
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; more: --details / --show-profile

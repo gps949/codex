@@ -1,0 +1,9 @@
+---
+source: cli/src/account_cmd/display_tests.rs
+expression: output
+---
+ACCOUNT   NOW  PLAN  PRIORITY  LOGIN   POOL      PRIMARY USED  1D USED  UPDATED
+Work Pro  *    Pro         10  stored  eligible         stale      <1%  25m ago
+Personal  -    Pro        100  stored  eligible         stale      <1%  25m ago
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; more: --details / --show-profile

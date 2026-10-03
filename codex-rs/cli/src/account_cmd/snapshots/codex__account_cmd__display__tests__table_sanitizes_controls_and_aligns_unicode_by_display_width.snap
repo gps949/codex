@@ -2,11 +2,8 @@
 source: cli/src/account_cmd/display_tests.rs
 expression: output
 ---
-ACCOUNT        PROFILE        NOW  LOGIN    AVAILABILITY    PLAN  PRI  5H USED  WEEK USED
-研发 [31m é👩‍💻  acct-…00001-1  *    cached   eligible        Pro   10   unknown  unknown
-Personal       acct-…00002-1  -    missing  login required  Pro   10   unknown  unknown
-Login: stored credentials, unverified.
-Availability: cached scheduling state.
-* current; use unique label or full ID.
-IDs: --show-profile; details: --details.
-Full metadata: --format json.
+ACCOUNT        PROFILE        NOW  PLAN  PRIORITY  LOGIN    POOL            PRIMARY USED  SECONDARY USED  UPDATED
+研发 [31m é👩‍💻  acct-…00001-1  *    Pro         10  stored   eligible             unknown         unknown  unknown
+Personal       acct-…00002-1  -    Pro         10  missing  login required       unknown         unknown  unknown
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; more: --details / --show-profile
