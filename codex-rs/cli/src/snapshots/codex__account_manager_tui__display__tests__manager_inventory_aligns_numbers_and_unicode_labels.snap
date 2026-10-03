@@ -1,0 +1,15 @@
+---
+source: cli/src/account_manager_display_tests.rs
+expression: output
+---
+Codex Accounts
+
+Target: Automatic subscriptions
+Subscription pool: Enabled
+
+     ACCOUNT                    PLAN       AVAILABILITY     PRIMARY  WEEKLY   CREDITS
+*  1 Personal                   Pro        ready                1%       ?        2
+   2 工作席位                   Pro        coolingDown        100%       ?        ?
+   3 Standby                    Pro        ready                9%       ?       10
+
+API accounts · fallback off

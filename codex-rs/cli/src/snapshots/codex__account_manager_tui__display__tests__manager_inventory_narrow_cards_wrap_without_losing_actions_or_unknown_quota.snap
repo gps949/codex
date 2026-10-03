@@ -1,0 +1,23 @@
+---
+source: cli/src/account_manager_display_tests.rs
+expression: output
+---
+Codex Accounts
+
+Target: Automatic subscriptions
+Subscription pool: Enabled
+
+*  1 Personal
+     Pro · ready
+     Primary   1% · Weekly    ?
+     Reset credits 2
+   2 工作席位
+     Pro · coolingDown
+     Primary 100% · Weekly    ?
+     Reset credits ?
+   3 Standby
+     Pro · ready
+     Primary   9% · Weekly    ?
+     Reset credits 10
+
+API accounts · fallback off
