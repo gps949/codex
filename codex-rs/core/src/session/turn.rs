@@ -4,6 +4,11 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::api_account_execution::ApiExecutionTarget;
+use crate::api_account_execution::ApiTurnPolicy;
+use crate::api_account_execution::activate_api_target;
+use crate::api_account_execution::fallback_after_pool_exhaustion;
+use crate::api_account_execution::project_api_history;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -189,6 +194,26 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    if turn_context.extension_data.get::<ApiTurnPolicy>().is_none() {
+        let api_policy = ApiTurnPolicy::capture(turn_context.config.as_ref())?;
+        turn_context.extension_data.insert(api_policy);
+    }
+    let api_policy = turn_context
+        .extension_data
+        .get::<ApiTurnPolicy>()
+        .ok_or_else(|| {
+            CodexErr::InvalidRequest("The API selection was not captured for this turn.".into())
+        })?;
+    let target = turn_context
+        .extension_data
+        .get::<ApiExecutionTarget>()
+        .or_else(|| api_policy.selected.clone());
+    let mut turn_context = turn_context;
+    if let Some(target) = &target {
+        let rebound = turn_context.with_api_target(target)?;
+        rebound.extension_data.insert(target.as_ref().clone());
+        turn_context = Arc::new(rebound);
+    }
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
     }
@@ -196,7 +221,7 @@ pub(crate) async fn run_turn(
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
     let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
-    let execution_auth_mode = execution_auth
+    let mut execution_auth_mode = execution_auth
         .mode_for_turn(turn_context.config.as_ref(), turn_context.provider.info())
         .await
         .map_err(|err| {
@@ -204,6 +229,50 @@ pub(crate) async fn run_turn(
                 "failed to initialize native multi-account execution: {err}"
             ))
         })?;
+    if execution_auth_mode.is_pooled() && execution_auth.active_lease().is_none() {
+        // Passive, authenticated metadata can recover externally replenished quota even when
+        // automatic waiting is disabled. This never performs inference or redeems a credit.
+        crate::account_pool_recovery::probe_for_recovery(
+            execution_auth.as_ref(),
+            turn_context.config.as_ref(),
+            &cancellation_token,
+        )
+        .await;
+        if execution_auth.active_lease().is_none()
+            && let Some(identity) = execution_auth.quota_rescue_identity()
+        {
+            crate::reset_credit_rescue::try_reset_credit_rescue(
+                execution_auth.as_ref(),
+                &identity,
+                turn_context.config.as_ref(),
+            )
+            .or_cancel(&cancellation_token)
+            .await?;
+        }
+        if execution_auth.active_lease().is_none()
+            && api_policy.fallback.is_some()
+            && !api_policy.max_subscription_wait.is_zero()
+        {
+            sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+                message: format!("Subscription accounts are exhausted. Waiting up to {} minutes for quota recovery before the configured paid API fallback; cancel to stop.", api_policy.max_subscription_wait.as_secs() / 60),
+            })).await;
+        }
+        if let Some(target) = fallback_after_pool_exhaustion(
+            execution_auth.as_ref(),
+            turn_context.as_ref(),
+            &cancellation_token,
+        )
+        .await?
+        {
+            sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
+                message: format!("Using the configured API fallback ({}, {}). Usage is billed by that provider and this conversation is sent to it.", target.provider_id, target.model_info.slug),
+            })).await;
+            let rebound = turn_context.with_api_target(&target)?;
+            rebound.extension_data.insert(target.as_ref().clone());
+            turn_context = Arc::new(rebound);
+            execution_auth_mode = ExecutionAuthMode::Stock;
+        }
+    }
     let multi_account_enabled = execution_auth_mode.multi_account_enabled();
     // Rotate away from a nearly exhausted account at the turn boundary, before any transport or
     // step state exists, so the switch costs nothing and the turn cannot hit the limit mid-response.
@@ -230,7 +299,14 @@ pub(crate) async fn run_turn(
         .await;
     }
     let pre_compact_history = sess.clone_history().await;
-    if history_contains_opaque_compaction(pre_compact_history.annotated_items()) {
+    let api_target = turn_context.extension_data.get::<ApiExecutionTarget>();
+    if let Some(target) = &api_target {
+        project_api_history(
+            pre_compact_history
+                .clone()
+                .for_prompt_annotated(&target.model_info.input_modalities),
+        )?;
+    } else if history_contains_opaque_compaction(pre_compact_history.annotated_items()) {
         let execution_binding = execution_auth_mode
             .capture_binding()
             .map_err(|_| pool_unavailable_error(execution_auth.as_ref()))?;
@@ -244,7 +320,11 @@ pub(crate) async fn run_turn(
             .ensure_ready(&target_profile)
             .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
     }
-    let mut client_session = if execution_auth_mode.is_pooled() {
+    let mut client_session = if let Some(target) = &api_target {
+        sess.services
+            .model_client
+            .new_session_for_api_target(target)
+    } else if execution_auth_mode.is_pooled() {
         // Binding the captured execution identity below invalidates a foreign
         // socket; an unchanged account can retain its authenticated connection.
         sess.services.model_client.new_session()
@@ -534,7 +614,7 @@ pub(crate) async fn run_turn(
         .await;
 
         // Capture once so context, advertised tools, and tool calls share one request view.
-        let step_context = match next_step_context.take() {
+        let mut step_context = match next_step_context.take() {
             Some(step_context) if pending_input.is_empty() => step_context,
             None if pending_input.is_empty() => {
                 sess.capture_step_context_with_required_mcp_servers(
@@ -611,7 +691,16 @@ pub(crate) async fn run_turn(
         }
         .await;
         match sampling_request_result {
-            Ok((sampling_request_output, sampling_request_input)) => {
+            Ok((sampling_request_output, sampling_request_input, sampled_step_context)) => {
+                step_context = sampled_step_context;
+                turn_context = Arc::clone(&step_context.turn);
+                if turn_context
+                    .extension_data
+                    .get::<ApiExecutionTarget>()
+                    .is_some()
+                {
+                    execution_auth_mode = ExecutionAuthMode::Stock;
+                }
                 guardian_budget_compacted = false;
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
@@ -1364,14 +1453,20 @@ async fn run_pre_sampling_compact(
     execution_auth_mode: &ExecutionAuthMode,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(
-        sess,
-        turn_context,
-        client_session,
-        execution_auth_mode,
-        cancellation_token,
-    )
-    .await?;
+    if turn_context
+        .extension_data
+        .get::<ApiExecutionTarget>()
+        .is_none()
+    {
+        maybe_run_previous_model_inline_compact(
+            sess,
+            turn_context,
+            client_session,
+            execution_auth_mode,
+            cancellation_token,
+        )
+        .await?;
+    }
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
@@ -1717,9 +1812,9 @@ async fn run_sampling_request(
     client_session: &mut ModelClientSession,
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
-) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
+) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>, Arc<StepContext>)> {
     let mut step_context = step_context;
-    let turn_context = Arc::clone(&step_context.turn);
+    let mut turn_context = Arc::clone(&step_context.turn);
     let preempt = step_context.preempt.clone().unwrap_or_default();
     let _input_watch = if let Some(preempt) = &step_context.preempt {
         sess.input_queue
@@ -1729,13 +1824,13 @@ async fn run_sampling_request(
         None
     };
     let base_instructions = sess.get_prompt_base_instructions().await;
-    let pooled_execution = execution_auth_mode.is_pooled();
+    let mut pooled_execution = execution_auth_mode.is_pooled();
     let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
         &sess,
         Arc::clone(&step_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let max_retries = turn_context.provider.info().stream_max_retries();
+    let mut max_retries = turn_context.provider.info().stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
@@ -1745,9 +1840,58 @@ async fn run_sampling_request(
         // After every pool account is cooling down, the next turn still reaches sampling.
         // Surface UsageLimitExceeded (not UnsupportedOperation/BadRequest) so remote clients
         // keep the normal cooldown UX instead of a hard "unsupported operation" failure.
-        let execution_binding = match execution_auth_mode.capture_binding() {
+        let api_target = turn_context.extension_data.get::<ApiExecutionTarget>();
+        let execution_binding = match if api_target.is_some() {
+            Ok(ExecutionAuthBinding::Stock)
+        } else {
+            execution_auth_mode.capture_binding()
+        } {
             Ok(binding) => binding,
             Err(_) => {
+                if crate::account_pool_recovery::probe_for_recovery(
+                    execution_auth.as_ref(),
+                    turn_context.config.as_ref(),
+                    &cancellation_token,
+                )
+                .or_cancel(&preempt)
+                .await?
+                {
+                    continue;
+                }
+                if let Some(identity) = execution_auth.quota_rescue_identity()
+                    && crate::reset_credit_rescue::try_reset_credit_rescue(
+                        execution_auth.as_ref(),
+                        &identity,
+                        turn_context.config.as_ref(),
+                    )
+                    .or_cancel(&cancellation_token)
+                    .await?
+                    .is_some()
+                {
+                    continue;
+                }
+                if let Some(target) = fallback_after_pool_exhaustion(
+                    execution_auth.as_ref(),
+                    turn_context.as_ref(),
+                    &cancellation_token,
+                )
+                .or_cancel(&preempt)
+                .await??
+                {
+                    step_context = activate_api_target(
+                        &sess,
+                        &turn_context,
+                        &target,
+                        client_session,
+                        &cancellation_token,
+                    )
+                    .await?;
+                    turn_context = Arc::clone(&step_context.turn);
+                    pooled_execution = false;
+                    max_retries = target.provider.info().stream_max_retries();
+                    retry_state = ResponsesStreamRetryState::default();
+                    continue;
+                }
                 sess.send_event(
                     &turn_context,
                     EventMsg::Warning(WarningEvent {
@@ -1762,13 +1906,15 @@ async fn run_sampling_request(
         let annotated = history_before
             .clone()
             .for_prompt_annotated(&step_context.settings.model_info.input_modalities);
-        let target_profile = AccountTransitionTargetProfile::from_execution(
-            execution_auth.as_ref(),
-            &execution_binding,
-        );
-        preflight_account_transition(&annotated, &target_profile)
-            .ensure_ready(&target_profile)
-            .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
+        if api_target.is_none() {
+            let target_profile = AccountTransitionTargetProfile::from_execution(
+                execution_auth.as_ref(),
+                &execution_binding,
+            );
+            preflight_account_transition(&annotated, &target_profile)
+                .ensure_ready(&target_profile)
+                .map_err(|err| CodexErr::AccountMigrationRequired(err.to_string()))?;
+        }
         let execution_lease = match &execution_binding {
             ExecutionAuthBinding::Stock => None,
             ExecutionAuthBinding::Pooled(lease) => {
@@ -1788,14 +1934,16 @@ async fn run_sampling_request(
 
         // Prefer account-projected history. Consume prepared input on the first attempt so
         // retries always rebuild from the latest history (upstream retry semantic).
-        let prompt_input = if initial_input.take().is_some() {
-            project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
-                .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
+        let annotated = if initial_input.take().is_some() {
+            annotated
         } else {
-            let annotated = sess
-                .clone_history()
+            sess.clone_history()
                 .await
-                .for_prompt_annotated(&step_context.settings.model_info.input_modalities);
+                .for_prompt_annotated(&step_context.settings.model_info.input_modalities)
+        };
+        let prompt_input = if api_target.is_some() {
+            project_api_history(annotated)?
+        } else {
             project_history_for_execution(execution_auth.as_ref(), &execution_binding, annotated)
                 .map_err(|err| CodexErr::UnsupportedOperation(err.to_string()))?
         };
@@ -1839,14 +1987,15 @@ async fn run_sampling_request(
         .await
         {
             Ok(output) => {
-                return Ok((output, original_input.unwrap_or(prompt.input)));
+                return Ok((output, original_input.unwrap_or(prompt.input), step_context));
             }
             Err(err) => {
                 if matches!(err.details(), CodexErrorDetails::ContextWindowExceeded) {
                     sess.set_total_tokens_full(&turn_context).await;
                     return Err(err);
                 }
-                if let CodexErrorDetails::UsageLimitReached(limit) = err.details()
+                if api_target.is_none()
+                    && let CodexErrorDetails::UsageLimitReached(limit) = err.details()
                     && let Some(rate_limits) = limit.rate_limits.clone()
                 {
                     sess.update_rate_limits(&turn_context, *rate_limits).await;
@@ -1949,6 +2098,32 @@ async fn run_sampling_request(
                                 })).await;
                                 return Err(err);
                             }
+                            if crate::account_pool_recovery::can_continue(retry_mode)
+                                && crate::account_pool_recovery::probe_for_recovery(
+                                    execution_auth.as_ref(),
+                                    turn_context.config.as_ref(),
+                                    &cancellation_token,
+                                )
+                                .or_cancel(&preempt)
+                                .await?
+                            {
+                                execution_auth.compatibility_auth_manager().reload().await;
+                                sess.services
+                                    .model_client
+                                    .replace_session_for_execution_identity_change(client_session);
+                                turn_context
+                                    .extension_data
+                                    .remove::<codex_api::ResponseId>();
+                                retry_state = ResponsesStreamRetryState::default();
+                                step_context = sess
+                                    .capture_step_context(
+                                        Arc::clone(&turn_context),
+                                        &cancellation_token,
+                                    )
+                                    .await?;
+                                turn_context.turn_timing_state.record_sampling_retry();
+                                continue;
+                            }
                             // Opt-in last resort before failing the turn: redeem an earned
                             // rate-limit reset credit and continue on the reactivated account.
                             if let Some(rescue) =
@@ -2003,20 +2178,34 @@ async fn run_sampling_request(
                                 turn_context.turn_timing_state.record_sampling_retry();
                                 continue;
                             }
+                            let max_subscription_wait = turn_context
+                                .extension_data
+                                .get::<ApiTurnPolicy>()
+                                .map_or_else(
+                                    || turn_context.config.account_pool.effective_reset_wait(),
+                                    |policy| policy.max_subscription_wait,
+                                );
                             let wait_budget = turn_context.extension_data.get_or_init(|| {
                                 crate::account_pool_recovery::RecoveryWaitBudget::new(
-                                    turn_context.config.account_pool.effective_reset_wait(),
+                                    max_subscription_wait,
                                 )
                             });
                             let max_wait = wait_budget.remaining();
+                            let api_fallback_enabled = cause
+                                == crate::failover::FailoverCause::UsageLimitReached
+                                && turn_context
+                                    .extension_data
+                                    .get::<ApiTurnPolicy>()
+                                    .is_some_and(|policy| policy.fallback.is_some());
                             if crate::account_pool_recovery::can_continue(retry_mode)
                                 && !max_wait.is_zero()
                                 && let Some(reset) = crate::failover_turn::earliest_exhausted_reset(
                                     execution_auth.as_ref(),
                                 )
-                                && (reset - chrono::Utc::now())
-                                    .to_std()
-                                    .is_ok_and(|wait| wait <= max_wait)
+                                && (api_fallback_enabled
+                                    || (reset - chrono::Utc::now())
+                                        .to_std()
+                                        .is_ok_and(|wait| wait <= max_wait))
                             {
                                 sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
                                     message: format!(
@@ -2026,6 +2215,7 @@ async fn run_sampling_request(
                                 })).await;
                                 let recovered = crate::account_pool_recovery::wait_for_recovery(
                                     execution_auth.as_ref(),
+                                    turn_context.config.as_ref(),
                                     &wait_budget,
                                     &cancellation_token,
                                 )
@@ -2058,6 +2248,31 @@ async fn run_sampling_request(
                                 if cancellation_token.is_cancelled() {
                                     return Err(CodexErr::TurnAborted);
                                 }
+                            }
+                            if api_fallback_enabled
+                                && crate::account_pool_recovery::can_continue(retry_mode)
+                                && let Some(target) = fallback_after_pool_exhaustion(
+                                    execution_auth.as_ref(),
+                                    turn_context.as_ref(),
+                                    &cancellation_token,
+                                )
+                                .or_cancel(&preempt)
+                                .await??
+                            {
+                                step_context = activate_api_target(
+                                    &sess,
+                                    &turn_context,
+                                    &target,
+                                    client_session,
+                                    &cancellation_token,
+                                )
+                                .await?;
+                                turn_context = Arc::clone(&step_context.turn);
+                                pooled_execution = false;
+                                max_retries = target.provider.info().stream_max_retries();
+                                retry_state = ResponsesStreamRetryState::default();
+                                turn_context.turn_timing_state.record_sampling_retry();
+                                continue;
                             }
                             sess.send_event(
                                 &turn_context,
@@ -2099,6 +2314,7 @@ async fn run_sampling_request(
                     last_agent_message: None,
                 },
                 std::mem::take(original_input),
+                step_context,
             ));
         }
         retry??;
@@ -3296,6 +3512,13 @@ async fn try_run_sampling_request(
                 sess.set_server_reasoning_included(included).await;
             }
             ResponseEvent::RateLimits(snapshot) => {
+                if turn_context
+                    .extension_data
+                    .get::<ApiExecutionTarget>()
+                    .is_some()
+                {
+                    continue;
+                }
                 // Keep the account pool's per-profile usage view fresh so preemptive switching
                 // and status surfaces see real data instead of only hard-failure observations.
                 if let Some(provenance) = sampling_execution_provenance(turn_context.as_ref()) {

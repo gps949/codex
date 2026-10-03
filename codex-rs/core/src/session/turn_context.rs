@@ -678,6 +678,92 @@ impl TurnContext {
             config.features.enabled(Feature::FastMode),
         ));
         config.service_tier = step_settings.service_tier.clone();
+        self.with_resolved_model(config, step_settings, available_models)
+    }
+
+    /// Rebinds inference only; captured approval, sandbox, executor and network policy stay intact.
+    pub(crate) fn with_api_target(
+        &self,
+        target: &crate::api_account_execution::ApiExecutionTarget,
+    ) -> codex_protocol::error::Result<Self> {
+        crate::api_account_execution::ensure_api_allowed(self.config.as_ref())?;
+        if self
+            .config
+            .config_layer_stack
+            .required_model_provider()
+            .is_some_and(|required| required != target.provider_id)
+        {
+            return Err(CodexErr::InvalidRequest(
+                "Managed configuration does not allow the selected API provider.".into(),
+            ));
+        }
+        let mut config = (*self.config).clone();
+        let model = target.model_info.slug.clone();
+        let mut model_info = (*target.model_info).clone();
+        // Model-owned review requirements from the executing process remain mandatory.
+        model_info.guardian = self.model_info().guardian.clone();
+        model_info.node_repl_auto_review_required =
+            self.model_info().node_repl_auto_review_required;
+        model_info.auto_review_model_override = Some(model.clone());
+        let current_settings = self.next_step_settings.load_full();
+        let mut selected = current_settings.selected().clone();
+        if config
+            .config_layer_stack
+            .requirements()
+            .auto_review_required_for_model(&model)
+            && selected.approvals_reviewer
+                != codex_protocol::config_types::ApprovalsReviewer::AutoReview
+        {
+            return Err(CodexErr::InvalidRequest(
+                "The selected API model requires managed automatic review.".into(),
+            ));
+        }
+        selected.collaboration_mode = selected.collaboration_mode.with_updates(
+            Some(model.clone()),
+            Some(None),
+            /*developer_instructions*/ None,
+        );
+        selected.reasoning_summary = Some(codex_protocol::config_types::ReasoningSummary::None);
+        selected.service_tier = None;
+        config.model = Some(model.clone());
+        config.review_model = Some(model);
+        config.model_provider_id = target.provider_id.clone();
+        config.model_provider = target.provider.info().clone();
+        config
+            .model_providers
+            .insert(target.provider_id.clone(), config.model_provider.clone());
+        config.model_context_window = model_info.context_window;
+        config.model_auto_compact_token_limit = model_info.auto_compact_token_limit;
+        config.model_reasoning_effort = None;
+        config.model_reasoning_summary = selected.reasoning_summary;
+        config.service_tier = None;
+        // Memory extraction uses a separate backend contract; do not launch it on an API target.
+        config.memories.use_memories = false;
+        config.memories.dedicated_tools = false;
+        config.model_catalog = Some(codex_protocol::openai_models::ModelsResponse {
+            models: vec![model_info.clone()],
+        });
+        let available_models = vec![ModelPreset::from(model_info.clone())];
+        let step_settings = Arc::new(ResolvedStepSettings::new(
+            Arc::new(selected),
+            Arc::new(model_info),
+            /*fast_mode_enabled*/ false,
+        ));
+        let mut rebound = self.with_resolved_model(config, step_settings, available_models);
+        rebound.provider = Arc::clone(&target.provider);
+        rebound.auth_manager = None;
+        rebound.realtime_active = false;
+        rebound.code_mode_available = false;
+        rebound.cyber_access_program = None;
+        Ok(rebound)
+    }
+
+    fn with_resolved_model(
+        &self,
+        config: Config,
+        step_settings: Arc<ResolvedStepSettings>,
+        available_models: Vec<ModelPreset>,
+    ) -> Self {
         let session_telemetry = step_settings.telemetry(&self.session_telemetry);
 
         Self {

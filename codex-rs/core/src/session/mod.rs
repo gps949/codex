@@ -3593,6 +3593,18 @@ impl Session {
         let policy: codex_utils_output_truncation::TruncationPolicy =
             model_info.truncation_policy.into();
         for envelope in &mut items {
+            // This is the shared persistence boundary for model and tool results. API execution
+            // has no subscription lease, but its opaque state still needs a distinct owner.
+            if let Some(target) = turn_context
+                .extension_data
+                .get::<crate::api_account_execution::ApiExecutionTarget>()
+                && crate::account_transition::history_item_ownership(envelope)
+                    != crate::account_transition::HistoryItemOwnership::Portable
+            {
+                let metadata = envelope.metadata.get_or_insert_default();
+                metadata.execution_profile_id = Some(target.profile_id.clone());
+                metadata.execution_generation = Some(0);
+            }
             if matches!(
                 envelope.item,
                 ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. }

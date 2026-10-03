@@ -279,6 +279,8 @@ pub struct ModelClient {
     /// Maintenance requests retain the user and workspace captured before auth recovery.
     captured_chatgpt_identity: Option<(String, String)>,
     warmup_request_guard: Option<Arc<crate::account_window_warmup::guard::WarmupRequestGuard>>,
+    /// Paid targets authorize one exact model, including auxiliary compaction requests.
+    api_account_model_info: Option<Arc<ModelInfo>>,
 }
 
 /// A turn-scoped streaming session created from a [`ModelClient`].
@@ -566,6 +568,7 @@ impl ModelClient {
             executed_tool_calls: None,
             captured_chatgpt_identity: None,
             warmup_request_guard: None,
+            api_account_model_info: None,
         }
     }
 
@@ -677,6 +680,50 @@ impl ModelClient {
             execution_request_auth: None,
             turn_state: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Creates an isolated paid Responses session without subscription credentials or routing.
+    /// The original outbound HTTP policy remains authoritative for the new deployment.
+    pub(crate) fn new_session_for_api_target(
+        &self,
+        target: &crate::api_account_execution::ApiExecutionTarget,
+    ) -> ModelClientSession {
+        let mut client = Self::new(
+            /*auth_manager*/ None,
+            AgentIdentityAuthPolicy::JwtOnly,
+            self.state.thread_id,
+            target.provider.info().clone(),
+            self.state.session_source.clone(),
+            self.state.originator.clone(),
+            /*model_verbosity*/ None,
+            /*content_item_kinds_enabled*/ false,
+            /*reasoning_effort_override_enabled*/ false,
+            /*enable_request_compression*/ false,
+            /*include_timing_metrics*/ false,
+            /*beta_features_header*/ None,
+            /*concurrent_reasoning_summaries_enabled*/ false,
+            /*attestation_provider*/ None,
+            self.http_client_factory.clone(),
+            WorkspaceRoutingContext::new(
+                target.provider.info().base_url.clone().unwrap_or_default(),
+            ),
+            self.request_contributors.clone(),
+        );
+        client.event_sender = self.event_sender.clone();
+        client.executed_tool_calls = self.executed_tool_calls.clone();
+        client.restored_history = self.restored_history;
+        client.api_account_model_info = Some(Arc::clone(&target.model_info));
+        client.new_session()
+    }
+
+    pub(crate) fn replace_session_for_api_target(
+        &self,
+        session: &mut ModelClientSession,
+        target: &crate::api_account_execution::ApiExecutionTarget,
+    ) {
+        session.reset_websocket_session();
+        self.store_cached_websocket_session(WebsocketSession::default());
+        *session = self.new_session_for_api_target(target);
     }
 
     /// Replaces `session` after the pool selected a different execution account.
@@ -966,7 +1013,20 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
         include_internal: bool,
     ) -> Result<ResponsesApiRequest> {
+        let (model_info, effort, summary) = match self.api_account_model_info.as_deref() {
+            Some(api_model) => (api_model, None, ReasoningSummaryConfig::None),
+            None => (model_info, effort, summary),
+        };
         let mut input = prompt.get_formatted_input_for_request(model_info);
+        if self.api_account_model_info.is_some() {
+            // Local compaction and other auxiliary callers also pass through this final boundary.
+            input = crate::api_account_execution::project_api_history(
+                input
+                    .into_iter()
+                    .map(codex_history::ResponseItemEnvelope::new)
+                    .collect(),
+            )?;
+        }
         if !self.reasoning_effort_override_enabled(model_info) {
             // Unsupported models and disabled overrides must also accept saved history.
             // Filter only the request copy; persisted history remains unchanged.
@@ -1030,7 +1090,12 @@ impl ModelClient {
         .then_some(StreamOptions {
             reasoning_summary_delivery: codex_api::ReasoningSummaryDelivery::SequentialCutoff,
         });
-        let include = vec!["reasoning.encrypted_content".to_string()];
+        let api_account = self.api_account_model_info.is_some();
+        let include = if api_account {
+            Vec::new()
+        } else {
+            vec!["reasoning.encrypted_content".to_string()]
+        };
         let verbosity = if model_info.support_verbosity {
             self.state.model_verbosity.or(model_info.default_verbosity)
         } else {
@@ -1047,7 +1112,7 @@ impl ModelClient {
             &prompt.output_schema,
             prompt.output_schema_strict,
         );
-        let prompt_cache_key = Some(self.prompt_cache_key(responses_metadata));
+        let prompt_cache_key = (!api_account).then(|| self.prompt_cache_key(responses_metadata));
         let service_tier = if self.state.provider.info().is_amazon_bedrock() {
             // Bedrock only supports the implicit default tier, including with custom catalogs.
             None
@@ -1067,7 +1132,7 @@ impl ModelClient {
             tools,
             tool_choice: "auto".to_string(),
             parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
-            reasoning: Some(reasoning),
+            reasoning: (!api_account).then_some(reasoning),
             store: false,
             stream: true,
             stream_options,
@@ -1075,7 +1140,7 @@ impl ModelClient {
             service_tier,
             prompt_cache_key,
             text,
-            client_metadata: Some(client_metadata),
+            client_metadata: (!api_account).then_some(client_metadata),
             access_programs: None,
         };
         Ok(request)
