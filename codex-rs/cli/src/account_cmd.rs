@@ -4,7 +4,6 @@ use codex_login::AccountProfileId;
 use codex_login::AccountProfileState;
 use codex_login::AccountProfileStore;
 use codex_login::AccountRuntimeStateStore;
-use codex_login::AuthManager;
 use codex_login::CLIENT_ID;
 use codex_login::ServerOptions;
 use codex_login::begin_account_browser_login;
@@ -43,10 +42,6 @@ pub(crate) async fn run_account_add(
     }
 
     let store = AccountProfileStore::new(config.codex_home.to_path_buf());
-    if let Err(error) = register_existing_root_login(&config, &store).await {
-        eprintln!("Error preparing existing ChatGPT login for account pooling: {error}");
-        std::process::exit(1);
-    }
 
     let priority = match priority {
         Some(priority) => priority,
@@ -145,7 +140,7 @@ pub(crate) async fn run_account_relogin(
         std::process::exit(1);
     }
     let store = AccountProfileStore::new(config.codex_home.to_path_buf());
-    let profile_id = resolve_profile_id_or_exit(&store, &profile_id);
+    let profile_id = resolve_profile_id_or_exit(&store, &profile_id, &config);
     let options = ServerOptions::new(
         config.codex_home.to_path_buf(),
         CLIENT_ID.to_string(),
@@ -202,7 +197,7 @@ pub(crate) async fn run_account_set(
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let store = AccountProfileStore::new(config.codex_home.to_path_buf());
-    let profile_id = resolve_profile_id_or_exit(&store, &profile_id);
+    let profile_id = resolve_profile_id_or_exit(&store, &profile_id, &config);
     let label_update = if clear_label {
         Some(codex_login::AccountLabelUpdate::Clear)
     } else {
@@ -265,7 +260,11 @@ pub(crate) async fn run_account_use(
             std::process::exit(1);
         }
     };
-    let record = match crate::account_selector::resolve_account(&records, &profile_id) {
+    let record = match crate::account_selector::resolve_account_with_config(
+        &records,
+        &profile_id,
+        &config.auth_config(),
+    ) {
         Ok(record) => record,
         Err(error) => {
             eprintln!("{error}");
@@ -325,7 +324,11 @@ pub(crate) async fn run_account_remove(
             std::process::exit(1);
         }
     };
-    let record = match crate::account_selector::resolve_account(&records, &profile_id) {
+    let record = match crate::account_selector::resolve_account_with_config(
+        &records,
+        &profile_id,
+        &config.auth_config(),
+    ) {
         Ok(record) => record.clone(),
         Err(error) => {
             eprintln!("{error}");
@@ -333,6 +336,18 @@ pub(crate) async fn run_account_remove(
         }
     };
     let profile_id = record.profile.id.clone();
+
+    match store.remove_profile_metadata(&profile_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("Unknown Codex account profile: {profile_id}");
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("Error removing account profile: {error}");
+            std::process::exit(1);
+        }
+    }
 
     if !keep_credentials
         && profile_id.as_str() != "legacy-root"
@@ -346,18 +361,6 @@ pub(crate) async fn run_account_remove(
     {
         eprintln!("Error deleting local account credentials: {error}");
         std::process::exit(1);
-    }
-
-    match store.remove_profile_metadata(&profile_id) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("Unknown Codex account profile: {profile_id}");
-            std::process::exit(1);
-        }
-        Err(error) => {
-            eprintln!("Error removing account profile: {error}");
-            std::process::exit(1);
-        }
     }
 
     let runtime_store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
@@ -528,25 +531,6 @@ pub(crate) async fn run_account_config_set_preemptive_switch_percent(
     }
 }
 
-async fn register_existing_root_login(
-    config: &Config,
-    store: &AccountProfileStore,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if store.manifest_path().exists() {
-        return Ok(());
-    }
-    let manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
-    if manager
-        .auth()
-        .await
-        .is_some_and(|auth| matches!(auth, codex_login::CodexAuth::Chatgpt(_)))
-    {
-        store.ensure_legacy_root_profile(Some("Existing login".to_string()), 0)?;
-    }
-    Ok(())
-}
-
 fn next_priority(
     store: &AccountProfileStore,
 ) -> Result<u32, codex_login::AccountProfileStoreError> {
@@ -560,7 +544,11 @@ fn next_priority(
         .unwrap_or(0))
 }
 
-fn resolve_profile_id_or_exit(store: &AccountProfileStore, selector: &str) -> AccountProfileId {
+fn resolve_profile_id_or_exit(
+    store: &AccountProfileStore,
+    selector: &str,
+    config: &Config,
+) -> AccountProfileId {
     let records = match store.load_profile_records() {
         Ok(records) => records,
         Err(error) => {
@@ -568,7 +556,11 @@ fn resolve_profile_id_or_exit(store: &AccountProfileStore, selector: &str) -> Ac
             std::process::exit(1);
         }
     };
-    match crate::account_selector::resolve_account(&records, selector) {
+    match crate::account_selector::resolve_account_with_config(
+        &records,
+        selector,
+        &config.auth_config(),
+    ) {
         Ok(record) => record.profile.id.clone(),
         Err(error) => {
             eprintln!("{error}");

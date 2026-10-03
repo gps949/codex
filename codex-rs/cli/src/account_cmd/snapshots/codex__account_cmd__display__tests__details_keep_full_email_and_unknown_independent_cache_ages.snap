@@ -1,8 +1,9 @@
 ---
 source: cli/src/account_cmd/display_tests.rs
+assertion_line: 386
 expression: output
 ---
-a***@example.com Primary  [current]
+alice@example.com Primary  [current]
   Profile: acct-…00001-1
   Login: stored
   Pool: eligible
@@ -11,7 +12,7 @@ a***@example.com Primary  [current]
   week used: unknown
   Updated: clock skew (oldest sample)
   Profile: acct-00000000000000000001-1
-  Email: a***@example.com
+  Email: alice@example.com
   Primary (5h):
     Last sample: 0% used
     Updated: 2026-01-01 11:55 UTC (5m ago)

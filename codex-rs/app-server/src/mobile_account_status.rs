@@ -45,17 +45,11 @@ pub(crate) fn account_caption(pool: &AccountPoolReadResponse) -> String {
 
 pub(crate) fn label(account: &AccountPoolAccount) -> String {
     compact_label(
-        account
-            .label
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .or(account
-                .email
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty()))
-            .unwrap_or("Account"),
+        codex_login::account_display_name(
+            account.label.as_deref(),
+            account.email.as_deref(),
+            &account.profile_id,
+        ),
         32,
     )
 }

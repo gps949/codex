@@ -1,9 +1,10 @@
 ---
 source: cli/src/account_cmd/display_tests.rs
+assertion_line: 104
 expression: output
 ---
-ACCOUNT        PROFILE        NOW  PLAN  PRIORITY  LOGIN    POOL            PRIMARY USED  SECONDARY USED  UPDATED
-研发 [31m é👩‍💻  acct-…00001-1  *    Pro         10  stored   eligible             unknown         unknown  unknown
-Personal       acct-…00002-1  -    Pro         10  missing  login required       unknown         unknown  unknown
+ACCOUNT          PROFILE        NOW  PLAN  PRIORITY  LOGIN    POOL            PRIMARY USED  SECONDARY USED  UPDATED
+研发  [31m é👩‍💻   acct-…00001-1  *    Pro         10  stored   eligible             unknown         unknown  unknown
+Personal         acct-…00002-1  -    Pro         10  missing  login required       unknown         unknown  unknown
 Cached status; UPDATED = oldest quota sample; retry = local.
 * current; more: --details / --show-profile

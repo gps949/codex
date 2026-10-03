@@ -170,3 +170,5 @@ pub use credit_expiry_reminders::CreditExpiryCandidate;
 pub use credit_expiry_reminders::CreditExpiryReminder;
 pub use credit_expiry_reminders::CreditExpiryReminderResponse;
 pub use credit_expiry_reminders::CreditExpiryReminderStore;
+
+pub use account_display::account_display_name;

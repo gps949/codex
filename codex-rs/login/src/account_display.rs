@@ -1,6 +1,22 @@
 use chrono::DateTime;
 use chrono::Utc;
 
+/// Chooses a display name without changing the profile's stored custom label.
+///
+/// Renderers remain responsible for escaping controls and fitting terminal or UI widths.
+pub fn account_display_name<'a>(
+    label: Option<&'a str>,
+    email: Option<&'a str>,
+    profile_id: &'a str,
+) -> &'a str {
+    label
+        .into_iter()
+        .chain(email)
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or(profile_id)
+}
+
 /// Formats an exhausted-until / reset timestamp for CLI-style surfaces.
 ///
 /// Prefer [`format_primary_window_reset`] when rendering primary quota windows so idle
@@ -155,6 +171,10 @@ pub fn format_plan_type_label(plan_type: Option<&str>) -> String {
         _ => "unknown".to_string(),
     }
 }
+
+#[cfg(test)]
+#[path = "account_display_name_tests.rs"]
+mod name_tests;
 
 #[cfg(test)]
 mod tests {

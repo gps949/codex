@@ -346,7 +346,7 @@ fn narrow_pool_cards_keep_login_and_quota_cooldown_separate() {
 }
 
 #[test]
-fn details_mask_identity_and_keep_unknown_and_independent_cache_ages() {
+fn details_keep_full_email_and_unknown_independent_cache_ages() {
     let mut data = inventory();
     let now = data.now();
     let row = &mut data.accounts[0];
@@ -377,7 +377,7 @@ fn details_mask_identity_and_keep_unknown_and_independent_cache_ages() {
         },
         /*columns*/ 100,
     );
-    assert!(!output.contains("alice@example.com"));
+    assert!(output.contains("alice@example.com"));
     assert!(
         output
             .lines()
@@ -402,4 +402,96 @@ fn json_includes_all_profiles_and_only_nonsecret_metadata() {
     let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
     assert_eq!(parsed, serde_json::to_value(data).unwrap());
     assert!(!rendered.contains("credential_home"));
+}
+
+#[test]
+fn automatic_email_names_keep_raw_labels_in_machine_output() {
+    let mut data = inventory();
+    data.accounts[0].label = None;
+    let mut custom = data.accounts[0].clone();
+    custom.profile_id = "profile-2".into();
+    custom.label = Some("Work".into());
+    custom.active = false;
+    let mut missing = data.accounts[0].clone();
+    missing.profile_id = "profile-3".into();
+    missing.email = None;
+    missing.active = false;
+    data.accounts.extend([custom, missing]);
+    let json: serde_json::Value = serde_json::from_str(&render(
+        &data,
+        AccountView::List,
+        options(AccountOutputFormat::Json),
+        /*columns*/ 140,
+    ))
+    .unwrap();
+    assert_eq!(json["accounts"][0]["label"], serde_json::Value::Null);
+    let tsv = render(
+        &data,
+        AccountView::List,
+        options(AccountOutputFormat::Tsv),
+        /*columns*/ 140,
+    );
+    assert!(tsv.lines().nth(1).unwrap().ends_with("\t-\t-"));
+    let table = render(
+        &data,
+        AccountView::List,
+        options(AccountOutputFormat::Table),
+        /*columns*/ 160,
+    );
+    assert!(table.contains("alice@example.com"));
+    assert!(table.contains("Work"));
+    assert!(table.contains("profile-3"));
+    insta::assert_snapshot!(table);
+}
+
+#[test]
+fn full_email_cards_preserve_long_identity_and_show_id_for_sanitized_names() {
+    let mut data = inventory();
+    data.accounts[0].label = None;
+    data.accounts[0].email = Some("long.personal.address+business-seat@example.com".into());
+    let mut other = data.accounts[0].clone();
+    other.profile_id = "other-seat".into();
+    other.label = Some("malicious\u{202e}name\n".into());
+    other.active = false;
+    data.accounts.push(other);
+    let wide = render(
+        &data,
+        AccountView::List,
+        options(AccountOutputFormat::Table),
+        /*columns*/ 180,
+    );
+    assert!(wide.contains("long.personal.address+business-seat@example.com"));
+    let narrow = render(
+        &data,
+        AccountView::List,
+        AccountOutputOptions {
+            details: true,
+            ..options(AccountOutputFormat::Table)
+        },
+        /*columns*/ 54,
+    );
+    assert!(narrow.contains("long.personal.address+business-seat@example.com"));
+    assert!(!narrow.contains(['\u{202e}', '\u{1b}']));
+    assert!(narrow.contains("other-seat"));
+    insta::assert_snapshot!(format!("Wide:\n{wide}\nNarrow:\n{narrow}"));
+}
+
+#[test]
+fn an_email_matching_another_accounts_label_keeps_profile_selectors_visible() {
+    let mut data = inventory();
+    data.accounts[0].label = Some("bob@example.com".into());
+    let mut other = data.accounts[0].clone();
+    other.profile_id = "other-seat".into();
+    other.label = Some("Business".into());
+    other.email = Some("bob@example.com".into());
+    other.active = false;
+    data.accounts.push(other);
+    let output = render(
+        &data,
+        AccountView::List,
+        options(AccountOutputFormat::Table),
+        /*columns*/ 150,
+    );
+    assert!(output.contains("PROFILE"));
+    insta::assert_snapshot!(output);
 }

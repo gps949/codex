@@ -1,0 +1,10 @@
+---
+source: cli/src/account_cmd/display_tests.rs
+assertion_line: 466
+expression: output
+---
+ACCOUNT          PROFILE        NOW  PLAN  PRIORITY  LOGIN   POOL      PRIMARY USED  SECONDARY USED  UPDATED
+bob@example.com  acct-…00001-1  *    Pro         10  stored  eligible       unknown         unknown  unknown
+Business         other-seat     -    Pro         10  stored  eligible       unknown         unknown  unknown
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; more: --details / --show-profile

@@ -1,0 +1,60 @@
+---
+source: cli/src/account_cmd/display_tests.rs
+assertion_line: 451
+expression: "format!(\"Wide:\\n{wide}\\nNarrow:\\n{narrow}\")"
+---
+Wide:
+ACCOUNT                                          PROFILE        NOW  PLAN  PRIORITY  LOGIN   POOL      PRIMARY USED  SECONDARY USED  UPDATED
+long.personal.address+business-seat@example.com  acct-…00001-1  *    Pro         10  stored  eligible       unknown         unknown  unknown
+malicious name                                   other-seat     -    Pro         10  stored  eligible       unknown         unknown  unknown
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; more: --details / --show-profile
+
+Narrow:
+long.personal.address+business-seat@example.com
+[current]
+  Profile: acct-…00001-1
+  Login: stored
+  Pool: eligible
+  Plan: Pro; priority: 10
+  Primary used: unknown
+  Secondary used: unknown
+  Updated: unknown (oldest sample)
+  Profile: acct-00000000000000000001-1
+  Email:
+long.personal.address+business-seat@example.com
+  Primary (duration unreported):
+    Last sample: unknown
+    Updated: unknown
+    Reset: unknown
+  Secondary (duration unreported):
+    Last sample: unknown
+    Updated: unknown
+    Reset: unknown
+  Warmup: unknown
+
+malicious name
+  Profile: other-seat
+  Login: stored
+  Pool: eligible
+  Plan: Pro; priority: 10
+  Primary used: unknown
+  Secondary used: unknown
+  Updated: unknown (oldest sample)
+  Profile: other-seat
+  Email:
+long.personal.address+business-seat@example.com
+  Primary (duration unreported):
+    Last sample: unknown
+    Updated: unknown
+    Reset: unknown
+  Secondary (duration unreported):
+    Last sample: unknown
+    Updated: unknown
+    Reset: unknown
+  Warmup: unknown
+
+Cached status; UPDATED = oldest quota sample; retry
+= local.
+* current; priority: lower is preferred; login
+validity not checked.

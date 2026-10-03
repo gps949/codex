@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use chrono::Utc;
 use codex_login::AccountRateLimitWindow;
+use codex_login::account_display::account_display_name;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -30,22 +31,36 @@ pub(super) fn render_table(
     if inventory.accounts.is_empty() {
         lines.push("No account profiles. Add one with `codex account add`.".into());
     } else {
-        let labels = inventory
+        let names = inventory
             .accounts
             .iter()
             .map(|row| {
-                fit(
-                    &mask_identity(row.label.as_deref().unwrap_or(&row.profile_id)),
-                    /*width*/ 20,
-                )
+                account_display_name(row.label.as_deref(), row.email.as_deref(), &row.profile_id)
             })
             .collect::<Vec<_>>();
-        // Masked, truncated, and duplicated labels cannot be used as exact selectors.
+        // Keep ordinary emails intact; unusually long names use cards when the table cannot fit.
+        let name_width = names
+            .iter()
+            .map(|name| UnicodeWidthStr::width(sanitize(name).as_str()))
+            .max()
+            .unwrap_or_default()
+            .clamp(20, 64);
+        let labels = names
+            .iter()
+            .map(|name| fit(name, name_width))
+            .collect::<Vec<_>>();
+        // Changed or ambiguous names need an exact ID, including label/email cross-collisions.
         let show_profile = options.show_profile
             || labels.iter().enumerate().any(|(index, label)| {
                 label.is_empty()
-                    || inventory.accounts[index].label.as_deref() != Some(label.as_str())
-                    || labels[..index].contains(label)
+                    || names[index] != label.as_str()
+                    || inventory.accounts.iter().enumerate().any(|(other, row)| {
+                        other != index
+                            && (row.profile_id == names[index]
+                                || row.label.as_deref().map(str::trim) == Some(names[index])
+                                || row.email.as_deref().map(str::trim) == Some(names[index])
+                                || names[other] == names[index])
+                    })
             });
         let mut headers = vec!["ACCOUNT".into()];
         if show_profile {
@@ -120,7 +135,11 @@ pub(super) fn render_table(
             for row in &inventory.accounts {
                 lines.push(format!(
                     "{}{}",
-                    mask_identity(row.label.as_deref().unwrap_or(&row.profile_id)),
+                    sanitize(account_display_name(
+                        row.label.as_deref(),
+                        row.email.as_deref(),
+                        &row.profile_id
+                    )),
                     if row.active { "  [current]" } else { "" },
                 ));
                 if show_profile {
@@ -215,7 +234,7 @@ fn details(row: &AccountRow, now: DateTime<Utc>) -> Vec<String> {
         format!("  Profile: {}", row.profile_id),
         format!(
             "  Email: {}",
-            mask_identity(row.email.as_deref().unwrap_or("unknown"))
+            sanitize(row.email.as_deref().unwrap_or("unknown"))
         ),
     ];
     for (name, window, observed, kind) in [
@@ -424,20 +443,6 @@ fn short_id(id: &str) -> String {
             .collect::<String>();
         format!("acct-…{suffix}")
     }
-}
-
-fn mask_identity(value: &str) -> String {
-    sanitize(value)
-        .split_whitespace()
-        .map(|word| {
-            if let Some((local, domain)) = word.split_once('@') {
-                format!("{}***@{domain}", local.chars().next().unwrap_or('*'))
-            } else {
-                word.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub(super) fn sanitize(value: &str) -> String {
