@@ -176,3 +176,7 @@ pub use account_display::account_display_name;
 pub use primary_login::PrimaryLoginSource;
 pub use primary_login::PrimaryLoginState;
 pub use primary_login::PrimaryLoginStore;
+
+mod primary_login_runtime;
+pub use primary_login_runtime::PrimaryLoginPolicyLoader;
+pub use primary_login_runtime::PrimaryLoginRuntime;
