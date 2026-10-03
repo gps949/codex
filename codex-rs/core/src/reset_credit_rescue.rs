@@ -14,6 +14,8 @@ use codex_login::AccountAvailability;
 use codex_login::AccountPool;
 use codex_login::AccountProfileId;
 use codex_login::AccountRuntimeStateStore;
+use codex_login::account_runtime_state::AccountQuotaEvidence;
+use codex_login::account_runtime_state::AccountQuotaProbe;
 use sha1::Digest;
 
 use crate::config::Config;
@@ -25,8 +27,11 @@ const REDEEM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 const REDEEM_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 enum ResetCreditOutcome {
-    Reset,
-    AlreadyUsable,
+    Reset(AccountQuotaProbe),
+    AlreadyUsable(
+        AccountQuotaProbe,
+        codex_backend_client::RateLimitsWithResetCredits,
+    ),
     NoReset,
     Unknown,
 }
@@ -141,15 +146,23 @@ pub(crate) async fn try_reset_credit_rescue(
     .ok()?
     .ok()?;
     let deadline = tokio::time::Instant::now() + REDEEM_PASS_TIMEOUT;
+    // The lock serializes spending, but another process may have restored any profile while
+    // this process was waiting. Import the entire pool before choosing which credit to spend.
+    let shared = load_synced_credit_state(&store, &pool, deadline).await?;
+    if let Ok(lease) = pool.lease() {
+        return Some(ResetCreditRescue {
+            profile_id: lease.profile().id.clone(),
+            redeemed_profile_id: None,
+        });
+    }
+    snapshots = pool.snapshots();
     snapshots.sort_by(|left, right| {
         (left.profile.id != failed_profile_id)
             .cmp(&(right.profile.id != failed_profile_id))
             .then_with(|| left.profile.priority.cmp(&right.profile.priority))
             .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
     });
-    let excluded = store
-        .load()
-        .ok()?
+    let excluded = shared
         .profiles
         .into_iter()
         .filter(|profile| {
@@ -166,8 +179,28 @@ pub(crate) async fn try_reset_credit_rescue(
         if tokio::time::Instant::now() >= deadline {
             return None;
         }
-        // Another request may discover an entitlement refusal during this rescue pass.
-        if store.load().ok()?.profiles.iter().any(|profile| {
+        // Refresh every profile, including free recoveries and entitlement exclusions,
+        // before the next candidate. A per-candidate epoch check misses a restored standby.
+        let shared = load_synced_credit_state(&store, &pool, deadline).await?;
+        if let Ok(lease) = pool.lease() {
+            return Some(ResetCreditRescue {
+                profile_id: lease.profile().id.clone(),
+                redeemed_profile_id: None,
+            });
+        }
+        let current = pool.snapshots();
+        let earliest_reset = current
+            .iter()
+            .filter_map(|snapshot| {
+                matches!(snapshot.availability, AccountAvailability::Exhausted { .. })
+                    .then_some(snapshot.backend_resets_at)
+                    .flatten()
+            })
+            .min();
+        if !should_redeem(mode, min_wait, earliest_reset, Utc::now()) {
+            return None;
+        }
+        if shared.profiles.iter().any(|profile| {
             profile.profile_id == candidate.profile.id
                 && profile
                     .reset_credit_excluded_until
@@ -175,42 +208,7 @@ pub(crate) async fn try_reset_credit_rescue(
         }) {
             continue;
         }
-        // Prefer any free recovery that happened while the previous profile was checked.
-        if let Ok(lease) = pool.lease() {
-            return Some(ResetCreditRescue {
-                profile_id: lease.profile().id.clone(),
-                redeemed_profile_id: None,
-            });
-        }
         let profile_id = candidate.profile.id;
-        let previous_epoch = if profile_id == failed_profile_id {
-            failed_lease
-                .account_lease()
-                .and_then(codex_login::AccountLease::quota_reset_at)
-        } else {
-            candidate.quota_reset_at
-        };
-        // Another process may have completed the same reset while we waited.
-        let saved = store.load().ok()?;
-        if let Some(reset_at) = saved
-            .profiles
-            .iter()
-            .find(|entry| entry.profile_id == profile_id)
-            .and_then(|entry| entry.quota_reset_at)
-            && pool
-                .snapshots()
-                .iter()
-                .find(|snapshot| snapshot.profile.id == profile_id)
-                .is_none_or(|snapshot| snapshot.quota_reset_at.is_none_or(|local| local < reset_at))
-            && Some(reset_at) > previous_epoch
-        {
-            pool.apply_quota_reset(&profile_id, reset_at).ok()?;
-            return pool.lease().ok().map(|lease| ResetCreditRescue {
-                profile_id: lease.profile().id.clone(),
-                redeemed_profile_id: None,
-            });
-        }
-
         // Reuse an id for an ambiguous, recent attempt rather than spend another
         // credit after a transport timeout. This file contains no credentials.
         let profile_key = format!("{:x}", sha1::Sha1::digest(profile_id.as_str().as_bytes()));
@@ -276,31 +274,60 @@ pub(crate) async fn try_reset_credit_rescue(
         )
         .await
         .unwrap_or(ResetCreditOutcome::Unknown);
-        let redeemed = match outcome {
-            ResetCreditOutcome::Reset => true,
-            ResetCreditOutcome::AlreadyUsable => false,
+        let (redeemed, applied) = match outcome {
+            ResetCreditOutcome::Reset(probe) => (
+                true,
+                store.confirm_quota_reset(&pool, probe, Utc::now()).ok()?,
+            ),
+            ResetCreditOutcome::AlreadyUsable(probe, observed) => (
+                false,
+                store
+                    .reconcile_quota_probe(
+                        &pool,
+                        probe,
+                        AccountQuotaEvidence {
+                            rate_limits: &observed.rate_limits,
+                            ordinary_usage_allowed: observed.ordinary_usage_allowed,
+                            account_id: observed.account_id.as_deref(),
+                            user_id: observed.user_id.as_deref(),
+                        },
+                    )
+                    .ok()?,
+            ),
             ResetCreditOutcome::NoReset => {
                 let _ = std::fs::remove_file(&attempt_path);
                 continue;
             }
             ResetCreditOutcome::Unknown => return None,
         };
+        if !applied {
+            return None;
+        }
 
         let mut rescue = reactivate_redeemed_profile(&pool, profile_id.clone())?;
         rescue.redeemed_profile_id = redeemed.then_some(profile_id.clone());
-        if let Some(reset_at) = pool
-            .snapshots()
-            .into_iter()
-            .find(|snapshot| snapshot.profile.id == profile_id)
-            .and_then(|snapshot| snapshot.quota_reset_at)
-            && let Err(error) = store.record_quota_reset(&profile_id, reset_at)
-        {
-            tracing::warn!(%profile_id, %error, "failed to persist confirmed quota reset");
-        }
         let _ = std::fs::remove_file(&attempt_path);
         return Some(rescue);
     }
     None
+}
+
+async fn load_synced_credit_state(
+    store: &AccountRuntimeStateStore,
+    pool: &AccountPool,
+    deadline: tokio::time::Instant,
+) -> Option<codex_login::AccountRuntimeState> {
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        if store.try_synchronize(pool).ok()?
+            && let Some(state) = store.try_load().ok()?
+        {
+            return Some(state);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 async fn consume_reset_credit_for_profile(
@@ -319,29 +346,70 @@ async fn consume_reset_credit_for_profile(
     else {
         return ResetCreditOutcome::Unknown;
     };
-    let Some(auth) = manager.auth().await else {
+    let expected_auth = manager.auth_cached();
+    manager.reload().await;
+    let Some((auth, mut factory)) = manager.auth_with_http_client_factory().await else {
         return ResetCreditOutcome::Unknown;
     };
-    if !auth.uses_codex_backend() {
+    if !auth.uses_codex_backend()
+        || expected_auth.as_ref().is_some_and(|expected| {
+            expected.get_account_id() != auth.get_account_id()
+                || expected.get_chatgpt_user_id() != auth.get_chatgpt_user_id()
+        })
+    {
         return ResetCreditOutcome::Unknown;
+    }
+    let changes = manager.auth_change_state_receiver();
+    let owner_generation = changes.borrow().owner_generation;
+    let still_owned = || {
+        changes.borrow().owner_generation == owner_generation
+            && manager.auth_cached().is_some_and(|current| {
+                current.get_account_id() == auth.get_account_id()
+                    && current.get_chatgpt_user_id() == auth.get_chatgpt_user_id()
+            })
+    };
+    let mut base_url = config.chatgpt_base_url.clone();
+    match manager.maintenance_clients(&auth).await {
+        Ok(Some(clients)) => {
+            factory = clients.http_client_factory;
+            base_url = clients.chatgpt_base_url;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::info!(%profile_id, %error, "automatic reset-credit maintenance policy unavailable");
+            return ResetCreditOutcome::Unknown;
+        }
     }
     if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
         return ResetCreditOutcome::Unknown;
     }
-    let client = codex_backend_client::Client::from_auth(
-        config.chatgpt_base_url.clone(),
-        &auth,
-        config.http_client_factory(),
-    );
+    if !still_owned() {
+        return ResetCreditOutcome::Unknown;
+    }
+    let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
+    let Ok(Some(probe)) = store.capture_quota_probe(pool, profile_id, &auth) else {
+        return ResetCreditOutcome::Unknown;
+    };
+    let client = codex_backend_client::Client::from_auth(base_url, &auth, factory);
 
-    match tokio::time::timeout(
+    let response = tokio::time::timeout(
         REDEEM_REQUEST_TIMEOUT,
         client.consume_rate_limit_reset_credit(redeem_request_id),
     )
-    .await
-    {
+    .await;
+    manager.reload().await;
+    if !still_owned() {
+        return ResetCreditOutcome::Unknown;
+    }
+    match response {
+        Ok(Ok(response))
+            if response.code == ConsumeRateLimitResetCreditCode::Reset
+                && response.windows_reset >= 2 =>
+        {
+            ResetCreditOutcome::Reset(probe)
+        }
         Ok(Ok(response)) if response.code == ConsumeRateLimitResetCreditCode::Reset => {
-            ResetCreditOutcome::Reset
+            ResetCreditOutcome::Unknown
         }
         Ok(Ok(response))
             if matches!(
@@ -352,29 +420,39 @@ async fn consume_reset_credit_for_profile(
         {
             // The previous POST may have succeeded despite a lost response.
             // Confirm the bound seat's current quota before unblocking it.
-            match tokio::time::timeout(
+            let observed = tokio::time::timeout(
                 REDEEM_REQUEST_TIMEOUT,
                 client.get_rate_limits_with_reset_credits(),
             )
-            .await
-            {
+            .await;
+            manager.reload().await;
+            if !still_owned() {
+                return ResetCreditOutcome::Unknown;
+            }
+            match observed {
                 Ok(Ok(observed))
-                    if observed.ordinary_usage_allowed != Some(false)
+                    if observed.account_id.as_ref() == auth.get_account_id().as_ref()
+                        && observed.user_id.as_ref() == auth.get_chatgpt_user_id().as_ref()
+                        && observed.ordinary_usage_allowed == Some(true)
                         && observed.rate_limits.iter().any(|snapshot| {
                             snapshot.limit_id.as_deref() == Some("codex")
                                 && snapshot.spend_control_reached != Some(true)
                                 && snapshot.primary.as_ref().is_some_and(|window| {
-                                    window.used_percent.is_finite() && window.used_percent < 100.0
+                                    window.used_percent.is_finite()
+                                        && window.used_percent >= 0.0
+                                        && window.used_percent < 100.0
+                                        && window.window_minutes == Some(300)
                                 })
                                 && snapshot.secondary.as_ref().is_none_or(|window| {
-                                    window.used_percent.is_finite() && window.used_percent < 100.0
+                                    window.used_percent.is_finite()
+                                        && window.used_percent >= 0.0
+                                        && window.used_percent < 100.0
                                 })
                         }) =>
                 {
-                    ResetCreditOutcome::AlreadyUsable
+                    ResetCreditOutcome::AlreadyUsable(probe, observed)
                 }
-                Ok(Ok(_)) => ResetCreditOutcome::NoReset,
-                Ok(Err(_)) | Err(_) => ResetCreditOutcome::Unknown,
+                Ok(Ok(_)) | Ok(Err(_)) | Err(_) => ResetCreditOutcome::Unknown,
             }
         }
         Ok(Ok(response)) => {
@@ -404,10 +482,9 @@ fn reactivate_redeemed_profile(
     pool: &AccountPool,
     profile_id: AccountProfileId,
 ) -> Option<ResetCreditRescue> {
-    pool.reset_rate_limits(&profile_id).ok()?;
     match pool.lease() {
         Ok(lease) => {
-            tracing::info!(%profile_id, "redeemed one rate-limit reset credit and reactivated the account");
+            tracing::info!(%profile_id, "confirmed rate-limit recovery is available in the account pool");
             Some(ResetCreditRescue {
                 profile_id: lease.profile().id.clone(),
                 redeemed_profile_id: Some(profile_id),
