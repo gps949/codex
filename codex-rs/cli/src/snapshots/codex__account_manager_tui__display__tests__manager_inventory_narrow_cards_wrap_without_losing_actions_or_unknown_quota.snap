@@ -6,17 +6,23 @@ Codex Accounts
 
 Target: Automatic subscriptions
 Subscription pool: Enabled
+3 subscription accounts · 2 ready ·
+0 checking
+Quota percentages show USED allowance; ?
+means not checked.
+Next: Choose an account number to view
+quota, credits and actions.
 
 *  1 Personal
-     Pro · ready
+     Pro · Ready
      Primary   1% · Weekly    ?
      Reset credits 2
    2 工作席位
-     Pro · coolingDown
+     Pro · Waiting reset
      Primary 100% · Weekly    ?
      Reset credits ?
    3 Standby
-     Pro · ready
+     Pro · Ready
      Primary   9% · Weekly    ?
      Reset credits 10
 

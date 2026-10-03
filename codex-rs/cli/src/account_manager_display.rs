@@ -30,6 +30,50 @@ pub(super) fn render(inventory: &AccountManagerInventory, columns: usize) -> Str
             "Enabled"
         }
     ));
+    let ready = inventory
+        .accounts
+        .iter()
+        .filter(|account| account.availability == "ready")
+        .count();
+    let checking = inventory
+        .accounts
+        .iter()
+        .filter(|account| {
+            account
+                .refresh
+                .as_ref()
+                .is_some_and(|refresh| refresh.in_progress)
+        })
+        .count();
+    rows.push(format!(
+        "{} subscription accounts · {ready} ready · {checking} checking",
+        inventory.accounts.len()
+    ));
+    rows.push("Quota percentages show USED allowance; ? means not checked.".into());
+    rows.push(format!(
+        "Next: {}",
+        if matches!(
+            inventory.api_selection,
+            codex_login::ApiAccountSelection::Manual { .. }
+        ) {
+            "O returns to automatic subscriptions. API requests are provider billed."
+        } else if inventory.paused {
+            "O resumes subscription selection."
+        } else if inventory.accounts.is_empty() {
+            "A adds your first subscription account."
+        } else if ready == 0
+            && inventory
+                .accounts
+                .iter()
+                .any(|account| account.login_state != "signedIn")
+        {
+            "Choose an account number, then L to finish login."
+        } else if ready == 0 {
+            "R checks for restored quota without spending a reset credit."
+        } else {
+            "Choose an account number to view quota, credits and actions."
+        }
+    ));
     rows.push(String::new());
     let wide = columns >= 86;
     if wide {
@@ -39,7 +83,11 @@ pub(super) fn render(inventory: &AccountManagerInventory, columns: usize) -> Str
         );
     }
     for (index, account) in inventory.accounts.iter().enumerate() {
-        let marker = if inventory.active_profile_id.as_deref() == Some(account.profile_id.as_str())
+        let marker = if matches!(
+            inventory.api_selection,
+            codex_login::ApiAccountSelection::Subscription
+        ) && inventory.active_profile_id.as_deref()
+            == Some(account.profile_id.as_str())
         {
             '*'
         } else {
@@ -56,7 +104,7 @@ pub(super) fn render(inventory: &AccountManagerInventory, columns: usize) -> Str
                 index + 1,
                 cell(&account.label, 26),
                 cell(account.plan.as_deref().unwrap_or("Unknown"), 10),
-                cell(&account.availability, 15),
+                cell(availability(&account.availability), 15),
                 primary,
                 weekly,
                 credits
@@ -70,10 +118,17 @@ pub(super) fn render(inventory: &AccountManagerInventory, columns: usize) -> Str
             rows.push(format!(
                 "     {} · {}",
                 clean(account.plan.as_deref().unwrap_or("Unknown plan")),
-                account.availability
+                availability(&account.availability)
             ));
             rows.push(format!("     Primary {primary:>4} · Weekly {weekly:>4}"));
             rows.push(format!("     Reset credits {credits}"));
+        }
+        if let Some(refresh) = &account.refresh {
+            if refresh.in_progress {
+                rows.push("     Checking fresh quota…".into());
+            } else if !refresh.succeeded {
+                rows.push(format!("     Check failed: {}", clean(&refresh.message)));
+            }
         }
     }
     if inventory.accounts.is_empty() {

@@ -4,14 +4,14 @@ expression: output
 ---
 Codex Accounts
 
-Target: Automatic subscriptions
+Target: API target unavailable
 Subscription pool: Enabled
 3 subscription accounts · 2 ready · 0 checking
 Quota percentages show USED allowance; ? means not checked.
-Next: Choose an account number to view quota, credits and actions.
+Next: O returns to automatic subscriptions. API requests are provider billed.
 
      ACCOUNT                    PLAN       AVAILABILITY     PRIMARY  WEEKLY   CREDITS
-*  1 Personal                   Pro        Ready                1%       ?        2
+   1 Personal                   Pro        Ready                1%       ?        2
    2 工作席位                   Pro        Waiting reset      100%       ?        ?
    3 Standby                    Pro        Ready                9%       ?       10
 

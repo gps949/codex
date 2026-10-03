@@ -79,3 +79,14 @@ fn manager_inventory_narrow_cards_wrap_without_losing_actions_or_unknown_quota()
     );
     insta::assert_snapshot!(output);
 }
+
+#[test]
+fn manager_manual_api_has_no_active_subscription_marker() {
+    let mut inventory = inventory();
+    inventory.api_selection = codex_login::ApiAccountSelection::Manual {
+        profile_id: "synthetic-api".into(),
+    };
+    let output = render(&inventory, /*columns*/ 100);
+    assert!(output.lines().all(|line| !line.starts_with('*')));
+    insta::assert_snapshot!(output);
+}
