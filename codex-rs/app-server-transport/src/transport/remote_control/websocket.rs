@@ -40,6 +40,7 @@ use base64::Engine;
 use codex_app_server_protocol::RemoteControlConnectionStatus;
 use codex_app_server_protocol::RemoteControlStatusChangedNotification;
 use codex_core::util::backoff;
+use codex_http_client::NetworkPolicyDenied;
 use codex_state::StateRuntime;
 use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 use futures::SinkExt;
@@ -75,6 +76,7 @@ const REMOTE_CONTROL_WEBSOCKET_PONG_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(60);
 const REMOTE_CONTROL_ACCOUNT_ID_RETRY_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(1);
+const REMOTE_CONTROL_POLICY_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const REMOTE_CONTROL_RECONNECT_BACKOFF_CAP: std::time::Duration =
     std::time::Duration::from_secs(30);
 const REMOTE_CONTROL_WEBSOCKET_CONNECT_TIMEOUT: std::time::Duration =
@@ -776,10 +778,18 @@ impl RemoteControlWebsocket {
                         self.status_publisher
                             .publish_status(RemoteControlConnectionStatus::Errored);
                         if let Some(changes) = &mut policy_changes {
+                            let policy_unavailable = matches!(
+                                err.get_ref()
+                                    .and_then(|cause| cause.downcast_ref::<NetworkPolicyDenied>()),
+                                Some(NetworkPolicyDenied::Unavailable)
+                            );
                             tokio::select! {
                                 _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
                                 _ = self.desired_state_rx.wait_for(|state| !state.is_enabled()) => return ConnectOutcome::Disabled,
                                 _ = changes.changed() => continue,
+                                // A failed initial load need not publish a change. Retry its owner
+                                // loader while keeping all destination checks and permits closed.
+                                _ = tokio::time::sleep(REMOTE_CONTROL_POLICY_RETRY_INTERVAL), if policy_unavailable => continue,
                             }
                         }
                     }
