@@ -1,3 +1,12 @@
+#[path = "host_login.rs"]
+mod host_login;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CredentialSource {
+    Standard,
+    ManagedProfile,
+}
+
 mod quota_probe;
 mod workspace_routing;
 
@@ -2066,6 +2075,7 @@ impl UnauthorizedRecovery {
 /// different parts of the program seeing inconsistent auth data mid‑run.
 pub struct AuthManager {
     pool_suspended: AtomicBool,
+    credential_source: CredentialSource,
     codex_home: PathBuf,
     inner: RwLock<CachedAuth>,
     auth_change_tx: watch::Sender<u64>,
@@ -2209,6 +2219,20 @@ impl AuthManager {
             .await
             .ok()
             .flatten();
+        Self::from_loaded_auth_config(
+            auth_config,
+            enable_codex_api_key_env,
+            managed_auth,
+            CredentialSource::Standard,
+        )
+    }
+
+    fn from_loaded_auth_config(
+        auth_config: AuthConfig,
+        enable_codex_api_key_env: bool,
+        managed_auth: Option<CodexAuth>,
+        credential_source: CredentialSource,
+    ) -> Self {
         let AuthConfig {
             codex_home,
             auth_credentials_store_mode,
@@ -2244,6 +2268,7 @@ impl AuthManager {
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
             pool_suspended: AtomicBool::new(false),
+            credential_source,
             workload_identity_selected: false,
             auth_route_config,
         }
@@ -2281,6 +2306,7 @@ impl AuthManager {
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
             pool_suspended: AtomicBool::new(false),
+            credential_source: CredentialSource::Standard,
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
@@ -2312,6 +2338,7 @@ impl AuthManager {
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
             pool_suspended: AtomicBool::new(false),
+            credential_source: CredentialSource::Standard,
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
@@ -2352,6 +2379,7 @@ impl AuthManager {
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(None),
             pool_suspended: AtomicBool::new(false),
+            credential_source: CredentialSource::Standard,
             workload_identity_selected: false,
             auth_route_config: crate::test_support::transport_default_auth_route_config(),
         })
@@ -2381,6 +2409,7 @@ impl AuthManager {
             agent_identity_bootstrap_cooldown: Mutex::default(),
             external_auth: RwLock::new(Some(Arc::new(BearerTokenRefresher::new(config)))),
             pool_suspended: AtomicBool::new(false),
+            credential_source: CredentialSource::Standard,
             workload_identity_selected: false,
             // External bearer auth refreshes by running the provider's command and never makes
             // auth-owned HTTP requests, so this route is intentionally inert.
@@ -2645,6 +2674,19 @@ impl AuthManager {
             };
         }
 
+        if self.credential_source == CredentialSource::ManagedProfile {
+            let config = AuthConfig {
+                codex_home: self.codex_home.clone(),
+                auth_credentials_store_mode: self.auth_credentials_store_mode,
+                keyring_backend_kind: self.keyring_backend_kind,
+                forced_login_method: self.forced_login_method,
+                chatgpt_base_url: self.chatgpt_base_url.clone(),
+                forced_chatgpt_workspace_id: self.forced_chatgpt_workspace_id(),
+                managed_auth_policy: self.managed_auth_policy.clone(),
+                auth_route_config: self.auth_route_config.clone(),
+            };
+            return config.load_managed_profile_auth().await.ok().flatten();
+        }
         let allowed_login_methods = self.allowed_login_methods();
         let effective_chatgpt_workspaces = self.effective_chatgpt_workspaces();
         load_auth(
