@@ -34,6 +34,18 @@ codex account set "Existing login" --label "Personal"
 
 添加成功后账号池自动生效，继续正常使用 Codex 即可。输入 `/account` 可以查看账号与选择方式。
 
+## 在一个界面中管理全部账号
+
+在远程主机运行：
+
+```sh
+codex account manage
+```
+
+它会打开配对后的浏览器管理页，集中展示订阅账号额度、可用状态、刷新结果，并提供编辑、登录、重置券兑换、账号池设置，以及独立的 API 账号管理。只有终端的主机可用 `codex account manage --tui`。账号池为空或全部耗尽时仍能进入管理。手机访问方式和恢复步骤见[账号管理指南](ACCOUNT_MANAGER.zh-CN.md)。
+
+终端里的 `codex account list`、`codex account status` 使用对齐表格或窄屏卡片。`--details` 展开缓存时间和解释，`--format json` 返回结构化数据，`--format tsv` 明确使用制表符。auto 模式通过管道输出时保留原有 TSV 格式。
+
 ## 日常操作速查
 
 | 想做什么         | 主机 CLI                                                    | Codex TUI                               | 手机远程端                         |

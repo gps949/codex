@@ -34,6 +34,18 @@ codex account set "Existing login" --label "Personal"
 
 Pooling starts automatically after enrollment. You can keep using Codex normally; `/account` shows the available profiles and selection controls.
 
+## Manage accounts in one place
+
+Start the dedicated account dashboard on the host:
+
+```sh
+codex account manage
+```
+
+It opens a paired browser page with subscription quota, availability, refresh results, account editing, login, reset credits, pool settings and separate API accounts. On a terminal-only host use `codex account manage --tui`. The manager remains available when the pool is empty or exhausted. For phone access and recovery steps, see the [account manager guide](ACCOUNT_MANAGER.md).
+
+In a terminal, `codex account list` and `codex account status` use aligned tables or compact cards. Add `--details` for cache times and explanations, `--format json` for structured data, or `--format tsv` for tab-separated output. Piped auto output keeps the existing TSV format.
+
 ## Everyday controls
 
 | Goal                       | CLI on the host                                             | TUI inside Codex                        | Mobile remote client               |
