@@ -34,6 +34,9 @@ use wiremock::matchers::path;
 use super::account_failover::write_account_pool_fixture;
 use super::account_failover::write_backup_only_account_pool_fixture;
 
+#[path = "account_recovery_steering.rs"]
+mod steering;
+
 fn quota_exceeded_event(response_id: &str) -> serde_json::Value {
     json!({
         "type": "response.failed",
