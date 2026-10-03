@@ -1,21 +1,14 @@
-use std::collections::HashMap;
-
-use chrono::Utc;
-use codex_core::ExecutionAccountPoolHandle;
 use codex_core::config::Config;
 use codex_login::AccountLoginOutcomeKind;
 use codex_login::AccountProfileId;
 use codex_login::AccountProfileState;
 use codex_login::AccountProfileStore;
-use codex_login::AccountRuntimeProfileState;
 use codex_login::AccountRuntimeStateStore;
 use codex_login::AuthManager;
 use codex_login::CLIENT_ID;
 use codex_login::ServerOptions;
 use codex_login::begin_account_browser_login;
 use codex_login::begin_account_device_login;
-use codex_login::format_exhausted_reset;
-use codex_login::format_relative_reset;
 use codex_login::logout_with_revoke;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_utils_cli::CliConfigOverrides;
@@ -24,7 +17,13 @@ use crate::account_config::format_rotation_strategy;
 use crate::account_config::parse_rotation_strategy;
 use crate::account_config::patch_account_pool_config;
 
+mod display;
+mod display_data;
+mod display_table;
 mod quota_display;
+
+pub(crate) use display::AccountOutputFormat;
+pub(crate) use display::AccountOutputOptions;
 
 const DEFAULT_PRIORITY_STEP: u32 = 10;
 
@@ -247,84 +246,9 @@ pub(crate) async fn run_account_set(
 
 pub(crate) async fn run_account_list(
     cli_config_overrides: CliConfigOverrides,
-    show_profile: bool,
+    options: AccountOutputOptions,
 ) -> ! {
-    let config = load_config_or_exit(cli_config_overrides).await;
-    let store = AccountProfileStore::new(config.codex_home.to_path_buf());
-    let records = match store.load_profile_records() {
-        Ok(records) => records,
-        Err(error) => {
-            eprintln!("Error reading account profiles: {error}");
-            std::process::exit(1);
-        }
-    };
-    if records.is_empty() {
-        eprintln!("No Codex account profiles are configured.");
-        std::process::exit(0);
-    }
-
-    let runtime_state = AccountRuntimeStateStore::new(config.codex_home.to_path_buf())
-        .load()
-        .unwrap_or_default();
-    let runtime_by_id = runtime_state
-        .profiles
-        .iter()
-        .map(|state| (state.profile_id.clone(), state))
-        .collect::<HashMap<_, _>>();
-
-    let mut records = records;
-    records.sort_by(|left, right| {
-        left.profile
-            .priority
-            .cmp(&right.profile.priority)
-            .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
-    });
-
-    if show_profile {
-        println!("ACTIVE\tPRIORITY\tPROFILE\tSTATE\tPLAN\tEMAIL\tCOOLDOWN\tLABEL");
-    } else {
-        println!("ACTIVE\tPRIORITY\tSTATE\tPLAN\tEMAIL\tCOOLDOWN\tLABEL");
-    }
-    for record in records {
-        let active = !codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home)
-            && runtime_state.active_profile_id.as_ref() == Some(&record.profile.id);
-        let runtime = runtime_by_id.get(&record.profile.id).copied();
-        let cooldown = format_cooldown(runtime);
-        let (plan, email) = load_profile_identity(&config, &record.profile).await;
-        let state = if record.profile.disabled {
-            "disabled"
-        } else {
-            match record.state {
-                AccountProfileState::PendingLogin => "pending_login",
-                AccountProfileState::Ready => "ready",
-            }
-        };
-        if show_profile {
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                if active { "*" } else { "" },
-                record.profile.priority,
-                record.profile.id,
-                state,
-                plan.unwrap_or_else(|| "-".to_string()),
-                email.unwrap_or_else(|| "-".to_string()),
-                cooldown,
-                record.profile.label.as_deref().unwrap_or("-"),
-            );
-        } else {
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                if active { "*" } else { "" },
-                record.profile.priority,
-                state,
-                plan.unwrap_or_else(|| "-".to_string()),
-                email.unwrap_or_else(|| "-".to_string()),
-                cooldown,
-                record.profile.label.as_deref().unwrap_or("-"),
-            );
-        }
-    }
-    std::process::exit(0);
+    display_data::run_account_view(cli_config_overrides, display::AccountView::List, options).await
 }
 
 pub(crate) async fn run_account_use(
@@ -420,7 +344,7 @@ pub(crate) async fn run_account_remove(
         )
         .await
     {
-        eprintln!("Error revoking account credentials: {error}");
+        eprintln!("Error deleting local account credentials: {error}");
         std::process::exit(1);
     }
 
@@ -456,162 +380,18 @@ pub(crate) async fn run_account_remove(
     } else if keep_credentials {
         eprintln!("Removed account profile {profile_id}; its credential directory was preserved.");
     } else {
-        eprintln!("Removed account profile {profile_id} and revoked its credentials.");
+        eprintln!(
+            "Removed account profile {profile_id} and its local credentials. Server revocation was attempted."
+        );
     }
     std::process::exit(0);
 }
 
 pub(crate) async fn run_account_pool(
     cli_config_overrides: CliConfigOverrides,
-    show_profile: bool,
+    options: AccountOutputOptions,
 ) -> ! {
-    let config = load_config_or_exit(cli_config_overrides).await;
-    if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
-        eprintln!("Account pool is paused after logout. Enrolled accounts are retained.");
-        eprintln!("Resume: codex account use <label>\nInspect accounts: codex account list");
-        std::process::exit(0);
-    }
-    let auth_manager =
-        match AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await {
-            Ok(manager) => manager,
-            Err(error) => {
-                eprintln!("Error loading auth manager: {error}");
-                std::process::exit(1);
-            }
-        };
-    let pool_handle = ExecutionAccountPoolHandle::shared(auth_manager);
-    let enabled = match pool_handle.ensure_from_config(&config).await {
-        Ok(enabled) => enabled,
-        Err(error) => {
-            eprintln!("Error initializing account pool: {error}");
-            std::process::exit(1);
-        }
-    };
-    if !enabled {
-        eprintln!("No Codex account pool is configured. Add profiles with `codex account add`.");
-        std::process::exit(0);
-    }
-
-    eprintln!("Cached quota observations; this command does not refresh backend quota.");
-    eprintln!("Refresh quota observations in the mobile account view or with accountPool/read.");
-    let rotation = format_rotation_strategy(config.account_pool.effective_rotation_strategy());
-    let return_to_preferred = config.account_pool.effective_return_to_preferred();
-    let preemptive = config
-        .account_pool
-        .effective_preemptive_switch_percent()
-        .map(|percent| format!("{percent:.0}%"))
-        .unwrap_or_else(|| "disabled".to_string());
-    println!(
-        "rotation_strategy={rotation}\treturn_to_preferred={return_to_preferred}\tpreemptive_switch={preemptive}"
-    );
-    if show_profile {
-        println!(
-            "ACTIVE\tPRIORITY\tPROFILE\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL\tPRIMARY_OBSERVED\tSECONDARY_OBSERVED\tPRIMARY_RESET\tSECONDARY_RESET"
-        );
-    } else {
-        println!(
-            "ACTIVE\tPRIORITY\tAVAILABILITY\tPLAN\tEMAIL\t5H%\tWEEK%\tWARMUP\tLABEL\tPRIMARY_OBSERVED\tSECONDARY_OBSERVED\tPRIMARY_RESET\tSECONDARY_RESET"
-        );
-    }
-    let now = Utc::now();
-    for snapshot in pool_handle.snapshots() {
-        let (plan, email) = load_profile_identity(&config, &snapshot.profile).await;
-        let availability = match &snapshot.availability {
-            codex_login::AccountAvailability::Available => "available".to_string(),
-            codex_login::AccountAvailability::Exhausted { resets_at } => match resets_at {
-                Some(until) if *until > now => {
-                    format!("retry {}", format_relative_reset(*until, now))
-                }
-                Some(_) => "retry ready".to_string(),
-                None => "quota unavailable".to_string(),
-            },
-            codex_login::AccountAvailability::AuthenticationUnavailable { .. } => {
-                "auth unavailable".to_string()
-            }
-            codex_login::AccountAvailability::Disabled => "disabled".to_string(),
-        };
-        let primary = snapshot
-            .rate_limits
-            .primary
-            .as_ref()
-            .map(|window| format!("{:.0}", window.used_percent))
-            .unwrap_or_else(|| "-".to_string());
-        let secondary = snapshot
-            .rate_limits
-            .secondary
-            .as_ref()
-            .map(|window| format!("{:.0}", window.used_percent))
-            .unwrap_or_else(|| "-".to_string());
-        let primary_observed = quota_display::observed_at(
-            snapshot
-                .rate_limits
-                .primary_observed_at()
-                .map(|at| at.timestamp()),
-            now,
-        );
-        let secondary_observed = quota_display::observed_at(
-            snapshot
-                .rate_limits
-                .secondary_observed_at()
-                .map(|at| at.timestamp()),
-            now,
-        );
-        let primary_reset = quota_display::reset(
-            snapshot.rate_limits.primary.as_ref(),
-            quota_display::QuotaWindow::Primary,
-            now,
-        );
-        let secondary_reset = quota_display::reset(
-            snapshot.rate_limits.secondary.as_ref(),
-            quota_display::QuotaWindow::Secondary,
-            now,
-        );
-        let warmup = snapshot
-            .window_warmup
-            .as_ref()
-            .filter(|_| !snapshot.is_active)
-            .and_then(|observation| {
-                codex_login::visible_window_warmup_status(
-                    observation,
-                    snapshot
-                        .rate_limits
-                        .primary
-                        .as_ref()
-                        .map(|window| window.used_percent),
-                    now,
-                )
-            })
-            .unwrap_or_else(|| "-".to_string());
-        if show_profile {
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{primary_observed}\t{secondary_observed}\t{primary_reset}\t{secondary_reset}",
-                if snapshot.is_active { "*" } else { "" },
-                snapshot.profile.priority,
-                snapshot.profile.id,
-                availability,
-                plan.unwrap_or_else(|| "-".to_string()),
-                email.unwrap_or_else(|| "-".to_string()),
-                primary,
-                secondary,
-                warmup,
-                snapshot.profile.label.as_deref().unwrap_or("-"),
-            );
-        } else {
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{primary_observed}\t{secondary_observed}\t{primary_reset}\t{secondary_reset}",
-                if snapshot.is_active { "*" } else { "" },
-                snapshot.profile.priority,
-                availability,
-                plan.unwrap_or_else(|| "-".to_string()),
-                email.unwrap_or_else(|| "-".to_string()),
-                primary,
-                secondary,
-                warmup,
-                snapshot.profile.label.as_deref().unwrap_or("-"),
-            );
-        }
-    }
-    std::process::exit(0);
+    display_data::run_account_view(cli_config_overrides, display::AccountView::Pool, options).await
 }
 
 pub(crate) async fn run_account_config_show(cli_config_overrides: CliConfigOverrides) -> ! {
@@ -778,40 +558,6 @@ fn next_priority(
     Ok(max_priority
         .map(|priority| priority.saturating_add(DEFAULT_PRIORITY_STEP))
         .unwrap_or(0))
-}
-
-async fn load_profile_identity(
-    config: &Config,
-    profile: &codex_login::AccountProfile,
-) -> (Option<String>, Option<String>) {
-    let mut auth_config = config.auth_config();
-    auth_config.codex_home = profile.credential_home.clone();
-    match AuthManager::shared_from_auth_config(auth_config, /*enable_codex_api_key_env*/ false)
-        .await
-    {
-        Ok(manager) => {
-            match if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
-                manager.auth_cached()
-            } else {
-                manager.auth().await
-            } {
-                Some(auth) => (
-                    auth.account_plan_type().map(|plan| format!("{plan:?}")),
-                    auth.get_account_email(),
-                ),
-                None => (None, None),
-            }
-        }
-        Err(_) => (None, None),
-    }
-}
-
-fn format_cooldown(state: Option<&AccountRuntimeProfileState>) -> String {
-    state
-        .and_then(|state| state.exhausted_until.as_ref())
-        .filter(|reset| **reset > Utc::now())
-        .map(|reset| format_exhausted_reset(*reset))
-        .unwrap_or_else(|| "-".to_string())
 }
 
 fn resolve_profile_id_or_exit(store: &AccountProfileStore, selector: &str) -> AccountProfileId {

@@ -52,6 +52,8 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod account_cmd;
 mod account_config;
+mod account_manager_cmd;
+mod account_manager_tui;
 mod account_selector;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
@@ -578,6 +580,8 @@ struct AccountCommand {
 
 #[derive(Debug, clap::Subcommand)]
 enum AccountSubcommand {
+    /// Open the complete account manager in a paired browser.
+    Manage(account_manager_cmd::AccountManageArgs),
     /// Add another Codex account profile via ChatGPT login.
     #[command(after_help = "Example:\n  codex account add --label \"Work Pro\"\n\n\
             If this ChatGPT user+workspace is already in the pool, login refreshes\n\
@@ -596,18 +600,26 @@ enum AccountSubcommand {
         device_auth: bool,
     },
 
-    /// List configured account profiles and their scheduler state.
+    /// List configured account profiles and their cached status.
     #[command(
         after_help = "Quota values are cached observations; this command does not query the backend.\n\
             Refresh from mobile /account or the accountPool/read API.\n\n\
-            By default the opaque profile id column is omitted. Pass\n\
-            --show-profile when you need the acct-… id for scripting.\n\n\
-            Example:\n  codex account list\n  codex account list --show-profile"
+            Terminal output adapts to the window width; redirected output preserves TSV columns.\n\
+            Pass --show-profile for full profile IDs or --details for cache timestamps.\n\n\
+            Examples:\n  codex account list\n  codex account list --format json\n  codex account list --show-profile --format tsv"
     )]
     List {
-        /// Include the opaque local profile id column (acct-…).
+        /// Include the full local profile ID (acct-…).
         #[arg(long = "show-profile")]
         show_profile: bool,
+
+        /// Output format: readable tables on terminals, TSV when redirected.
+        #[arg(long, value_enum, default_value_t = account_cmd::AccountOutputFormat::Auto)]
+        format: account_cmd::AccountOutputFormat,
+
+        /// Include masked identity, cache timestamps, resets, and warmup details in tables.
+        #[arg(long)]
+        details: bool,
     },
 
     /// Re-run ChatGPT login for an existing account profile in place.
@@ -683,15 +695,24 @@ enum AccountSubcommand {
 
     /// Show cached multi-account scheduler and quota observations.
     #[command(
-        after_help = "By default the opaque profile id column is omitted. Pass\n\
-            --show-profile when you need the acct-… id.\n\n\
-            Example:\n  codex account pool\n  codex account pool --show-profile"
+        after_help = "Quota values are cached; this command does not refresh the backend.\n\
+            Terminal output adapts to the window width; redirected output preserves TSV columns.\n\
+            Pass --show-profile for full profile IDs or --details for cache timestamps.\n\n\
+            Examples:\n  codex account pool\n  codex account status --details\n  codex account pool --format json"
     )]
     #[command(visible_alias = "status")]
     Pool {
-        /// Include the opaque local profile id column (acct-…).
+        /// Include the full local profile ID (acct-…).
         #[arg(long = "show-profile")]
         show_profile: bool,
+
+        /// Output format: readable tables on terminals, TSV when redirected.
+        #[arg(long, value_enum, default_value_t = account_cmd::AccountOutputFormat::Auto)]
+        format: account_cmd::AccountOutputFormat,
+
+        /// Include masked identity, cache timestamps, resets, and warmup details in tables.
+        #[arg(long)]
+        details: bool,
     },
 
     /// Show or update native account-pool settings in config.toml.
@@ -1817,6 +1838,9 @@ async fn cli_main(
                 root_config_overrides.clone(),
             );
             match account_cli.action {
+                AccountSubcommand::Manage(args) => {
+                    account_manager_cmd::run(account_cli.config_overrides, args).await?;
+                }
                 AccountSubcommand::Add {
                     label,
                     priority,
@@ -1830,8 +1854,20 @@ async fn cli_main(
                     )
                     .await;
                 }
-                AccountSubcommand::List { show_profile } => {
-                    account_cmd::run_account_list(account_cli.config_overrides, show_profile).await;
+                AccountSubcommand::List {
+                    show_profile,
+                    format,
+                    details,
+                } => {
+                    account_cmd::run_account_list(
+                        account_cli.config_overrides,
+                        account_cmd::AccountOutputOptions {
+                            show_profile,
+                            format,
+                            details,
+                        },
+                    )
+                    .await;
                 }
                 AccountSubcommand::Login {
                     profile_id,
@@ -1897,8 +1933,20 @@ async fn cli_main(
                     )
                     .await;
                 }
-                AccountSubcommand::Pool { show_profile } => {
-                    account_cmd::run_account_pool(account_cli.config_overrides, show_profile).await;
+                AccountSubcommand::Pool {
+                    show_profile,
+                    format,
+                    details,
+                } => {
+                    account_cmd::run_account_pool(
+                        account_cli.config_overrides,
+                        account_cmd::AccountOutputOptions {
+                            show_profile,
+                            format,
+                            details,
+                        },
+                    )
+                    .await;
                 }
                 AccountSubcommand::Config(action) => match action {
                     AccountConfigSubcommand::Show => {
