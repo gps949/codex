@@ -1,0 +1,30 @@
+---
+source: cli/src/account_manager_display_tests.rs
+expression: output
+---
+Codex 账号管理
+
+当前目标：手动 API：Needs login（由提供
+商计费）
+订阅账号池：已启用
+3 个订阅账号 · 2 个可用 · 0 个正在检查
+百分比表示已用额度；? 表示尚未检查。
+下一步：按 O 返回自动选择订阅账号。API
+请求由提供商计费。
+
+   1 Personal
+     Pro · 可用
+     短期   1% · 长期    ?
+     重置券 2
+   2 工作席位
+     Pro · 等待额度重置
+     短期 100% · 长期    ?
+     重置券 ?
+   3 Standby
+     Pro · 可用
+     短期   9% · 长期    ?
+     重置券 10
+
+API 账号 · 最终兜底已关闭
+    1 Needs login · available · 提供商
+计费

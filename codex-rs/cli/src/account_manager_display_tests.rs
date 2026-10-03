@@ -58,7 +58,7 @@ fn inventory() -> AccountManagerInventory {
 
 #[test]
 fn manager_inventory_aligns_numbers_and_unicode_labels() {
-    let output = render(&inventory(), /*columns*/ 100);
+    let output = render(&inventory(), /*columns*/ 100, Locale::English);
     let rows: Vec<_> = output.lines().filter(|line| line.contains("Pro")).collect();
     assert_eq!(
         rows.iter()
@@ -71,7 +71,7 @@ fn manager_inventory_aligns_numbers_and_unicode_labels() {
 
 #[test]
 fn manager_inventory_narrow_cards_wrap_without_losing_actions_or_unknown_quota() {
-    let output = render(&inventory(), /*columns*/ 40);
+    let output = render(&inventory(), /*columns*/ 40, Locale::English);
     assert!(
         output
             .lines()
@@ -86,7 +86,77 @@ fn manager_manual_api_has_no_active_subscription_marker() {
     inventory.api_selection = codex_login::ApiAccountSelection::Manual {
         profile_id: "synthetic-api".into(),
     };
-    let output = render(&inventory, /*columns*/ 100);
+    let output = render(&inventory, /*columns*/ 100, Locale::English);
     assert!(output.lines().all(|line| !line.starts_with('*')));
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn manager_chinese_wide_inventory_aligns_terminal_cells() {
+    let output = render(
+        &inventory(),
+        /*columns*/ 100,
+        Locale::SimplifiedChinese,
+    );
+    let rows: Vec<_> = output.lines().filter(|line| line.contains("Pro")).collect();
+    assert_eq!(
+        rows.iter()
+            .map(|row| UnicodeWidthStr::width(*row))
+            .collect::<Vec<_>>(),
+        vec![83; 3]
+    );
+    assert!(output.contains("Personal"));
+    assert!(output.contains("工作席位"));
+    assert!(output.contains("Standby"));
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn manager_chinese_narrow_manual_api_retains_account_data_and_has_no_subscription_marker() {
+    let mut inventory = inventory();
+    inventory.api_accounts = vec![codex_app_server::account_management::ApiAccountView {
+        account: codex_login::ApiAccount {
+            id: "api-{untouched}".into(),
+            label: "Needs login".into(),
+            base_url: "https://example.invalid/responses".into(),
+            model: "available".into(),
+            disabled: false,
+            context_window: 32768,
+            images: false,
+        },
+        has_key: true,
+    }];
+    inventory.api_selection = codex_login::ApiAccountSelection::Manual {
+        profile_id: "api-{untouched}".into(),
+    };
+    let output = render(&inventory, /*columns*/ 40, Locale::SimplifiedChinese);
+    assert!(output.lines().all(|line| !line.starts_with('*')));
+    assert!(
+        output
+            .lines()
+            .all(|line| UnicodeWidthStr::width(line) <= 40)
+    );
+    assert!(output.contains("Needs login"));
+    assert!(output.contains("available"));
+    assert!(output.contains("工作席位"));
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn manager_language_switch_updates_menu_and_guidance() {
+    let inventory = inventory();
+    let english = Locale::English;
+    let chinese = english.toggle();
+    assert_eq!(
+        render(&inventory, /*columns*/ 100, chinese.toggle()),
+        render(&inventory, /*columns*/ 100, english)
+    );
+    let output = format!(
+        "{}\n\n{}\n\n{}\n\n{}",
+        render(&inventory, /*columns*/ 100, english),
+        english.main_menu(),
+        render(&inventory, /*columns*/ 100, chinese),
+        chinese.main_menu()
+    );
     insta::assert_snapshot!(output);
 }

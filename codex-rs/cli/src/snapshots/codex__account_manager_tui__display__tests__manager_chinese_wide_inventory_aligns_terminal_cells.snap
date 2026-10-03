@@ -1,0 +1,18 @@
+---
+source: cli/src/account_manager_display_tests.rs
+expression: output
+---
+Codex 账号管理
+
+当前目标：自动选择订阅账号
+订阅账号池：已启用
+3 个订阅账号 · 2 个可用 · 0 个正在检查
+百分比表示已用额度；? 表示尚未检查。
+下一步：输入账号编号，查看额度、重置券和可用操作。
+
+     账号                       订阅       状态               短期    长期   重置券
+*  1 Personal                   Pro        可用                 1%       ?        2
+   2 工作席位                   Pro        等待额度重置       100%       ?        ?
+   3 Standby                    Pro        可用                 9%       ?       10
+
+API 账号 · 最终兜底已关闭

@@ -1,15 +1,17 @@
 //! Named choices and explicit previews for common account-pool settings.
 
+use super::Locale;
 use super::input::prompt;
 use codex_app_server::account_management::AccountManagerOperation as Operation;
 use serde_json::Value;
 
-pub(super) async fn choose(settings: &Value) -> anyhow::Result<Option<Operation>> {
+pub(super) async fn choose(settings: &Value, locale: Locale) -> anyhow::Result<Option<Operation>> {
+    println!("\n{}", locale.text("Settings\n1 Rotation strategy  2 Early switch percent  3 Return to preferred\n4 Standby warmup  5 Warmup interval  6 Wait for quota recovery\n7 Maximum waiting minutes  8 Automatic reset credits  9 Credit waiting threshold\nB Balanced preset  L Longer standby preset  J Advanced JSON  Enter returns."));
     println!(
-        "\nSettings\n1 Rotation strategy  2 Early switch percent  3 Return to preferred\n4 Standby warmup  5 Warmup interval  6 Wait for quota recovery\n7 Maximum waiting minutes  8 Automatic reset credits  9 Credit waiting threshold\nB Balanced preset  L Longer standby preset  J Advanced JSON  Enter returns."
+        "{}",
+        locale.text("Presets preserve your reset-credit and paid API choices.")
     );
-    println!("Presets preserve your reset-credit and paid API choices.");
-    let choice = prompt("Setting", "").await?.to_ascii_lowercase();
+    let choice = prompt(locale, "Setting", "").await?.to_ascii_lowercase();
     let values = match choice.as_str() {
         "" => return Ok(None),
         "b" | "l" => {
@@ -22,21 +24,26 @@ pub(super) async fn choose(settings: &Value) -> anyhow::Result<Option<Operation>
                 "resume_after_reset":true
             });
             println!(
-                "Preview: {}\nWarmup makes a small request to start eligible standby windows.",
-                serde_json::to_string_pretty(&values)?
+                "{}",
+                locale.format(
+                    "Preview: {}\nWarmup makes a small request to start eligible standby windows.",
+                    &[&serde_json::to_string_pretty(&values)?]
+                )
             );
-            if prompt("Type APPLY to save this preset", "").await? != "APPLY" {
+            if prompt(locale, "Type APPLY to save this preset", "").await? != "APPLY" {
                 return Ok(None);
             }
             values
         }
         "j" => {
             println!("{}", serde_json::to_string_pretty(settings)?);
-            let value = prompt("Settings JSON (Enter returns)", "").await?;
+            let value = prompt(locale, "Settings JSON (Enter returns)", "").await?;
             if value.is_empty() {
                 return Ok(None);
             }
-            serde_json::from_str(&value)?
+            serde_json::from_str(&value).map_err(|error| {
+                anyhow::anyhow!(locale.format("Invalid settings JSON: {}", &[&error.to_string()]))
+            })?
         }
         "1" | "8" => {
             let (key, options) = if choice == "1" {
@@ -54,9 +61,9 @@ pub(super) async fn choose(settings: &Value) -> anyhow::Result<Option<Operation>
                     ],
                 )
             } else {
-                println!(
+                println!("{}", locale.text(
                     "Automatic redemption consumes reset credits only when all eligible subscriptions are exhausted."
-                );
+                ));
                 (
                     "auto_reset_credits",
                     vec![
@@ -73,15 +80,15 @@ pub(super) async fn choose(settings: &Value) -> anyhow::Result<Option<Operation>
                     "{} {}: {}{}",
                     index + 1,
                     value,
-                    description,
+                    locale.text(description),
                     if settings[key].as_str() == Some(value) {
-                        " (current)"
+                        locale.text(" (current)")
                     } else {
                         ""
                     }
                 );
             }
-            let value = prompt("Choice number (Enter returns)", "").await?;
+            let value = prompt(locale, "Choice number (Enter returns)", "").await?;
             if value.is_empty() {
                 return Ok(None);
             }
@@ -90,10 +97,15 @@ pub(super) async fn choose(settings: &Value) -> anyhow::Result<Option<Operation>
                 .ok()
                 .and_then(|index| index.checked_sub(1))
                 .and_then(|index| options.get(index))
-                .ok_or_else(|| anyhow::anyhow!("Choose a listed number"))?;
+                .ok_or_else(|| anyhow::anyhow!(locale.text("Choose a listed number")))?;
             if choice == "8"
                 && selected.0 == "when_pool_exhausted"
-                && prompt("Type ENABLE to authorize automatic reset-credit use", "").await?
+                && prompt(
+                    locale,
+                    "Type ENABLE to authorize automatic reset-credit use",
+                    "",
+                )
+                .await?
                     != "ENABLE"
             {
                 return Ok(None);
@@ -117,19 +129,25 @@ pub(super) async fn choose(settings: &Value) -> anyhow::Result<Option<Operation>
                 _ => unreachable!(),
             };
             println!(
-                "{label}\nCurrent: {}\n1 Enabled  2 Disabled  Enter keeps current.",
-                if settings[key].as_bool().unwrap_or(true) {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }
+                "{}",
+                locale.format(
+                    "{}\nCurrent: {}\n1 Enabled  2 Disabled  Enter keeps current.",
+                    &[
+                        locale.text(label),
+                        if settings[key].as_bool().unwrap_or(true) {
+                            locale.text("Enabled")
+                        } else {
+                            locale.text("Disabled")
+                        }
+                    ]
+                )
             );
-            let value = prompt("Choice", "").await?;
+            let value = prompt(locale, "Choice", "").await?;
             let value = match value.as_str() {
                 "1" => true,
                 "2" => false,
                 "" => return Ok(None),
-                _ => anyhow::bail!("No change made. Choose 1 or 2."),
+                _ => anyhow::bail!(locale.text("No change made. Choose 1 or 2.")),
             };
             serde_json::json!({key:value})
         }
@@ -161,26 +179,36 @@ pub(super) async fn choose(settings: &Value) -> anyhow::Result<Option<Operation>
                 .get(key)
                 .filter(|value| !value.is_null())
                 .map_or_else(|| fallback.into(), Value::to_string);
-            let value = prompt(label, &current).await?;
+            let value = prompt(locale, label, &current).await?;
             if choice == "2" {
-                let value = value.parse::<f64>()?;
+                let value = value
+                    .parse::<f64>()
+                    .map_err(|_| anyhow::anyhow!(locale.text("Enter a number")))?;
                 anyhow::ensure!(
                     value.is_finite() && (0.0..=100.0).contains(&value),
-                    "Enter a percentage from 0 to 100"
+                    locale.text("Enter a percentage from 0 to 100")
                 );
                 serde_json::json!({key:value})
             } else {
-                let value = value.parse::<u32>()?;
+                let value = value
+                    .parse::<u32>()
+                    .map_err(|_| anyhow::anyhow!(locale.text("Enter a whole number")))?;
                 if choice == "5" {
-                    anyhow::ensure!(value >= 5, "Warmup interval must be at least 5 minutes");
+                    anyhow::ensure!(
+                        value >= 5,
+                        locale.text("Warmup interval must be at least 5 minutes")
+                    );
                 }
                 if choice == "7" {
-                    anyhow::ensure!(value <= 1440, "Maximum waiting time is 1440 minutes");
+                    anyhow::ensure!(
+                        value <= 1440,
+                        locale.text("Maximum waiting time is 1440 minutes")
+                    );
                 }
                 serde_json::json!({key:value})
             }
         }
-        _ => anyhow::bail!("Choose a listed setting or preset."),
+        _ => anyhow::bail!(locale.text("Choose a listed setting or preset.")),
     };
     Ok(Some(Operation::Settings { values }))
 }

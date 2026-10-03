@@ -1,34 +1,41 @@
 //! Readable terminal inventory shared by the standalone account manager.
 
+use super::Locale;
 use codex_app_server::account_management::AccountManagerInventory;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) fn render(inventory: &AccountManagerInventory, columns: usize) -> String {
-    let mut rows = vec!["Codex Accounts".to_string(), String::new()];
+pub(super) fn render(
+    inventory: &AccountManagerInventory,
+    columns: usize,
+    locale: Locale,
+) -> String {
+    let mut rows = vec![locale.text("Codex Accounts").to_string(), String::new()];
     let target = match &inventory.api_selection {
-        codex_login::ApiAccountSelection::Subscription => "Automatic subscriptions".into(),
+        codex_login::ApiAccountSelection::Subscription => {
+            locale.text("Automatic subscriptions").into()
+        }
         codex_login::ApiAccountSelection::Manual { profile_id } => inventory
             .api_accounts
             .iter()
             .find(|account| &account.account.id == profile_id)
             .map_or_else(
-                || "API target unavailable".into(),
+                || locale.text("API target unavailable").into(),
                 |account| {
-                    format!(
+                    locale.format(
                         "Manual API: {} (provider billed)",
-                        clean(&account.account.label)
+                        &[&clean(&account.account.label)],
                     )
                 },
             ),
     };
-    rows.push(format!("Target: {target}"));
-    rows.push(format!(
+    rows.push(locale.format("Target: {}", &[&target]));
+    rows.push(locale.format(
         "Subscription pool: {}",
-        if inventory.paused {
-            "Paused"
+        &[if inventory.paused {
+            locale.text("Paused")
         } else {
-            "Enabled"
-        }
+            locale.text("Enabled")
+        }],
     ));
     let ready = inventory
         .accounts
@@ -45,42 +52,62 @@ pub(super) fn render(inventory: &AccountManagerInventory, columns: usize) -> Str
                 .is_some_and(|refresh| refresh.in_progress)
         })
         .count();
-    rows.push(format!(
-        "{} subscription accounts · {ready} ready · {checking} checking",
-        inventory.accounts.len()
+    rows.push(locale.format(
+        "{} subscription accounts · {} ready · {} checking",
+        &[
+            &inventory.accounts.len().to_string(),
+            &ready.to_string(),
+            &checking.to_string(),
+        ],
     ));
-    rows.push("Quota percentages show USED allowance; ? means not checked.".into());
-    rows.push(format!(
-        "Next: {}",
-        if matches!(
-            inventory.api_selection,
-            codex_login::ApiAccountSelection::Manual { .. }
-        ) {
-            "O returns to automatic subscriptions. API requests are provider billed."
-        } else if inventory.paused {
-            "O resumes subscription selection."
-        } else if inventory.accounts.is_empty() {
-            "A adds your first subscription account."
-        } else if ready == 0
-            && inventory
-                .accounts
-                .iter()
-                .any(|account| account.login_state != "signedIn")
-        {
-            "Choose an account number, then L to finish login."
-        } else if ready == 0 {
-            "R checks for restored quota without spending a reset credit."
-        } else {
-            "Choose an account number to view quota, credits and actions."
-        }
-    ));
+    rows.push(
+        locale
+            .text("Quota percentages show USED allowance; ? means not checked.")
+            .into(),
+    );
+    rows.push(
+        locale.format(
+            "Next: {}",
+            &[locale.text(
+                if matches!(
+                    inventory.api_selection,
+                    codex_login::ApiAccountSelection::Manual { .. }
+                ) {
+                    "O returns to automatic subscriptions. API requests are provider billed."
+                } else if inventory.paused {
+                    "O resumes subscription selection."
+                } else if inventory.accounts.is_empty() {
+                    "A adds your first subscription account."
+                } else if ready == 0
+                    && inventory
+                        .accounts
+                        .iter()
+                        .any(|account| account.login_state != "signedIn")
+                {
+                    "Choose an account number, then L to finish login."
+                } else if ready == 0 {
+                    "R checks for restored quota without spending a reset credit."
+                } else {
+                    "Choose an account number to view quota, credits and actions."
+                },
+            )],
+        ),
+    );
     rows.push(String::new());
     let wide = columns >= 86;
     if wide {
-        rows.push(
-            "     ACCOUNT                    PLAN       AVAILABILITY     PRIMARY  WEEKLY   CREDITS"
-                .into(),
-        );
+        rows.push(match locale {
+            Locale::English => "     ACCOUNT                    PLAN       AVAILABILITY     PRIMARY  WEEKLY   CREDITS".into(),
+            Locale::SimplifiedChinese => format!(
+                "     {} {} {} {} {} {}",
+                cell(locale.text("ACCOUNT"), /*width*/ 26),
+                cell(locale.text("PLAN"), /*width*/ 10),
+                cell(locale.text("AVAILABILITY"), /*width*/ 15),
+                right_cell(locale.text("PRIMARY"), /*width*/ 7),
+                right_cell(locale.text("WEEKLY"), /*width*/ 7),
+                right_cell(locale.text("CREDITS"), /*width*/ 8)
+            ),
+        });
     }
     for (index, account) in inventory.accounts.iter().enumerate() {
         let marker = if matches!(
@@ -102,9 +129,18 @@ pub(super) fn render(inventory: &AccountManagerInventory, columns: usize) -> Str
             rows.push(format!(
                 "{marker}{:>3} {} {} {} {:>7} {:>7} {:>8}",
                 index + 1,
-                cell(&account.label, 26),
-                cell(account.plan.as_deref().unwrap_or("Unknown"), 10),
-                cell(availability(&account.availability), 15),
+                cell(&account.label, /*width*/ 26),
+                cell(
+                    account
+                        .plan
+                        .as_deref()
+                        .unwrap_or_else(|| locale.text("Unknown")),
+                    /*width*/ 10
+                ),
+                cell(
+                    availability(&account.availability, locale),
+                    /*width*/ 15
+                ),
                 primary,
                 weekly,
                 credits
@@ -117,31 +153,55 @@ pub(super) fn render(inventory: &AccountManagerInventory, columns: usize) -> Str
             ));
             rows.push(format!(
                 "     {} · {}",
-                clean(account.plan.as_deref().unwrap_or("Unknown plan")),
-                availability(&account.availability)
+                clean(
+                    account
+                        .plan
+                        .as_deref()
+                        .unwrap_or_else(|| locale.text("Unknown plan"))
+                ),
+                availability(&account.availability, locale)
             ));
-            rows.push(format!("     Primary {primary:>4} · Weekly {weekly:>4}"));
-            rows.push(format!("     Reset credits {credits}"));
+            rows.push(format!(
+                "     {}",
+                locale.format(
+                    "Primary {} · Weekly {}",
+                    &[&format!("{primary:>4}"), &format!("{weekly:>4}")]
+                )
+            ));
+            rows.push(format!(
+                "     {}",
+                locale.format("Reset credits {}", &[&credits])
+            ));
         }
         if let Some(refresh) = &account.refresh {
             if refresh.in_progress {
-                rows.push("     Checking fresh quota…".into());
+                rows.push(format!("     {}", locale.text("Checking fresh quota…")));
             } else if !refresh.succeeded {
-                rows.push(format!("     Check failed: {}", clean(&refresh.message)));
+                rows.push(format!(
+                    "     {}",
+                    locale.format(
+                        "Check failed: {}",
+                        &[&clean(locale.message(&refresh.message))]
+                    )
+                ));
             }
         }
     }
     if inventory.accounts.is_empty() {
-        rows.push("No subscription accounts. Choose Add to begin.".into());
+        rows.push(
+            locale
+                .text("No subscription accounts. Choose Add to begin.")
+                .into(),
+        );
     }
     rows.push(String::new());
-    rows.push(format!(
+    rows.push(locale.format(
         "API accounts · fallback {}",
-        if inventory.api_fallback.enabled {
-            "explicitly enabled"
+        &[if inventory.api_fallback.enabled {
+            locale.text("explicitly enabled")
         } else {
-            "off"
-        }
+            locale.text("off")
+        }],
     ));
     for (index, account) in inventory.api_accounts.iter().enumerate() {
         rows.push(format!(
@@ -150,11 +210,11 @@ pub(super) fn render(inventory: &AccountManagerInventory, columns: usize) -> Str
             clean(&account.account.label),
             clean(&account.account.model),
             if account.account.disabled {
-                "disabled"
+                locale.text("disabled")
             } else if !account.has_key {
-                "key missing"
+                locale.text("key missing")
             } else {
-                "provider billed"
+                locale.text("provider billed")
             }
         ));
     }
@@ -204,17 +264,24 @@ fn cell(value: &str, width: usize) -> String {
     )
 }
 
+fn right_cell(value: &str, width: usize) -> String {
+    format!(
+        "{}{value}",
+        " ".repeat(width.saturating_sub(UnicodeWidthStr::width(value)))
+    )
+}
+
 #[cfg(test)]
 #[path = "account_manager_display_tests.rs"]
 mod tests;
 
-pub(super) fn availability(value: &str) -> &str {
-    match value {
+pub(super) fn availability(value: &str, locale: Locale) -> &'static str {
+    locale.text(match value {
         "ready" => "Ready",
         "coolingDown" => "Waiting reset",
         "needsLogin" => "Needs login",
         "disabled" => "Disabled",
         "paused" => "Paused",
         _ => "Check status",
-    }
+    })
 }
