@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "manual_reset_credit_journal.rs"]
+mod manual_reset_credit_journal;
+
 const RATE_LIMIT_RESET_REQUEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 10);
 const RATE_LIMIT_RESET_DETAILS_REQUEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
 #[cfg(debug_assertions)]
