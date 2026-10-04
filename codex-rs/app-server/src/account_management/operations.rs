@@ -25,6 +25,19 @@ impl AccountManager {
         context.ensure_current().await?;
         let mut data = serde_json::Value::Null;
         let message = match operation {
+            AccountManagerOperation::ResetJournalArchive {
+                file_name,
+                expected_digest,
+                acknowledge_unconfirmed,
+            } => {
+                reset_journal::archive(
+                    &self.config.codex_home,
+                    &file_name,
+                    &expected_digest,
+                    acknowledge_unconfirmed,
+                )?;
+                "Unconfirmed legacy reset record archived. No credit was used and quota was not changed.".into()
+            }
             AccountManagerOperation::DecisionSave {
                 config,
                 credential,

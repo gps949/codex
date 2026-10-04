@@ -92,6 +92,7 @@ fn empty_inventory() -> FrozenAccountInventory {
     FrozenAccountInventory::from_inventory(AccountManagerInventory {
         primary_login: None,
         decision_advisor: None,
+        reset_journals: vec![],
         host_now: 1_700_000_000,
         paused: false,
         active_profile_id: None,

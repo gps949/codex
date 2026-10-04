@@ -47,6 +47,7 @@ fn inventory() -> AccountManagerInventory {
     .collect();
     AccountManagerInventory {
         decision_advisor: None,
+        reset_journals: vec![],
         primary_login: None,
         host_now: 1800000000,
         paused: false,

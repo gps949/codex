@@ -120,6 +120,11 @@ impl AccountManager {
             host_now: Utc::now().timestamp(),
             primary_login: Some(self.primary_login_view()),
             decision_advisor: self.decision_advisor_view().await.ok(),
+            reset_journals: reset_journal::inspect(&self.config.codex_home).unwrap_or_else(|_| vec![ResetJournalView {
+                file_name: String::new(), digest: String::new(), profile_id: None, attempted_at: None,
+                legacy: false, archive_available: false,
+                message: "Reset records could not be inspected. Other account management remains available.".into(),
+            }]),
             paused,
             active_profile_id: (!paused)
                 .then_some(state.active_profile_id)

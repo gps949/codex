@@ -13,6 +13,8 @@ mod preferences;
 mod primary;
 mod profile_identity;
 mod quota;
+mod reset_journal;
+pub use reset_journal::ResetJournalView;
 mod warmup;
 pub use preferences::ManagerLanguage;
 pub use preferences::ManagerPreferences;
@@ -69,6 +71,7 @@ pub struct AccountManagerInventory {
     pub host_now: i64,
     pub primary_login: Option<PrimaryLoginView>,
     pub decision_advisor: Option<DecisionAdvisorView>,
+    pub reset_journals: Vec<ResetJournalView>,
     pub paused: bool,
     pub active_profile_id: Option<String>,
     pub accounts: Vec<ManagedAccountView>,
@@ -160,6 +163,11 @@ pub struct LoginProgress {
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AccountManagerOperation {
+    ResetJournalArchive {
+        file_name: String,
+        expected_digest: String,
+        acknowledge_unconfirmed: bool,
+    },
     DecisionSave {
         config: codex_config::DecisionAdvisorConfigToml,
         credential: DecisionAdvisorCredentialAction,

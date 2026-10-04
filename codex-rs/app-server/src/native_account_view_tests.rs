@@ -484,6 +484,7 @@ fn incomplete_quota_refresh_keeps_window_ages_separate_from_the_last_check_and_c
         host_now: NOW,
         primary_login: None,
         decision_advisor: None,
+        reset_journals: vec![],
         paused: false,
         active_profile_id: None,
         accounts: vec![ManagedAccountView {

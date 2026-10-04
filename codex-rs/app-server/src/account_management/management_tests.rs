@@ -2,6 +2,68 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn legacy_reset_review_archives_only_the_inspected_operation() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    let manager = AccountManager::new(config);
+    let name = format!(".rate-limit-reset-credit-{}.json", "a".repeat(40));
+    let bytes = br#"{"profileId":"synthetic-profile","resetKey":123,"quotaEpoch":null,"attemptedAt":1,"requestId":"synthetic-request"}"#;
+    std::fs::write(home.path().join(&name), bytes)?;
+    let inventory = manager.inventory().await?;
+    let record = &inventory.reset_journals[0];
+    assert!(record.archive_available);
+    let result = manager
+        .execute(AccountManagerOperation::ResetJournalArchive {
+            file_name: record.file_name.clone(),
+            expected_digest: record.digest.clone(),
+            acknowledge_unconfirmed: true,
+        })
+        .await?;
+    assert!(result.message.contains("archived"));
+    assert!(manager.inventory().await?.reset_journals.is_empty());
+    let directory = std::fs::read_dir(home.path().join(".reset-credit-journal-archive"))?
+        .next()
+        .expect("archive")?
+        .path();
+    assert_eq!(std::fs::read(directory.join(name))?, bytes);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unreadable_reset_inventory_does_not_block_account_management() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    for index in 0..129 {
+        std::fs::write(
+            home.path()
+                .join(format!(".rate-limit-reset-credit-{index:040x}.json")),
+            b"{interrupted",
+        )?;
+    }
+    let inventory = AccountManager::new(config).inventory().await?;
+    assert_eq!(
+        (
+            inventory.accounts.len(),
+            inventory.reset_journals.len(),
+            inventory.reset_journals[0].archive_available
+        ),
+        (0, 1, false)
+    );
+    assert!(
+        inventory.reset_journals[0]
+            .message
+            .contains("Other account management remains available")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn account_manager_removal_reports_committed_metadata_when_scheduler_cleanup_fails()
 -> anyhow::Result<()> {
     let home = tempfile::TempDir::new()?;
