@@ -1,0 +1,13 @@
+---
+source: app-server/src/native_account_view_tests.rs
+assertion_line: 145
+expression: render(question)
+---
+更换主登录账号？
+确认
+1. Alpha 中文
+ID: slot-1
+更换 Remote 身份，可能需要配对；推理选择不变。
+
+取消
+不会执行此操作

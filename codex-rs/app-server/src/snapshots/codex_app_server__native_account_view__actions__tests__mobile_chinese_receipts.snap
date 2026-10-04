@@ -1,0 +1,17 @@
+---
+source: app-server/src/native_account_actions_tests.rs
+assertion_line: 103
+expression: "format!(\"{known}\\n\\n{}\",\nrender(session.question(NativeAccountLanguage::Chinese)))"
+---
+操作结果
+继续
+已选择此账号，后续请求将使用它。
+
+关闭
+
+
+操作结果
+继续
+Account removed from the pool; some cleanup remains: Scheduler cleanup failed: test diagnostic
+
+关闭

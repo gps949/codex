@@ -1,0 +1,17 @@
+---
+source: app-server/src/native_account_view_tests.rs
+assertion_line: 208
+expression: "rendered.join(\"\\n\\n\")"
+---
+Account actions
+Edit / remove
+Add or replace its key in the host account manager first
+
+Back
+
+
+Account actions
+Edit / remove
+Enable this target before paid selection or fallback
+
+Back

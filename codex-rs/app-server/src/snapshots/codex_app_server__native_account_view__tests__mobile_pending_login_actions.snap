@@ -1,0 +1,13 @@
+---
+source: app-server/src/native_account_view_tests.rs
+assertion_line: 188
+expression: render(question)
+---
+Account actions
+Finish sign-in
+Complete browser verification before checking quota or credits
+
+More actions
+
+
+Back

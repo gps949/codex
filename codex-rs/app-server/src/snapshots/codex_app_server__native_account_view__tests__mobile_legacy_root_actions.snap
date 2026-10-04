@@ -1,0 +1,16 @@
+---
+source: app-server/src/native_account_view_tests.rs
+assertion_line: 220
+expression: render(question)
+---
+Edit account
+Disable
+Only affects inference eligibility, not host sign-in
+
+Clear custom name
+Show email when available
+
+Remove, keep credentials
+Remove pool membership; root sign-in is retained
+
+Back

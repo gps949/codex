@@ -1,0 +1,16 @@
+---
+source: app-server/src/native_account_actions_tests.rs
+assertion_line: 73
+expression: render(question)
+---
+Enable paid fallback?
+Confirm
+Conversation content goes to this provider; charges can apply and there is no hard spending cap.
+Paid use may start after subscription exhaustion and a 5-minute wait.
+1. Paid providerPaid providerPaid providerPaid providerPaid
+ID: api-captured-target
+URL: https://api.example.test/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Model: paid/modelpaid/modelpaid/modelpaid/modelpaid/modelpaid/modelpaid/modelpaid/modelpaid/modelpaid/m
+
+Cancel
+No change will be made

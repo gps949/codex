@@ -1,0 +1,36 @@
+---
+source: app-server/src/native_account_view_tests.rs
+assertion_line: 175
+expression: "format!(\"{}\\n\\n{}\", render(first), render(second))"
+---
+Pool settings
+Rotation strategy
+Currently fill first; confirm to use earliest reset
+
+Window warmup
+Currently on; confirm to turn off
+
+Resume after reset
+Currently on; confirm to turn off
+
+More settings
+
+
+Back
+
+
+Pool settings
+Reset wait budget
+Limit: 360 min · Active wait: 360 min
+Confirm to disable natural-reset waiting (0 min)
+
+Automatic reset credits
+Currently never; confirm to allow redemption after pool exhaustion
+
+Return to preferred
+Currently on; confirm to turn off
+
+Pool actions
+
+
+Back

@@ -1,0 +1,13 @@
+---
+source: app-server/src/native_account_view_tests.rs
+assertion_line: 50
+expression: "render(inventory.question(MenuPage::Usage(0), NativeAccountLanguage::English))"
+---
+Quota and identity
+API details
+provider/model-中文
+https://api.example.test/v1
+Key configured
+Provider charges apply; no subscription quota
+
+Back

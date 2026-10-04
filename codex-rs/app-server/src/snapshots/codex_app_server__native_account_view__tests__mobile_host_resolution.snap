@@ -1,0 +1,8 @@
+---
+source: app-server/src/native_account_view_tests.rs
+assertion_line: 160
+expression: "&host.description"
+---
+保存的来源: 主机受管身份
+由运行中的主机确认
+尚无运行中主机的近期确认

@@ -1,0 +1,15 @@
+---
+source: app-server/src/native_account_actions_tests.rs
+assertion_line: 115
+expression: "render(session.question(NativeAccountLanguage::English))"
+---
+Complete browser sign-in
+Check sign-in progress
+Waiting for browser verification
+https://example.test/verify
+Code: ABCD
+
+Cancel sign-in
+Cancel this sign-in. Unfinished new enrollment is removed; an existing account is kept.
+
+Back

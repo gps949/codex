@@ -1,0 +1,13 @@
+---
+source: app-server/src/native_account_view_tests.rs
+assertion_line: 29
+expression: render(question)
+---
+选择账号 · 1/1
+1. Alpha 中文
+当前 · 等待重置
+主额度 (5 小时): 10% 已用 · 2 天前
+次额度: 已过期 (100% 缓存) · 刚刚记录
+
+更多 / 翻页
+翻页、刷新本页或返回

@@ -1,0 +1,22 @@
+---
+source: app-server/src/native_account_view_tests.rs
+assertion_line: 39
+expression: render(question)
+---
+Quota and identity
+Primary quota
+Used (5h): 10% used
+2 d old
+
+Secondary quota
+Used: Stale (100% cached)
+Reset: 11-14 22:13 UTC
+just now
+
+Identity
+Business
+alpha@example.test
+ID: slot-1
+Reset credits (cached): 2
+
+Back
