@@ -451,6 +451,183 @@ async fn consume_revalidates_credit_scope_status_and_expiry_before_spending() ->
 }
 
 #[tokio::test]
+async fn consume_replays_the_original_credit_after_a_lost_response_and_restart() -> Result<()> {
+    for inventory_after_spending in ["redeemed", "missing", "expired"] {
+        let (home, server) = chatgpt_test_context().await?;
+        let primary_reset_at = chrono::Utc::now().timestamp() + 3600;
+        let spent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_spent = spent.clone();
+        Mock::given(method("GET"))
+            .and(path("/api/codex/rate-limit-reset-credits"))
+            .respond_with(move |_: &wiremock::Request| {
+                let spent = observed_spent.load(std::sync::atomic::Ordering::SeqCst);
+                let credits = if spent && inventory_after_spending == "missing" {
+                    vec![]
+                } else {
+                    vec![json!({
+                        "id": "credit-123", "reset_type": "codex_rate_limits",
+                        "status": if spent && inventory_after_spending == "redeemed" {
+                            "redeemed"
+                        } else { "available" },
+                        "granted_at": "2026-01-01T00:00:00Z",
+                        "expires_at": if spent && inventory_after_spending == "expired" {
+                            Some("2000-01-01T00:00:00Z")
+                        } else { None }
+                    })]
+                };
+                ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+                    "available_count": if spent { 0 } else { 1 }, "credits": credits
+                }))
+            })
+            .with_priority(/*p*/ 1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/codex/rate-limit-reset-credits/consume"))
+            .and(body_json(json!({
+                "redeem_request_id": "lost-response", "credit_id": "credit-123"
+            })))
+            .respond_with(move |_: &wiremock::Request| {
+                if spent.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    ResponseTemplate::new(/*s*/ 200)
+                        .set_body_json(json!({"code": "already_redeemed", "windows_reset": 0}))
+                } else {
+                    ResponseTemplate::new(/*s*/ 200)
+                        .set_delay(std::time::Duration::from_secs(/*secs*/ 1))
+                        .set_body_json(json!({"code": "reset", "windows_reset": 2}))
+                }
+            })
+            .expect(/*r*/ 2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+                "account_id": "account-123", "user_id": "user-123", "plan_type": "pro",
+                "rate_limit": {"allowed": true, "limit_reached": false,
+                    "primary_window": {"used_percent": 0, "limit_window_seconds": 18000,
+                        "reset_after_seconds": 3600, "reset_at": primary_reset_at},
+                    "secondary_window": {"used_percent": 0, "limit_window_seconds": 604800,
+                        "reset_after_seconds": 7200, "reset_at": chrono::Utc::now().timestamp() + 7200}}
+            }))).expect(/*r*/ 1).mount(&server).await;
+        let mut app = TestAppServer::builder()
+            .with_codex_home(home.path())
+            .without_auto_env()
+            .with_env_overrides(&[
+                ("OPENAI_API_KEY", None),
+                (RATE_LIMIT_RESET_REQUEST_TIMEOUT_ENV_VAR, Some("250")),
+            ])
+            .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+            .await?;
+        let id = send_consume_reset_credit(&mut app, "lost-response").await?;
+        assert_eq!(
+            read_error_response(&mut app, id).await?.error.message,
+            "rate limit reset consume timed out"
+        );
+        drop(app);
+
+        let mut app = initialized_app_server(home.path()).await?;
+        let id = app
+            .send_consume_account_rate_limit_reset_credit_request(
+                ConsumeAccountRateLimitResetCreditParams {
+                    idempotency_key: "lost-response".into(),
+                    credit_id: Some("credit-123".into()),
+                },
+            )
+            .await?;
+        assert_eq!(
+            timeout(
+                DEFAULT_READ_TIMEOUT,
+                app.read_response::<ConsumeAccountRateLimitResetCreditResponse>(id)
+            )
+            .await??,
+            ConsumeAccountRateLimitResetCreditResponse {
+                outcome: ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed
+            }
+        );
+        let quota_id = app.send_get_account_rate_limits_request().await?;
+        let quota = timeout(
+            DEFAULT_READ_TIMEOUT,
+            app.read_response::<GetAccountRateLimitsResponse>(quota_id),
+        )
+        .await??;
+        assert_eq!(
+            (quota.ordinary_usage_allowed, quota.rate_limits.primary),
+            (
+                Some(true),
+                Some(RateLimitWindow {
+                    used_percent: 0,
+                    window_duration_mins: Some(300),
+                    resets_at: Some(primary_reset_at)
+                })
+            )
+        );
+        assert_eq!(
+            consume_reset_credit(&mut app, "new-operation").await?,
+            ConsumeAccountRateLimitResetCreditResponse {
+                outcome: ConsumeAccountRateLimitResetCreditOutcome::NoCredit,
+            }
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn consume_rejects_a_known_key_with_a_changed_credit_or_owner() -> Result<()> {
+    let (home, server) = chatgpt_test_context().await?;
+    Mock::given(method("POST"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
+        .and(header("chatgpt-account-id", "account-123"))
+        .and(body_json(
+            json!({"redeem_request_id": "bound-operation", "credit_id": "credit-123"}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(/*s*/ 200)
+                .set_body_json(json!({"code": "reset", "windows_reset": 2})),
+        )
+        .expect(/*r*/ 1)
+        .mount(&server)
+        .await;
+    let mut app = initialized_app_server(home.path()).await?;
+    consume_reset_credit(&mut app, "bound-operation").await?;
+    Mock::given(method("GET")).and(path("/api/codex/rate-limit-reset-credits"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+            "available_count": 1, "credits": [{"id": "another-credit", "reset_type": "codex_rate_limits",
+                "status": "available", "granted_at": "2026-01-01T00:00:00Z", "expires_at": null}]
+        }))).with_priority(/*p*/ 1).mount(&server).await;
+    let changed_credit = app
+        .send_consume_account_rate_limit_reset_credit_request(
+            ConsumeAccountRateLimitResetCreditParams {
+                idempotency_key: "bound-operation".into(),
+                credit_id: Some("another-credit".into()),
+            },
+        )
+        .await?;
+    let error = read_error_response(&mut app, changed_credit).await?;
+    assert_eq!((error.error.code, error.error.message), (INVALID_REQUEST_ERROR_CODE,
+        "idempotencyKey is bound to a different account or credit; retry the original operation".into()));
+    drop(app);
+    for (account, user) in [
+        ("another-account", "user-123"),
+        ("account-123", "another-user"),
+    ] {
+        write_chatgpt_auth(
+            home.path(),
+            ChatGptAuthFixture::new("another-synthetic-token")
+                .account_id(account)
+                .chatgpt_user_id(user)
+                .plan_type("pro"),
+            AuthCredentialsStoreMode::File,
+        )?;
+        let mut app = initialized_app_server(home.path()).await?;
+        let changed_owner = send_consume_reset_credit(&mut app, "bound-operation").await?;
+        let error = read_error_response(&mut app, changed_owner).await?;
+        assert_eq!((error.error.code, error.error.message), (INVALID_REQUEST_ERROR_CODE,
+            "idempotencyKey is bound to a different account or credit; retry the original operation".into()));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn consume_without_a_credit_id_uses_earliest_expiry_and_a_stable_id_tie_breaker() -> Result<()>
 {
     for order in [[0, 1, 2, 3, 4], [4, 3, 2, 0, 1], [1, 0, 4, 3, 2]] {
@@ -498,6 +675,72 @@ async fn consume_without_a_credit_id_uses_earliest_expiry_and_a_stable_id_tie_br
             }
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn consume_rejects_oversized_request_bindings_before_spending() -> Result<()> {
+    let (home, server) = chatgpt_test_context().await?;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(/*s*/ 200)
+                .set_body_json(json!({"code": "reset", "windows_reset": 2})),
+        )
+        .expect(/*r*/ 0)
+        .mount(&server)
+        .await;
+    let mut app = initialized_app_server(home.path()).await?;
+    for params in [
+        ConsumeAccountRateLimitResetCreditParams {
+            idempotency_key: "x".repeat(129),
+            credit_id: None,
+        },
+        ConsumeAccountRateLimitResetCreditParams {
+            idempotency_key: "request".into(),
+            credit_id: Some("x".repeat(257)),
+        },
+    ] {
+        let id = app
+            .send_consume_account_rate_limit_reset_credit_request(params)
+            .await?;
+        assert_eq!(
+            read_error_response(&mut app, id).await?.error.code,
+            INVALID_REQUEST_ERROR_CODE
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn consume_refuses_to_post_when_the_binding_cannot_be_persisted() -> Result<()> {
+    let (home, server) = chatgpt_test_context().await?;
+    let journal_path = home.path().join(".manual-rate-limit-reset-credits.json");
+    Mock::given(method("GET")).and(path("/api/codex/rate-limit-reset-credits"))
+        .respond_with(move |_: &wiremock::Request| {
+            std::fs::create_dir(&journal_path).expect("block synthetic journal persistence");
+            ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+                "available_count": 1, "credits": [{"id": "credit-123", "reset_type": "codex_rate_limits",
+                    "status": "available", "granted_at": "2026-01-01T00:00:00Z", "expires_at": null}]
+            }))
+        }).with_priority(/*p*/ 1).mount(&server).await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(/*s*/ 200)
+                .set_body_json(json!({"code": "reset", "windows_reset": 2})),
+        )
+        .expect(/*r*/ 0)
+        .mount(&server)
+        .await;
+    let mut app = initialized_app_server(home.path()).await?;
+    let id = send_consume_reset_credit(&mut app, "persist-before-send").await?;
+    let error = read_error_response(&mut app, id).await?;
+    assert_eq!(
+        (error.error.code, error.error.message),
+        (
+            INTERNAL_ERROR_CODE,
+            "reset operation journal is unavailable; no credit was spent".into()
+        )
+    );
     Ok(())
 }
 
