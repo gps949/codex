@@ -73,6 +73,82 @@ async fn test_auth_manager(home: &Path) -> std::sync::Arc<AuthManager> {
     .await
 }
 
+#[tokio::test]
+async fn login_marker_retries_transient_credential_read_without_another_login() -> anyhow::Result<()>
+{
+    let home = TempDir::new()?;
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    let profile = store.allocate_profile(/*label*/ None, /*priority*/ 0)?;
+    let credentials = chatgpt_auth("synthetic-seat");
+    save_auth(
+        &profile.credential_home,
+        &credentials,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
+    store.complete_profile(&profile.id)?;
+    let outer = AuthManager::from_auth_for_testing(
+        crate::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
+    let runtime = AccountPoolRuntime::install(
+        outer,
+        test_auth_config(home.path().to_path_buf()),
+        /*include_existing_root_login*/ false,
+    )
+    .await?;
+    let pool = runtime.pool();
+    let manager = pool
+        .auth_managers()
+        .into_iter()
+        .find(|(id, _)| id == &profile.id)
+        .unwrap()
+        .1;
+    let version_path = profile.credential_home.join(".account-credentials-version");
+    let version = "synthetic-completed-login";
+    std::fs::write(profile.credential_home.join("auth.json"), "{")?;
+    std::fs::write(&version_path, version)?;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while manager.auth_cached().is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await?;
+    if let Ok(lease) = pool.identity_lease() {
+        let _ = pool.mark_authentication_unavailable(&lease, "temporary credential read failure");
+    }
+    // Restore only the credential file: the completed-login marker does not change.
+    save_auth(
+        &profile.credential_home,
+        &credentials,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            if manager.auth_cached().is_some()
+                && pool.snapshots().iter().any(|snapshot| {
+                    snapshot.profile.id == profile.id
+                        && snapshot.availability == AccountAvailability::Available
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await?;
+    assert_eq!(std::fs::read_to_string(version_path)?, version);
+    assert_eq!(
+        manager
+            .auth_cached()
+            .unwrap()
+            .get_chatgpt_user_id()
+            .as_deref(),
+        Some("synthetic-seat")
+    );
+    Ok(())
+}
+
 fn profile(name: &str, priority: u32) -> AccountProfile {
     AccountProfile::new(
         AccountProfileId::new(name).expect("valid profile id"),

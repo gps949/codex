@@ -495,6 +495,7 @@ fn spawn_auth_sync_task(
         let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut credential_versions = std::collections::HashMap::new();
+        let mut credential_retries = std::collections::HashMap::new();
         loop {
             tokio::select! {
                 result = changes.changed() => { if result.is_err() { break; } }
@@ -567,20 +568,43 @@ fn spawn_auth_sync_task(
                 if credential_versions.get(&profile_id) == Some(&version) {
                     continue;
                 }
-                credential_versions.insert(profile_id.clone(), version.clone());
+                if credential_retries
+                    .get(&profile_id)
+                    .is_some_and(|(failed_version, retry_at)| {
+                        failed_version == &version && tokio::time::Instant::now() < *retry_at
+                    })
+                {
+                    continue;
+                }
                 let _ = crate::refresh_profile_auth_from_disk(&pool, &profile_id, &manager).await;
                 // The marker is published only by a completed login, including
                 // keyring-backed logins. A previously loaded new token is still
                 // proof of repair even if this reload itself changes nothing.
-                if version.is_some()
-                    && let Some(auth) = manager.auth_cached().filter(CodexAuth::is_chatgpt_auth)
-                    && manager.refresh_failure_for_auth(&auth).is_none()
-                {
-                    let _ = pool.clear_authentication_unavailable(&profile_id);
+                if version.is_some() {
+                    if let Some(auth) = manager.auth_cached().filter(CodexAuth::is_chatgpt_auth)
+                        && manager.refresh_failure_for_auth(&auth).is_none()
+                    {
+                        let _ = pool.clear_authentication_unavailable(&profile_id);
+                    } else {
+                        // A completed-login marker is not acknowledged until its credentials
+                        // were actually loaded. Retry transient file/keyring failures without
+                        // requiring another login or hammering the store every polling tick.
+                        credential_retries.insert(
+                            profile_id.clone(),
+                            (
+                                version.clone(),
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                            ),
+                        );
+                        continue;
+                    }
                 }
+                credential_versions.insert(profile_id.clone(), version);
+                credential_retries.remove(&profile_id);
                 credentials_changed = true;
             }
             credential_versions.retain(|profile_id, _| enabled.contains_key(profile_id));
+            credential_retries.retain(|profile_id, _| enabled.contains_key(profile_id));
             if credentials_changed {
                 let _guard = lifecycle_lock.lock().await;
                 if !suspended.load(Ordering::Acquire)
