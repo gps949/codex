@@ -387,6 +387,59 @@ fn details_keep_full_email_and_unknown_independent_cache_ages() {
 }
 
 #[test]
+fn same_second_samples_remain_visible_and_later_seconds_stay_unknown() {
+    let mut data = inventory();
+    let now = data.now();
+    data.accounts[0].rate_limits = AccountRateLimits {
+        primary: Some(codex_login::AccountRateLimitWindow {
+            used_percent: 19.0,
+            resets_at: Some(now + chrono::Duration::hours(3)),
+            window_minutes: Some(300),
+        }),
+        observed_at: Some(now + chrono::Duration::milliseconds(900)),
+        ..Default::default()
+    };
+    let same_second = render(
+        &data,
+        AccountView::Pool,
+        AccountOutputOptions {
+            details: true,
+            ..options(AccountOutputFormat::Table)
+        },
+        /*columns*/ 120,
+    );
+    assert!(!same_second.contains("clock skew"));
+    assert!(!same_second.contains("future-dated"));
+    assert!(same_second.contains("19%"));
+    let json: serde_json::Value = serde_json::from_str(&render(
+        &data,
+        AccountView::Pool,
+        options(AccountOutputFormat::Json),
+        /*columns*/ 120,
+    ))
+    .unwrap();
+    assert_eq!(
+        json["accounts"][0]["rate_limits"]["observed_at"],
+        serde_json::json!("2026-01-01T12:00:00.900Z")
+    );
+    data.accounts[0].rate_limits.observed_at = Some(now + chrono::Duration::seconds(1));
+    let future = render(
+        &data,
+        AccountView::Pool,
+        AccountOutputOptions {
+            details: true,
+            ..options(AccountOutputFormat::Table)
+        },
+        /*columns*/ 120,
+    );
+    assert!(future.contains("clock skew"));
+    assert!(future.contains("future-dated"));
+    insta::assert_snapshot!(format!(
+        "Same second:\n{same_second}\nLater second:\n{future}"
+    ));
+}
+
+#[test]
 fn json_includes_all_profiles_and_only_nonsecret_metadata() {
     let mut data = inventory();
     data.suspended = true;

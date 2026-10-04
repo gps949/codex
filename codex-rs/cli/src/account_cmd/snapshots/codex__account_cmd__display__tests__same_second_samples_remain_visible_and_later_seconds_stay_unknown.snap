@@ -1,0 +1,39 @@
+---
+source: cli/src/account_cmd/display_tests.rs
+assertion_line: 430
+expression: "format!(\"Same second:\\n{same_second}\\nLater second:\\n{future}\")"
+---
+Same second:
+ACCOUNT   NOW  PLAN  PRIORITY  LOGIN   POOL      5H USED  SECONDARY USED  UPDATED
+Work Pro  *    Pro         10  stored  eligible      19%         unknown  <1m ago
+  Profile: acct-00000000000000000001-1
+  Email: alice@example.com
+  Primary (5h):
+    Last sample: 19% used
+    Updated: 2026-01-01 12:00 UTC (0m ago)
+    Reset: in 3:00
+  Secondary (duration unreported):
+    Last sample: unknown
+    Updated: unknown
+    Reset: unknown
+  Warmup: unknown
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; priority: lower is preferred; login validity not checked.
+
+Later second:
+ACCOUNT   NOW  PLAN  PRIORITY  LOGIN   POOL      5H USED  SECONDARY USED  UPDATED
+Work Pro  *    Pro         10  stored  eligible  unknown         unknown  clock skew
+  Profile: acct-00000000000000000001-1
+  Email: alice@example.com
+  Primary (5h):
+    Last sample: 19% used
+    Updated: 2026-01-01 12:00 UTC (clock skew)
+    Reset: in 3:00
+    Current usage: unknown; observation is future-dated.
+  Secondary (duration unreported):
+    Last sample: unknown
+    Updated: unknown
+    Reset: unknown
+  Warmup: unknown
+Cached status; UPDATED = oldest quota sample; retry = local.
+* current; priority: lower is preferred; login validity not checked.

@@ -278,7 +278,7 @@ fn details(row: &AccountRow, now: DateTime<Utc>) -> Vec<String> {
         ));
         if window.is_some_and(|window| window.resets_at.is_some_and(|at| at <= now)) {
             lines.push("    Current usage: unknown; reset passed, refresh needed.".into());
-        } else if observed.is_some_and(|at| at > now) {
+        } else if observed.is_some_and(|at| at.timestamp() > now.timestamp()) {
             lines.push("    Current usage: unknown; observation is future-dated.".into());
         }
     }
@@ -340,7 +340,7 @@ fn quota_cell(
     if window.resets_at.is_some_and(|at| at <= now) {
         return "stale".into();
     }
-    if observed.is_some_and(|at| at > now) {
+    if observed.is_some_and(|at| at.timestamp() > now.timestamp()) {
         return "unknown".into();
     }
     match window.used_percent {
@@ -393,7 +393,10 @@ fn updated(row: &AccountRow, now: DateTime<Utc>) -> String {
     .filter(|(window, _)| window.is_some())
     .map(|(_, at)| at)
     .collect::<Vec<_>>();
-    if times.iter().any(|at| at.is_some_and(|at| at > now)) {
+    if times
+        .iter()
+        .any(|at| at.is_some_and(|at| at.timestamp() > now.timestamp()))
+    {
         return "clock skew".into();
     }
     if times.iter().any(Option::is_none) {
