@@ -38,7 +38,7 @@ Start the dedicated account dashboard on the host:
 codex account manage
 ```
 
-It opens a paired browser page with subscription quota, availability, refresh results, account editing, login, reset credits, pool settings and separate API accounts. On a terminal-only host use `codex account manage --tui`. The manager remains available when the pool is empty or exhausted. For phone access and recovery steps, see the [account manager guide](ACCOUNT_MANAGER.md).
+It opens a paired browser page with subscription quota, availability, refresh results, account editing, login, reset credits, pool settings and separate API accounts. **Decision assistance** lets you choose either Jev or Clef in the interface; Cloudflare needs an Account ID and independent token. Press **D** in the terminal manager. On a terminal-only host use `codex account manage --tui`. The manager remains available when the pool is empty or exhausted. For phone access and recovery steps, see the [account manager guide](ACCOUNT_MANAGER.md).
 
 In a terminal, `codex account list` and `codex account status` use aligned tables or compact cards. Add `--details` for cache times and explanations, `--format json` for structured data, or `--format tsv` for tab-separated output. Piped auto output keeps the existing TSV format.
 
@@ -239,6 +239,6 @@ The macOS/Linux installer validates published SHA256 checksums, installs the hel
 
 Account profiles and credentials stay on the host under `CODEX_HOME`; credential storage follows the configured file/keyring mode. Keep that directory private. API-key provider configuration does not turn an API key into a subscription-pool profile.
 
-The [Jev/Clef decision-model research](DECISION_MODELS.md) explains potential tool-selection and reasoning-effort improvements, their cost, and what needs measurement. These models are not enabled in this release and do not replace account identity, quota, or scheduling rules.
+The [Jev/Clef decision-model research](DECISION_MODELS.md) explains potential tool-selection and reasoning-effort improvements, their cost, and what needs measurement. They default to off; choose one in the manager, with no simultaneous calls. They do not replace account identity, quota, or scheduling rules.
 
 Cross-workspace concurrent routing, automatic migration of old opaque compacted history, and real Personal/Business/mobile acceptance still need further work. Automated fixture coverage and release archive checks do not establish those real-account behaviors.

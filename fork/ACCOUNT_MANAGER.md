@@ -153,3 +153,11 @@ During ordinary user turns, the host checks a small rotating batch of subscripti
 Language choices made inside the WebUI or TUI are remembered in the host's nonsecret manager preferences, across random ports and restarts. English is the default; startup language options are session overrides. In the TUI, **H** opens host sign-in management and **W** shows per-account warmup evidence. Stored login availability and the most recent running host/Remote status are shown separately; an expired or ambiguous heartbeat is reported as unknown.
 
 Common browser actions are available directly from account rows or the open details page. **Use reset credit** preselects the eligible credit with the earliest reported expiry and opens its confirmation: normally two clicks from the account list to confirmed use. The confirmation names the exact account, scope and expiry; **Choose another credit** remains available. An earlier unconfirmed operation keeps its original credit and operation ID instead of silently selecting another credit. Credits with no reported expiry follow dated credits. Removing pool membership while keeping login and removing it with managed-login deletion are distinct actions; root login is retained for legacy-root entries.
+
+## Interrupted automatic resets
+
+If an old release left an interrupted automatic reset, the manager shows **Interrupted reset operations**. First refresh that account's quota and check its reset history. For an unbound legacy record, **Archive reviewed record** keeps a backup and abandons the old request; a later automatic reset may use another credit. Terminal users can choose **J** for the same review. This action neither restores quota nor spends a credit. New owner-bound pending operations reconcile only after confirmed quota recovery and cannot be discarded here.
+
+## Decision assistance
+
+Select **Choose decision service** in the browser or press **D** in the terminal manager. Enter a provider and independent token; Cloudflare additionally needs its Account ID. Saving sends no request. **Test connection** uses only a built-in example; enabled assistance sends search text and candidate descriptions to the independent service and may incur separate charges. See [setup details](DECISION_MODELS.md#set-up-jev--clef-in-the-manager).

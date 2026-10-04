@@ -4,6 +4,18 @@
 
 Research checked on 2026-10-03. No live Jev/Clef request, paid benchmark or real-account experiment was performed. ma.4 adds an experimental, default-off tool-search advisor. No live speed or subscription-quota savings have been established.
 
+## Set up Jev / Clef in the manager
+
+Run `codex account manage` and select **Choose decision service** under **Decision assistance**. In `codex account manage --tui`, press **D**. Choose Cloudflare Clef, enter your Workers AI Account ID and independent API token, select **Observe only** or **Enabled**, and save. The Clef-flash endpoint is built automatically. TypeSafe Jev uses its own token. Skill hints are a separate opt-in.
+
+Saving sends no service request. **Test connection** sends only a built-in synthetic example, does not save the draft, and may incur an independent service fee. A successful test confirms that request, not task speed or adoption by every running host.
+
+Tokens use separate, endpoint-bound credential storage: they never join the inference pool or appear in config.toml, responses, or browser storage. Changing the provider, service endpoint, or Cloudflare Account ID requires the matching token. Existing environment-variable configurations remain supported; a missing stored token never falls back to another source. Ephemeral credential storage does not survive restarts.
+
+Updated hosts read saved decision settings before subsequent tool searches and root skill suggestions. Existing requests continue, and older running hosts need an upgrade and one restart. Project/session overrides and managed network policy remain in effect. The panel reports saved settings and overrides; execution adoption remains unobserved unless independently confirmed.
+
+To stop assistance, select **Disabled**. Removing a saved token also disables assistance. Advanced options retain compatible custom endpoints, timeouts, and confidence thresholds.
+
 ## What could help
 
 Jev and Clef answer bounded questions using choices, scores and probabilities. They cannot replace the text generation, code editing or tool-argument generation performed by Codex's main model. TypeSafe explicitly distinguishes its coding-agent integration skill from replacing the coding agent's model. [TypeSafe explanation](https://docs.typesafe.ai/introduction/coding-agents)
