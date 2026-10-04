@@ -76,6 +76,47 @@ pub(crate) fn mobile_slash_command(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeMenuCommand {
+    Other,
+    SavedLanguage,
+    Language(crate::native_account_capabilities::NativeAccountLanguage),
+    Invalid,
+}
+
+/// Recognizes the native menu without treating its input as model steering.
+pub(crate) fn native_menu_command(
+    input: &[V2UserInput],
+    client_name: Option<&str>,
+) -> NativeMenuCommand {
+    if !is_chatgpt_remote_client(client_name) {
+        return NativeMenuCommand::Other;
+    }
+    let Some(text) = single_text_input(input) else {
+        return NativeMenuCommand::Other;
+    };
+    let mut words = text.split_whitespace();
+    if !words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("/account"))
+    {
+        return NativeMenuCommand::Other;
+    }
+    match words.next() {
+        None => NativeMenuCommand::SavedLanguage,
+        Some("manage") => match (words.next(), words.next()) {
+            (None, None) => NativeMenuCommand::SavedLanguage,
+            (Some(value), None) => {
+                crate::native_account_capabilities::NativeAccountLanguage::parse(value)
+                    .map(NativeMenuCommand::Language)
+                    .unwrap_or(NativeMenuCommand::Invalid)
+            }
+            _ => NativeMenuCommand::Invalid,
+        },
+        Some(_) => NativeMenuCommand::Other,
+    }
+}
+
 fn single_text_input(input: &[V2UserInput]) -> Option<&str> {
     match input {
         [V2UserInput::Text { text, .. }] => Some(text.as_str()),

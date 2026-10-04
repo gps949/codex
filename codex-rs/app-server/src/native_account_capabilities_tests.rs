@@ -25,8 +25,8 @@ fn diagnostic_uses_only_known_bounded_fields_and_records_connection_observations
     MCP Apps: Declared
     MIME types: text/x-dil;profile=mcp-app, text/html;profile=mcp-app
 
-    Open: /account manage [en|zh-CN]
-    Native menus show cached account data and do not change accounts or use credits.
+    Open: /account or /account manage [en|zh-CN]
+    Menu descriptions show account data. Changes and credit use require explicit confirmation.
     A response confirms the protocol round trip; mobile rendering still needs a device check.
     ");
 }

@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::mobile_account_bridge::MobileSlashCommand;
+use crate::mobile_account_bridge::NativeMenuCommand;
+use crate::mobile_account_bridge::native_menu_command;
 use crate::mobile_account_status as view;
 use crate::native_account_capabilities::NativeAccountLanguage;
 use crate::request_processors::config_processor::ConfigRequestProcessor;
@@ -11,6 +13,7 @@ use crate::request_serialization::RequestSerializationQueues;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigEdit;
 use codex_app_server_protocol::MergeStrategy;
+use codex_app_server_protocol::TurnSteerParams;
 
 pub(crate) enum MobileSlashTurnResult {
     Unrecognized,
@@ -38,6 +41,20 @@ impl AccountRequestProcessor {
             .await
             .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
         super::super::thread_input::ensure_direct_input_allowed(thread.as_ref()).await?;
+        if let Some(language) = self.native_menu_language(&params.input, client_name)? {
+            self.native_account_manager
+                .start(
+                    &request_id,
+                    Arc::clone(&thread),
+                    &params,
+                    Arc::clone(&self.native_account_inventory),
+                    Arc::clone(&self.outgoing),
+                    language,
+                )
+                .await
+                .map_err(invalid_request)?;
+            return Ok(MobileSlashTurnResult::NativeHandled);
+        }
         // A synthetic turn must not replace the mobile client's real running turn.
         if thread.active_turn_environment_selections().await.is_some()
             || matches!(
@@ -55,24 +72,10 @@ impl AccountRequestProcessor {
             let mut words = text.split_whitespace();
             words.next();
             let verb = words.next().unwrap_or_default();
-            if matches!(verb, "manage" | "capabilities") {
+            if verb == "capabilities" {
                 let language = NativeAccountLanguage::parse(words.next().unwrap_or_default())
                     .filter(|_| words.next().is_none())
                     .ok_or_else(|| invalid_request(format!("Usage: /account {verb} [en|zh-CN]")))?;
-                if verb == "manage" {
-                    self.native_account_manager
-                        .start(
-                            &request_id,
-                            Arc::clone(&thread),
-                            &params,
-                            Arc::clone(&self.native_account_inventory),
-                            Arc::clone(&self.outgoing),
-                            language,
-                        )
-                        .await
-                        .map_err(invalid_request)?;
-                    return Ok(MobileSlashTurnResult::NativeHandled);
-                }
                 let text = self
                     .native_account_manager
                     .describe(request_id.connection_id, language);
@@ -98,6 +101,63 @@ impl AccountRequestProcessor {
         Ok(MobileSlashTurnResult::Completed(Box::new(
             complete_mobile_slash_turn(&self.outgoing, &request_id, thread_id, &params, text).await,
         )))
+    }
+
+    fn native_menu_language(
+        &self,
+        input: &[V2UserInput],
+        client_name: Option<&str>,
+    ) -> Result<Option<NativeAccountLanguage>, JSONRPCErrorError> {
+        match native_menu_command(input, client_name) {
+            NativeMenuCommand::Other => Ok(None),
+            NativeMenuCommand::Invalid => Err(invalid_request("Usage: /account manage [en|zh-CN]")),
+            NativeMenuCommand::Language(language) => Ok(Some(language)),
+            NativeMenuCommand::SavedLanguage => Ok(Some(
+                match self.native_account_inventory.preferences().language {
+                    crate::account_management::ManagerLanguage::English => {
+                        NativeAccountLanguage::English
+                    }
+                    crate::account_management::ManagerLanguage::SimplifiedChinese => {
+                        NativeAccountLanguage::Chinese
+                    }
+                },
+            )),
+        }
+    }
+
+    /// Returns true after responding itself; ordinary steering must not then be submitted.
+    pub(crate) async fn try_handle_mobile_menu_steer(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: &TurnSteerParams,
+        client_name: Option<&str>,
+    ) -> Result<bool, JSONRPCErrorError> {
+        let Some(language) = self.native_menu_language(&params.input, client_name)? else {
+            return Ok(false);
+        };
+        let thread_id = ThreadId::from_string(&params.thread_id)
+            .map_err(|error| invalid_request(format!("invalid thread id: {error}")))?;
+        let thread = self
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+            .map_err(|_| invalid_request("Thread not found"))?;
+        super::super::thread_input::ensure_direct_input_allowed(thread.as_ref()).await?;
+        self.native_account_manager
+            .start_attached(
+                request_id,
+                thread,
+                crate::native_account_manager::NativeMenuTarget {
+                    thread_id,
+                    turn_id: params.expected_turn_id.clone(),
+                },
+                Arc::clone(&self.native_account_inventory),
+                Arc::clone(&self.outgoing),
+                language,
+            )
+            .await
+            .map_err(invalid_request)?;
+        Ok(true)
     }
 
     async fn mobile_account_reply(

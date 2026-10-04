@@ -3,7 +3,7 @@
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::MCP_APP_UI_EXTENSION_ID;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum NativeAccountLanguage {
     #[default]
     English,
@@ -135,8 +135,8 @@ impl NativeAccountCapabilities {
             language.text("In-app controls", "App 内控件"),
             language.text("Client", "客户端"), self.client_name, self.client_version,
             language.text("Native questions", "原生问答"),
-            language.text("Open: /account manage [en|zh-CN]", "打开：/account manage [en|zh-CN]"),
-            language.text("Native menus show cached account data and do not change accounts or use credits.", "原生菜单显示缓存账号数据，不会修改账号或使用重置券。"),
+            language.text("Open: /account or /account manage [en|zh-CN]", "打开：/account 或 /account manage [en|zh-CN]"),
+            language.text("Menu descriptions show account data. Changes and credit use require explicit confirmation.", "菜单说明显示账号信息；修改与用券需要明确确认。"),
             language.text("A response confirms the protocol round trip; mobile rendering still needs a device check.", "收到回复可确认协议往返成功；手机界面效果仍需实机确认。"))
     }
 }

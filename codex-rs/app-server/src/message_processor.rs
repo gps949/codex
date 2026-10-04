@@ -1779,6 +1779,17 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::TurnSteer { params, .. } => {
+                if self
+                    .account_processor
+                    .try_handle_mobile_menu_steer(
+                        &request_id,
+                        &params,
+                        app_server_client_name.as_deref(),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
                 if let Ok(thread_id) = ThreadId::from_string(&params.thread_id) {
                     self.account_processor
                         .native_account_manager

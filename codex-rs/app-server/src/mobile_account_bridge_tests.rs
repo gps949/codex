@@ -582,3 +582,41 @@ fn pool_warning_summary_is_bounded_without_inventing_missing_quota_windows() {
     assert!(!summary.contains("Secondary"));
     insta::assert_snapshot!(summary, @"Pool · 2/5 ready | Long account nam… · Current · Ready · Primary 25% used | Long account nam… · Ready · Primary 25% used | +3 more · /account"); // codespell:ignore nam
 }
+
+#[test]
+fn native_menu_only_captures_exact_remote_commands_and_optional_language() {
+    use super::NativeMenuCommand;
+    use crate::native_account_capabilities::NativeAccountLanguage;
+    let input = |text: &str| {
+        vec![codex_app_server_protocol::UserInput::Text {
+            text: text.into(),
+            text_elements: vec![],
+        }]
+    };
+    assert_eq!(
+        super::native_menu_command(&input("/account"), Some("codex_chatgpt_ios_remote")),
+        NativeMenuCommand::SavedLanguage
+    );
+    assert_eq!(
+        super::native_menu_command(
+            &input("/account manage zh-CN"),
+            Some("codex_chatgpt_ios_remote")
+        ),
+        NativeMenuCommand::Language(NativeAccountLanguage::Chinese)
+    );
+    assert_eq!(
+        super::native_menu_command(
+            &input("/account manage zh-CN extra"),
+            Some("codex_chatgpt_ios_remote")
+        ),
+        NativeMenuCommand::Invalid
+    );
+    assert_eq!(
+        super::native_menu_command(&input("/account list"), Some("codex_chatgpt_ios_remote")),
+        NativeMenuCommand::Other
+    );
+    assert_eq!(
+        super::native_menu_command(&input("/account manage"), Some("codex-tui")),
+        NativeMenuCommand::Other
+    );
+}

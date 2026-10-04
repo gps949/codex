@@ -214,6 +214,12 @@ impl ThreadScopedOutgoingMessageSender {
     }
 
     /// Finish native controls before forwarding a real turn, including queued work.
+    pub(crate) fn cancel_attached_account_menu(&self, turn_id: &str) {
+        self.outgoing
+            .native_account_manager
+            .cancel_attached_turn(self.thread_id, turn_id);
+    }
+
     pub(crate) async fn prepare_real_turn(&self) -> tokio::sync::OwnedMutexGuard<()> {
         let ordering = self
             .outgoing
