@@ -270,3 +270,7 @@ impl PrimaryLoginTransitionObserver for PrimaryRemoteObserver {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "primary_login_remote_tests.rs"]
+mod tests;

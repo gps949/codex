@@ -1,6 +1,43 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+#[tokio::test]
+async fn account_manager_removal_reports_committed_metadata_when_scheduler_cleanup_fails()
+-> anyhow::Result<()> {
+    let home = tempfile::TempDir::new()?;
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    let profile = store.allocate_profile(/*label*/ None, /*priority*/ 10)?;
+    save_profile_email(&profile, "retained@example.com")?;
+    store.complete_profile(&profile.id)?;
+    let config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    std::fs::write(
+        home.path().join("account-runtime-state.json"),
+        "invalid scheduler data",
+    )?;
+    let result = AccountManager::new(config)
+        .execute(AccountManagerOperation::Remove {
+            profile_id: profile.id.to_string(),
+            keep_credentials: true,
+        })
+        .await?;
+    assert!(store.load_profile_records()?.is_empty());
+    assert!(profile.credential_home.join("auth.json").exists());
+    assert_eq!(
+        (
+            result.data["removedFromPool"].as_bool(),
+            result.data["credentialsRemoved"].as_bool(),
+            result.data["credentialsRetained"].as_bool()
+        ),
+        (Some(true), Some(false), Some(true))
+    );
+    assert!(result.message.contains("some cleanup remains"));
+    assert_eq!(result.data["cleanupWarnings"].as_array().unwrap().len(), 1);
+    Ok(())
+}
+
 fn save_profile_email(profile: &codex_login::AccountProfile, email: &str) -> anyhow::Result<()> {
     use base64::Engine as _;
     let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
@@ -377,6 +414,143 @@ async fn account_manager_primary_operations_keep_inference_and_credentials_indep
     assert_eq!(
         std::fs::read(profile.credential_home.join("auth.json"))?,
         auth_before
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_manager_inventory_and_quota_use_persisted_seats_under_external_auth()
+-> anyhow::Result<()> {
+    use base64::Engine as _;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+    let home = tempfile::TempDir::new()?;
+    let server = MockServer::start().await;
+    app_test_support::mount_workspace_routing(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/config/bundle"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    let mut profiles = Vec::new();
+    let external_claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::json!({
+            "email": "unrelated@example.com", "https://api.openai.com/auth": {
+                "chatgpt_user_id": "unrelated-user", "chatgpt_account_id": "unrelated-workspace"
+            }
+        })
+        .to_string(),
+    );
+    for user in ["first", "second"] {
+        let profile = store.allocate_profile(/*label*/ None, /*priority*/ 10)?;
+        let stored_claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "email": format!("{user}@example.com"), "https://api.openai.com/auth": {
+                    "chatgpt_user_id": user, "chatgpt_account_id": "shared-workspace"
+                }
+            })
+            .to_string(),
+        );
+        std::fs::write(
+            profile.credential_home.join("auth.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "tokens": {"id_token": format!("e30.{stored_claims}.sig"),
+                    "access_token": format!("access-{user}"), "refresh_token": format!("refresh-{user}"),
+                    "account_id": "shared-workspace"}, "last_refresh": "2099-01-01T00:00:00Z"
+            }))?,
+        )?;
+        store.complete_profile(&profile.id)?;
+        codex_login::auth::login_with_chatgpt_auth_tokens(
+            &profile.credential_home,
+            &format!("e30.{external_claims}.sig"),
+            "unrelated-workspace",
+            Some("pro"),
+        )?;
+        Mock::given(method("GET"))
+            .and(path("/backend-api/wham/usage"))
+            .and(header("Authorization", format!("Bearer access-{user}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "account_id": "shared-workspace", "user_id": user, "plan_type": "business",
+                "rate_limit": {"allowed": true, "limit_reached": false, "primary_window": {
+                    "used_percent": 12, "limit_window_seconds": 18000,
+                    "reset_at": chrono::Utc::now().timestamp() + 7200, "reset_after_seconds": 7200
+                }}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        profiles.push(profile);
+    }
+    let mut config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    config.chatgpt_base_url = format!("{}/backend-api", server.uri());
+    let manager = AccountManager::new(config);
+    let inventory = manager.inventory().await?;
+    let mut names: Vec<_> = inventory
+        .accounts
+        .into_iter()
+        .map(|account| (account.label, account.email, account.login_state))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            (
+                "first@example.com".into(),
+                Some("first@example.com".into()),
+                "signedIn".into()
+            ),
+            (
+                "second@example.com".into(),
+                Some("second@example.com".into()),
+                "signedIn".into()
+            )
+        ]
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 0);
+    manager
+        .execute(AccountManagerOperation::Refresh {
+            profile_ids: Some(
+                profiles
+                    .iter()
+                    .map(|profile| profile.id.to_string())
+                    .collect(),
+            ),
+        })
+        .await?;
+    let refreshed = manager.inventory().await?;
+    assert!(
+        refreshed.accounts.iter().all(|account| account
+            .refresh
+            .as_ref()
+            .is_some_and(|refresh| refresh.succeeded)),
+        "Refresh outcomes: {:?}; request paths: {:?}",
+        refreshed
+            .accounts
+            .iter()
+            .map(|account| (&account.label, &account.refresh))
+            .collect::<Vec<_>>(),
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| request.url.path().to_string())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !home.path().join("account-runtime-state.json").exists()
+            || codex_login::AccountRuntimeStateStore::new(home.path().to_path_buf())
+                .load()?
+                .active_profile_id
+                .is_none()
     );
     Ok(())
 }
