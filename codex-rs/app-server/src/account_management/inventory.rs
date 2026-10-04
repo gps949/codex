@@ -26,13 +26,9 @@ impl AccountManager {
             let auth = if record.state == AccountProfileState::PendingLogin {
                 None
             } else {
-                AuthManager::shared_from_auth_config(
-                    auth_config,
-                    /*enable_codex_api_key_env*/ false,
-                )
-                .await
-                .ok()
-                .and_then(|manager| manager.auth_cached())
+                AuthManager::shared_managed_profile_from_auth_config(auth_config)
+                    .await
+                    .auth_cached()
             };
             let email = auth
                 .as_ref()
@@ -108,6 +104,9 @@ impl AccountManager {
                     .as_ref()
                     .and_then(|refresh| refresh.reset_credit_count),
                 refresh,
+                warmup: saved
+                    .and_then(|saved| saved.window_warmup.as_ref())
+                    .map(|observation| warmup::view(observation, &limits, Utc::now())),
             });
         }
         accounts.sort_by_key(|account| (account.priority, account.profile_id.clone()));

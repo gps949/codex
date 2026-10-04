@@ -1984,21 +1984,10 @@ async fn load_pool_profile_identity(
 ) -> (Option<codex_protocol::account::PlanType>, Option<String>) {
     let mut auth_config = config.auth_config();
     auth_config.codex_home = snapshot.profile.credential_home.clone();
-    match AuthManager::shared_from_auth_config(auth_config, /*enable_codex_api_key_env*/ false)
-        .await
-    {
-        Ok(manager) => match manager.auth().await {
-            Some(auth) => (auth.account_plan_type(), auth.get_account_email()),
-            None => (None, None),
-        },
-        Err(err) => {
-            tracing::warn!(
-                profile_id = %snapshot.profile.id,
-                %err,
-                "failed to read account-pool profile identity"
-            );
-            (None, None)
-        }
+    let manager = AuthManager::shared_managed_profile_from_auth_config(auth_config).await;
+    match manager.auth_cached() {
+        Some(auth) => (auth.account_plan_type(), auth.get_account_email()),
+        None => (None, None),
     }
 }
 

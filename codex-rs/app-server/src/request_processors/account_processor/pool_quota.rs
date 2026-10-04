@@ -69,12 +69,8 @@ pub(super) async fn refresh(
                     if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
                         return None;
                     }
-                    let manager = AuthManager::shared_from_auth_config(
-                        auth_config,
-                        /*enable_codex_api_key_env*/ false,
-                    )
-                    .await
-                    .ok()?;
+                    let manager =
+                        AuthManager::shared_managed_profile_from_auth_config(auth_config).await;
                     let (auth, factory) = manager.auth_with_http_client_factory().await?;
                     if !auth.is_chatgpt_auth() {
                         return None;

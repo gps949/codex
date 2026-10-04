@@ -3,10 +3,18 @@
 mod api_accounts;
 mod inventory;
 mod login;
+mod operation_context;
 mod operations;
+pub(crate) use operation_context::AccountOperationContext;
+mod preferences;
 mod primary;
+mod profile_identity;
 mod quota;
+mod warmup;
+pub use preferences::ManagerLanguage;
+pub use preferences::ManagerPreferences;
 pub use primary::PrimaryLoginView;
+pub use primary::PrimaryRuntimeView;
 mod web;
 
 pub use web::AccountManagerWebOptions;
@@ -92,6 +100,17 @@ pub struct ManagedAccountView {
     pub rate_limits: ManagedRateLimits,
     pub reset_credit_count: Option<u64>,
     pub refresh: Option<RefreshStatus>,
+    pub warmup: Option<ManagedWarmupView>,
+}
+
+/// Latest persisted attempt and current window evidence for administration screens.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedWarmupView {
+    pub status: String,
+    pub attempted_at: i64,
+    pub retry_after: Option<i64>,
+    pub consecutive_failures: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -134,7 +153,7 @@ pub struct LoginProgress {
 }
 
 /// Explicit operations; refresh, probe and redemption intentionally have separate names.
-#[derive(Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AccountManagerOperation {
     PrimaryUse {

@@ -28,11 +28,7 @@ impl AccountManager {
         );
         let mut auth_config = self.config.auth_config();
         auth_config.codex_home = record.profile.credential_home.clone();
-        let manager = AuthManager::shared_from_auth_config(
-            auth_config,
-            /*enable_codex_api_key_env*/ false,
-        )
-        .await?;
+        let manager = AuthManager::shared_managed_profile_from_auth_config(auth_config).await;
         let (auth, factory) = manager
             .auth_with_http_client_factory()
             .await
@@ -311,6 +307,7 @@ impl AccountManager {
         id: &str,
         credit_id: &str,
         key: &str,
+        context: &AccountOperationContext,
     ) -> anyhow::Result<String> {
         anyhow::ensure!(
             !credit_id.is_empty() && credit_id.len() <= 256 && !key.is_empty() && key.len() <= 128,
@@ -392,6 +389,7 @@ impl AccountManager {
             .map(|pool| store.capture_quota_probe(pool, &profile.profile.id, &auth))
             .transpose()?
             .flatten();
+        context.ensure_current().await?;
         let result = tokio::time::timeout_at(
             deadline,
             client.consume_rate_limit_reset_credit_by_id(key, credit_id),

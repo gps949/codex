@@ -13,6 +13,16 @@ impl AccountManager {
         self: &Arc<Self>,
         operation: AccountManagerOperation,
     ) -> anyhow::Result<AccountManagerResult> {
+        self.execute_with_context(operation, &AccountOperationContext::Independent)
+            .await
+    }
+
+    pub(crate) async fn execute_with_context(
+        self: &Arc<Self>,
+        operation: AccountManagerOperation,
+        context: &AccountOperationContext,
+    ) -> anyhow::Result<AccountManagerResult> {
+        context.ensure_current().await?;
         let mut data = serde_json::Value::Null;
         let message = match operation {
             AccountManagerOperation::PrimaryUse { profile_id } => {
@@ -22,11 +32,12 @@ impl AccountManager {
                         &codex_login::AccountProfileId::new(profile_id)?,
                     )
                     .await?;
-                "Host sign-in selected. Inference selection is unchanged. Remote Control may need reconnection or pairing for the new owner.".into()
+                "Host sign-in selected. Running hosts apply this automatically and continue Remote if it was enabled. Devices may need pairing for the new owner.".into()
             }
             AccountManagerOperation::PrimaryRoot => {
                 codex_login::PrimaryLoginStore::new(self.config.codex_home.to_path_buf())
-                    .use_root()?;
+                    .select_root(&self.config.auth_config())
+                    .await?;
                 "Host sign-in now uses root login. Inference selection is unchanged.".into()
             }
             AccountManagerOperation::PrimaryLogout => {
@@ -103,23 +114,52 @@ impl AccountManager {
                 let record = self.profile(&profile_id)?;
                 // Reject selected host identities before any token revocation.
                 self.store().remove_profile_metadata(&record.profile.id)?;
-                if !keep_credentials && record.profile.id.as_str() != "legacy-root" {
+                let mut warnings = Vec::new();
+                if let Err(error) =
+                    AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf())
+                        .remove_profile(&record.profile.id)
+                {
+                    warnings.push(format!("Scheduler cleanup failed: {error}"));
+                }
+                let remove_credentials =
+                    !keep_credentials && record.profile.id.as_str() != "legacy-root";
+                let mut credentials_removed = false;
+                if remove_credentials {
                     let mut auth_config = self.config.auth_config();
                     auth_config.codex_home = record.profile.credential_home.clone();
-                    let manager = AuthManager::shared_from_auth_config(
-                        auth_config,
-                        /*enable_codex_api_key_env*/ false,
+                    let manager =
+                        AuthManager::shared_managed_profile_from_auth_config(auth_config).await;
+                    // Revocation is best effort. Always report local cleanup separately.
+                    match manager.logout_with_revoke().await {
+                        Ok(_) => match self.store().purge_managed_credentials(&record.profile.id) {
+                            Ok(_) => credentials_removed = true,
+                            Err(error) => {
+                                warnings.push(format!("Credential folder cleanup failed: {error}"))
+                            }
+                        },
+                        Err(error) => {
+                            warnings.push(format!("Local credential removal failed: {error}"))
+                        }
+                    }
+                }
+                data = serde_json::json!({
+                    "removedFromPool": true,
+                    "credentialsRemoved": credentials_removed,
+                    "credentialsRetained": !remove_credentials,
+                    "cleanupWarnings": warnings,
+                });
+                if warnings.is_empty() {
+                    if remove_credentials {
+                        "Account removed from the pool and local credentials deleted. Server token revocation was attempted.".into()
+                    } else {
+                        "Account removed from the pool. Credentials were retained.".into()
+                    }
+                } else {
+                    format!(
+                        "Account removed from the pool; some cleanup remains: {}",
+                        warnings.join("; ")
                     )
-                    .await?;
-                    // Revocation is best effort; successful local removal does not prove server revocation.
-                    manager.logout_with_revoke().await?;
                 }
-                AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf())
-                    .remove_profile(&record.profile.id)?;
-                if !keep_credentials && record.profile.id.as_str() != "legacy-root" {
-                    self.store().purge_managed_credentials(&record.profile.id)?;
-                }
-                "Account removed from this pool. Server revocation was attempted when local credentials were removed.".into()
             }
             AccountManagerOperation::Login { profile_id, label } => {
                 data = serde_json::to_value(self.start_login(profile_id, label).await?)?;
@@ -142,7 +182,7 @@ impl AccountManager {
                 credit_id,
                 idempotency_key,
             } => {
-                self.redeem_credit(&profile_id, &credit_id, &idempotency_key)
+                self.redeem_credit(&profile_id, &credit_id, &idempotency_key, context)
                     .await?
             }
             AccountManagerOperation::Settings { values } => {
