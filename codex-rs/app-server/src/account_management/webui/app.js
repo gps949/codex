@@ -18,6 +18,9 @@
     redemption: null,
     sessionToken: "",
     stopped: false,
+    preferencesLoaded: false,
+    preferenceSaving: false,
+    languageDirty: false,
   };
   const resetStorageKey = "codex.accountManager.resetOperation";
   const sessionStorageKey = "codex.accountManager.sessionToken";
@@ -41,6 +44,16 @@
   }
   function button(text, action, className = "") {
     const node = element("button", t(text), className);
+    const glyph = {
+      "Use reset credit": "↺",
+      "Refresh quota": "↻",
+      "Details & actions": "⋯",
+    }[text];
+    if (glyph) {
+      const icon = element("span", glyph, "action-icon");
+      icon.setAttribute("aria-hidden", "true");
+      node.prepend(icon);
+    }
     node.type = "button";
     node.addEventListener("click", action);
     return node;
@@ -125,6 +138,9 @@
     });
     for (const node of document.querySelectorAll("[data-time-kind]"))
       updateTime(node);
+    window.AccountManagerPrimary.updateRuntime(state.inventory?.primaryLogin, {
+      hostNow: Math.floor(guidance.now()),
+    });
   }
   function quota(account, name) {
     const limits = account.rateLimits || {};
@@ -172,17 +188,6 @@
     const observed = Object.hasOwn(limits, `${name}ObservedAt`)
       ? limits[`${name}ObservedAt`]
       : limits.observedAt;
-    if (known)
-      node.append(
-        element(
-          "small",
-          t("Remaining {percent}% (cached)", {
-            percent: Number(
-              Math.max(0, Math.min(100, 100 - window.usedPercent)).toFixed(1),
-            ),
-          }),
-        ),
-      );
     node.append(
       known
         ? timedText("age", observed)
@@ -350,6 +355,19 @@
           throw new Error(
             t("The account manager returned an invalid inventory."),
           );
+        if (!state.preferencesLoaded) {
+          state.preferencesLoaded = true;
+          try {
+            messages.applyPreferences(await request("/api/preferences"));
+            $("language").value = messages.language();
+          } catch (error) {
+            if (error.status === 401) throw error;
+            $("language-notice").textContent = t(
+              "Saved language could not be read. Account management is still available.",
+            );
+            $("language-notice").hidden = false;
+          }
+        }
         guidance.setClock(inventory.hostNow);
         const inventoryKey = JSON.stringify({ ...inventory, hostNow: null });
         const changed = inventoryKey !== state.inventoryKey;
@@ -358,6 +376,7 @@
         state.lastRead = Date.now();
         state.readFailed = false;
         setPaired(true);
+        if (state.languageDirty) saveLanguage().catch(() => {});
         $("global-error").hidden = true;
         if (changed) renderInventory();
         else updateClocks();
@@ -403,7 +422,7 @@
     window.AccountManagerPrimary.render(
       inventory.primaryLogin,
       confirmOperation,
-      { busy: state.busy },
+      { busy: state.busy, hostNow: state.inventory.hostNow },
     );
     const selected = accountById(inventory.activeProfileId);
     const manualApi = inventory.apiSelection?.type === "manual";
@@ -430,7 +449,7 @@
           })
         : t("Select a subscription account or an enabled API account.")
       : selected && !inventory.paused
-        ? `${guidance.status(selected.availability)}. ${guidance.reason(selected)}`
+        ? guidance.status(selected.availability)
         : t("Select an available account or repair its login below.");
     $("paused-notice").hidden = !inventory.paused;
     updateClocks();
@@ -453,6 +472,7 @@
         ),
       },
     );
+    $("automatic").hidden = !manualApi && !inventory.paused;
     $("automatic").disabled = state.busy;
     $("refresh-all").disabled =
       state.busy ||
@@ -629,8 +649,21 @@
         "aria-label",
         `${next.label}: ${account.label}`,
       );
-      buttons.append(primaryAction, manage);
-      if (account.availability !== "ready")
+      const reset = button(
+        "Use reset credit",
+        () => loadCredits(account.profileId),
+        "quick-reset",
+      );
+      reset.dataset.focusKey = `${account.profileId}:credit`;
+      reset.disabled = state.busy || !contactAllowed(account);
+      reset.setAttribute(
+        "aria-label",
+        t("Use reset credit for {label}", { label: account.label }),
+      );
+      if (!contactAllowed(account))
+        reset.title = t("Enable this account and complete login first.");
+      buttons.append(primaryAction, reset, manage);
+      if (!["ready", "coolingDown"].includes(account.availability))
         actions.append(
           element("small", guidance.reason(account), "action-reason"),
         );
@@ -739,7 +772,8 @@
     else if (dialogTask)
       $("dialog-submit").textContent = $("dialog-submit").dataset.label;
     $("action-form").setAttribute("aria-busy", String(busy));
-    $("language").disabled = busy || $("action-dialog").open;
+    $("language").disabled =
+      busy || state.preferenceSaving || $("action-dialog").open;
     $("stop-manager").disabled = busy;
     scheduleRead();
     for (const id of [
@@ -933,7 +967,7 @@
         const hostSignIn = button("Use for host sign-in", () =>
           confirmOperation(
             "Use for host sign-in",
-            "Use this exact subscription profile for Remote Control. Inference selection is unchanged. The phone must use the matching account and workspace; reconnect or pair again after a host owner change.",
+            "Use this exact subscription profile for host sign-in. An enabled Remote service reconnects; a disabled service stays disabled. The phone must use the matching account and workspace and may need pairing again. Inference selection is unchanged.",
             { type: "primaryUse", profileId: id },
             [
               ["Account", account.label],
@@ -961,19 +995,7 @@
         refresh.disabled = !contactAllowed(account);
         const recovery = element("div", "", "actions");
         recovery.append(refresh, retry, credits);
-        body.append(
-          disclosure(
-            "Recovery options",
-            element(
-              "p",
-              t(
-                "Refresh checks quota. Retry allows one real request after clearing the local cooldown. A reset credit is consumed only after a separate confirmation.",
-              ),
-              "muted",
-            ),
-            recovery,
-          ),
-        );
+        body.append(element("h3", t("Recovery options")), recovery);
         actions.append(
           button(
             account.loginState === "signedIn"
@@ -996,10 +1018,28 @@
               ],
             ),
           ),
-          button("Remove account", () => showRemove(id), "danger"),
+          button("Remove from pool", () => showRemove(id, true), "danger"),
+          ...(id === "legacy-root"
+            ? []
+            : [
+                button(
+                  "Remove and delete sign-in",
+                  () => showRemove(id, false),
+                  "danger",
+                ),
+              ]),
         );
         body.append(
-          disclosure("Advanced controls", actions),
+          disclosure(
+            "Standby warmup",
+            window.AccountManagerWarmup.render(account, {
+              element,
+              definitions,
+              date,
+            }),
+          ),
+          element("h3", t("Account actions")),
+          actions,
           disclosure(
             "Technical details",
             definitions([
@@ -1055,38 +1095,19 @@
       "Save account",
     );
   }
-  function showRemove(id) {
+  function showRemove(id, keepCredentials) {
     const account = accountById(id);
-    let keep;
-    openDialog(
-      t("Remove account"),
-      "Remove this profile from the pool. It will no longer be available for selection or automatic failover.",
-      (body) => {
-        body.append(
-          definitions([
-            ["Account", account.label],
-            ["Profile ID", id],
-          ]),
-        );
-        keep = field(
-          body,
-          "keepCredentials",
-          "Keep local sign-in credentials",
-          "checkbox",
-          true,
-          id === "legacy-root"
-            ? "Root sign-in credentials are always retained. Only this pool entry is removed."
-            : "Checked: stored credentials stay on this computer. Unchecked: local credentials are deleted and server revocation is attempted; the server may retain a session.",
-        );
-        if (id === "legacy-root") keep.disabled = true;
-      },
-      () =>
-        perform({
-          type: "remove",
-          profileId: id,
-          keepCredentials: keep.checked,
-        }),
-      "Remove account",
+    confirmOperation(
+      keepCredentials ? "Remove from pool" : "Remove and delete sign-in",
+      keepCredentials
+        ? "Remove this account from the pool. Keep its saved sign-in credentials."
+        : "Remove this account and delete its saved sign-in credentials. Adding it again requires login. Server revocation is attempted.",
+      { type: "remove", profileId: id, keepCredentials },
+      [
+        ["Account", account.label],
+        ["Email", account.email],
+        ["Profile ID", id],
+      ],
     );
   }
   function showLogin(id = null) {
@@ -1199,7 +1220,26 @@
       const readAt = Math.floor(guidance.now());
       await synchronizeInventory();
       setBusy(false);
-      showCredits(id, result.data, readAt);
+      const pending = state.redemption;
+      const eligible = result.data.credits
+        .filter(
+          (credit) =>
+            creditValidity(credit).eligible && contactAllowed(accountById(id)),
+        )
+        .sort((left, right) => {
+          const expiry = (credit) =>
+            credit.expiresAt ? Date.parse(credit.expiresAt) : Infinity;
+          return (
+            expiry(left) - expiry(right) ||
+            String(left.id).localeCompare(String(right.id))
+          );
+        });
+      const selected = pending
+        ? pending.profileId === id &&
+          eligible.find((credit) => credit.id === pending.creditId)
+        : eligible[0];
+      if (selected) showRedemption(id, selected, { data: result.data, readAt });
+      else showCredits(id, result.data, readAt);
       notice(result.message || "Reset credits loaded.");
     } catch (error) {
       setBusy(false);
@@ -1207,12 +1247,11 @@
     }
   }
   function showCredits(id, data, readAt) {
-    let selected = null;
     const account = accountById(id);
     const pending = state.redemption;
     openDialog(
       t("Choose a reset credit"),
-      "Reading credits does not consume them. Choose one available credit, then review a separate confirmation.",
+      "Choose a credit. Nothing is consumed until you confirm.",
       (body) => {
         body.append(
           definitions([
@@ -1254,26 +1293,26 @@
             ),
           );
         for (const credit of data.credits) {
-          const choice = element("label", "", "credit-choice");
-          const input = element("input");
-          input.type = "radio";
-          input.name = "credit";
-          input.value = credit.id;
-          input.required = true;
-          input.disabled =
+          const choice = element("div", "", "credit-choice");
+          const select = button(
+            "Use this credit",
+            () => showRedemption(id, credit),
+            "primary",
+          );
+          select.disabled =
             !contactAllowed(account) ||
             !creditValidity(credit).eligible ||
-            (pending &&
-              (pending.profileId !== id || pending.creditId !== credit.id));
-          input.addEventListener("change", () => {
-            selected = credit;
-            $("dialog-submit").disabled = false;
-            delete $("dialog-submit").dataset.unavailable;
-          });
+            Boolean(
+              pending &&
+                (pending.profileId !== id || pending.creditId !== credit.id),
+            );
+          if (select.disabled) select.dataset.unavailable = "true";
           const content = element("div");
           content.append(element("strong", credit.title || t("Reset credit")));
           if (credit.description)
-            content.append(element("p", credit.description));
+            content.append(
+              disclosure("About this credit", element("p", credit.description)),
+            );
           content.append(
             definitions([
               ["Validity", creditValidity(credit).label],
@@ -1282,7 +1321,7 @@
             ]),
             disclosure("Technical details", definitions(creditDetails(credit))),
           );
-          choice.append(input, content);
+          choice.append(content, select);
           body.append(choice);
         }
         $("dialog-submit").disabled = true;
@@ -1318,12 +1357,6 @@
             ),
           );
       },
-      () => {
-        if (!selected)
-          throw new Error(t("Select an available credit before continuing."));
-        showRedemption(id, selected);
-      },
-      "Review selected credit",
     );
   }
   function saveRedemption(value) {
@@ -1340,17 +1373,18 @@
     state.redemption = value;
     $("pending-reset").hidden = !value;
   }
-  function showRedemption(id, credit) {
-    let acknowledged;
+  function showRedemption(id, credit, context = null) {
     openDialog(
       t("Use this reset credit"),
-      "This consumes a limited credit for the exact profile shown below. Its backend scope is shown without assuming which quota windows it resets.",
+      "Confirm to consume one credit for this account.",
       (body) => {
         body.append(
           definitions([
             ["Account", accountById(id)?.label],
             ["Profile ID", id],
-            ...creditDetails(credit),
+            ["Credit", credit.title || t("Reset credit")],
+            ["Expires", date(credit.expiresAt)],
+            ["Scope", guidance.creditScope(credit.resetType)],
           ]),
         );
         if (state.redemption)
@@ -1359,19 +1393,32 @@
               ["Existing operation ID", state.redemption.idempotencyKey],
             ]),
           );
-        acknowledged = field(
-          body,
-          "acknowledge",
-          "I confirm the account, credit, and scope. Consume this credit.",
-          "checkbox",
-          false,
-          "An uncertain result keeps the same operation ID; this page never repeats redemption automatically.",
-          { required: true },
+        if (context && !state.redemption) {
+          body.append(
+            element(
+              "p",
+              t("Earliest-expiring available credit selected."),
+              "muted",
+            ),
+          );
+          if (
+            context.data.credits.filter((item) => creditValidity(item).eligible)
+              .length > 1
+          )
+            body.append(
+              button(
+                "Choose another credit",
+                () => showCredits(id, context.data, context.readAt),
+                "link",
+              ),
+            );
+        }
+        body.append(
+          disclosure("Technical details", definitions(creditDetails(credit))),
         );
       },
       async () => {
         if (
-          !acknowledged.checked ||
           !creditValidity(credit).eligible ||
           !contactAllowed(accountById(id))
         )
@@ -1723,7 +1770,7 @@
           previewChanges();
         });
         previewChanges();
-        body.append(preview, disclosure("Advanced settings", grid));
+        body.append(preview, grid);
       },
       () => {
         const values = {};
@@ -1752,14 +1799,9 @@
           showResult("No changes selected.");
           return;
         }
-        confirmOperation(
-          "Save pool settings",
-          "Apply these choices to this shared account pool. Automatic reset credits may spend a credit when enabled; standby warmup uses small generating requests.",
-          { type: "settings", values },
-          review,
-        );
+        return perform({ type: "settings", values });
       },
-      "Review settings",
+      "Save pool settings",
     );
   }
   function apiValues(account) {
@@ -2257,7 +2299,7 @@
   });
   $("action-dialog").addEventListener("close", () => {
     dialogTask = null;
-    $("language").disabled = state.busy;
+    $("language").disabled = state.busy || state.preferenceSaving;
     const replacement =
       returnFocusKey &&
       [...$("app").querySelectorAll("[data-focus-key]")].find(
@@ -2338,9 +2380,35 @@
     if (!document.hidden && state.paired) readInventory().catch(() => {});
   });
   $("language").value = messages.language();
+  async function saveLanguage() {
+    if (!state.paired || state.stopped || state.preferenceSaving) return;
+    state.preferenceSaving = true;
+    $("language").disabled = true;
+    try {
+      await request("/api/preferences", { language: messages.language() });
+      state.languageDirty = false;
+      $("language-notice").textContent = t(
+        "Language saved for browser and terminal managers.",
+      );
+      $("language-notice").hidden = false;
+    } catch (error) {
+      $("language-notice").textContent = t(
+        "Language changed for this tab; saving failed: {message}",
+        { message: error.message },
+      );
+      $("language-notice").hidden = false;
+      // Retry only after a fresh user selection, rather than on every metadata poll.
+      state.languageDirty = false;
+    } finally {
+      state.preferenceSaving = false;
+      $("language").disabled =
+        state.stopped || state.busy || $("action-dialog").open;
+    }
+  }
   $("language").addEventListener("change", () => {
     if ($("action-dialog").open || state.busy) return;
     messages.setLanguage($("language").value);
+    state.languageDirty = true;
     if (state.stopped) {
       $("connection-state").textContent = t("Manager stopped");
       notice("Account manager stopped. You can close this tab.");
@@ -2349,6 +2417,7 @@
     setPaired(state.paired);
     if (state.inventory) renderInventory();
     notice(state.paired ? "Account status is ready." : "Pairing required");
+    saveLanguage().catch(() => {});
   });
   async function pair(token) {
     history.replaceState(null, "", location.pathname + location.search);

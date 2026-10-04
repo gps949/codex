@@ -900,3 +900,45 @@ fieldset {
 .api-disclosure > summary {
   font-size: 1.06rem;
 }
+
+.action-icon {
+  display: inline-block;
+  margin-inline-end: 0.4em;
+  font-size: 1.2em;
+  line-height: 1;
+}
+.row-actions .quick-reset {
+  min-height: 36px;
+  padding: 5px 10px;
+  color: var(--accent);
+  background: var(--soft);
+  border-color: transparent;
+}
+.credit-choice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+.credit-choice > button {
+  align-self: center;
+  white-space: nowrap;
+}
+#dialog-body > h3 {
+  margin-top: 20px;
+}
+footer details > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+@media (max-width: 640px) {
+  .credit-choice {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .credit-choice > button {
+    width: 100%;
+    min-height: 44px;
+  }
+  .row-actions .quick-reset {
+    min-height: 44px;
+  }
+}
