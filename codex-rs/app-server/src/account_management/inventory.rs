@@ -119,6 +119,7 @@ impl AccountManager {
         Ok(AccountManagerInventory {
             host_now: Utc::now().timestamp(),
             primary_login: Some(self.primary_login_view()),
+            decision_advisor: self.decision_advisor_view().await.ok(),
             paused,
             active_profile_id: (!paused)
                 .then_some(state.active_profile_id)

@@ -1,6 +1,9 @@
 //! Account administration independent of whether the execution pool can currently run.
 
 mod api_accounts;
+mod decision_advisor;
+pub use decision_advisor::DecisionAdvisorCredentialAction;
+pub use decision_advisor::DecisionAdvisorView;
 mod inventory;
 mod login;
 mod operation_context;
@@ -65,6 +68,7 @@ impl AccountManager {
 pub struct AccountManagerInventory {
     pub host_now: i64,
     pub primary_login: Option<PrimaryLoginView>,
+    pub decision_advisor: Option<DecisionAdvisorView>,
     pub paused: bool,
     pub active_profile_id: Option<String>,
     pub accounts: Vec<ManagedAccountView>,
@@ -156,6 +160,20 @@ pub struct LoginProgress {
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AccountManagerOperation {
+    DecisionSave {
+        config: codex_config::DecisionAdvisorConfigToml,
+        credential: DecisionAdvisorCredentialAction,
+        consent: bool,
+        #[serde(default, rename = "expectedVersion")]
+        expected_version: Option<String>,
+    },
+    DecisionProbe {
+        config: codex_config::DecisionAdvisorConfigToml,
+        credential: DecisionAdvisorCredentialAction,
+        consent: bool,
+        #[serde(default, rename = "expectedVersion")]
+        expected_version: Option<String>,
+    },
     PrimaryUse {
         #[serde(rename = "profileId")]
         profile_id: String,

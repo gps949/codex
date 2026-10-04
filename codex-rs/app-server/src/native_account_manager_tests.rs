@@ -91,6 +91,7 @@ async fn setup() -> (
 fn empty_inventory() -> FrozenAccountInventory {
     FrozenAccountInventory::from_inventory(AccountManagerInventory {
         primary_login: None,
+        decision_advisor: None,
         host_now: 1_700_000_000,
         paused: false,
         active_profile_id: None,

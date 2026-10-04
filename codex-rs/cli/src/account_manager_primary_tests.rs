@@ -4,6 +4,7 @@ use codex_app_server::account_management::PrimaryLoginView;
 #[test]
 fn manager_host_page_distinguishes_saved_credentials_from_remote_connection() {
     let inventory = AccountManagerInventory {
+        decision_advisor: None,
         host_now: 1800000000,
         primary_login: Some(PrimaryLoginView {
             source: "profile".into(),

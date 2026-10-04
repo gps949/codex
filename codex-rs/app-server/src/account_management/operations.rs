@@ -25,6 +25,26 @@ impl AccountManager {
         context.ensure_current().await?;
         let mut data = serde_json::Value::Null;
         let message = match operation {
+            AccountManagerOperation::DecisionSave {
+                config,
+                credential,
+                consent,
+                expected_version,
+            } => {
+                return self
+                    .save_decision_advisor(config, credential, consent, expected_version)
+                    .await;
+            }
+            AccountManagerOperation::DecisionProbe {
+                config,
+                credential,
+                consent,
+                expected_version,
+            } => {
+                return self
+                    .probe_decision_advisor(config, credential, consent, expected_version)
+                    .await;
+            }
             AccountManagerOperation::PrimaryUse { profile_id } => {
                 codex_login::PrimaryLoginStore::new(self.config.codex_home.to_path_buf())
                     .select_profile(
