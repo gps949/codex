@@ -51,10 +51,9 @@ impl PrimaryLoginPolicyLoader for HostLoginPolicyLoader {
                     .as_ref()
                     .is_some_and(|requirement| !requirement.value)
                 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "Remote Control is disabled by the selected host account's requirements",
-                    ));
+                    return Err(
+                        codex_login::PrimaryLoginPolicyFailure::RemoteDisabled.into_io_error()
+                    );
                 }
                 let auth = source_manager.auth_cached().ok_or_else(|| {
                     io::Error::new(
@@ -63,10 +62,8 @@ impl PrimaryLoginPolicyLoader for HostLoginPolicyLoader {
                     )
                 })?;
                 if !config.auth_config().allows_auth(&auth) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "Selected host authentication is disallowed by current requirements",
-                    ));
+                    return Err(codex_login::PrimaryLoginPolicyFailure::AuthenticationDenied
+                        .into_io_error());
                 }
                 Ok(())
             }

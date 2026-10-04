@@ -139,6 +139,7 @@ mod notification_media;
 mod otel_reloader;
 mod outgoing_message;
 mod plugin_config_reload;
+mod primary_login_remote;
 mod request_processors;
 mod request_serialization;
 mod server_request_error;
@@ -901,6 +902,17 @@ pub async fn run_main_with_transport_options(
         remote_control_startup_mode,
     )
     .await?;
+    let _primary_remote_observer = primary_login_runtime.as_ref().map(|runtime| {
+        let observer = crate::primary_login_remote::PrimaryRemoteObserver::new(
+            host_config_manager.host_login_auth_config(&config),
+            runtime,
+            remote_control_handle.clone(),
+            config.chatgpt_base_url.clone(),
+        );
+        let trait_observer: Arc<dyn codex_login::PrimaryLoginTransitionObserver> = observer;
+        runtime.set_transition_observer(Arc::downgrade(&trait_observer));
+        trait_observer
+    });
     if no_local_transport
         && remote_control_startup_mode == RemoteControlStartupMode::ResolvePersisted
     {
