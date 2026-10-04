@@ -10,6 +10,7 @@
     <script src="/guidance.js" defer></script>
     <script src="/lifecycle.js" defer></script>
     <script src="/primary.js" defer></script>
+    <script src="/warmup.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -56,6 +57,7 @@
           </div>
         </div>
       </header>
+      <small id="language-notice" class="muted" role="status" hidden></small>
       <p id="notice" class="notice" role="status">
         Connecting to your account manager…
       </p>
@@ -161,10 +163,10 @@
               </h2>
               <p
                 class="muted"
-                data-i18n="Quota bars show used quota. Cached values update only when a request or an explicit refresh checks the backend."
+                data-i18n="Used quota · cached"
+                title="Quota bars show used quota. Cached values update only when a request or an explicit refresh checks the backend."
               >
-                Quota bars show used quota. Cached values update only when a
-                request or an explicit refresh checks the backend.
+                Used quota · cached
               </p>
             </div>
             <div class="actions">
@@ -341,27 +343,32 @@
           <ol id="activity-list"></ol>
         </details>
         <footer>
-          <p
-            id="exit-note"
-            data-i18n="Stop manager ends this host process and cancels pending logins for all tabs. Closing the last tab allows 30 seconds to reopen; a missing heartbeat expires after 5 minutes."
-          >
-            Stop manager ends this host process and cancels pending logins for
-            all tabs. Closing the last tab allows 30 seconds to reopen; a
-            missing heartbeat expires after 5 minutes.
-          </p>
-          <p
-            data-i18n="Changes are shared with all clients using this Codex home. Requests already in progress keep their current account."
-          >
-            Changes are shared with all clients using this Codex home. Requests
-            already in progress keep their current account.
-          </p>
-          <p
-            id="poll-note"
-            data-i18n="Metadata reads do not refresh backend quota. Updates are faster during login or quota checks, and slower while idle."
-          >
-            Metadata reads do not refresh backend quota. Updates are faster
-            during login or quota checks, and slower while idle.
-          </p>
+          <details>
+            <summary data-i18n="Help & session details">
+              Help & session details
+            </summary>
+            <p
+              id="exit-note"
+              data-i18n="Stop manager ends this host process and cancels pending logins for all tabs. Closing the last tab allows 30 seconds to reopen; a missing heartbeat expires after 5 minutes."
+            >
+              Stop manager ends this host process and cancels pending logins for
+              all tabs. Closing the last tab allows 30 seconds to reopen; a
+              missing heartbeat expires after 5 minutes.
+            </p>
+            <p
+              data-i18n="Changes are shared with all clients using this Codex home. Requests already in progress keep their current account."
+            >
+              Changes are shared with all clients using this Codex home.
+              Requests already in progress keep their current account.
+            </p>
+            <p
+              id="poll-note"
+              data-i18n="Metadata reads do not refresh backend quota. Updates are faster during login or quota checks, and slower while idle."
+            >
+              Metadata reads do not refresh backend quota. Updates are faster
+              during login or quota checks, and slower while idle.
+            </p>
+          </details>
         </footer>
       </div>
       <noscript

@@ -115,6 +115,7 @@ pub async fn serve(
 fn router(state: WebState) -> Router {
     let api = Router::new()
         .route("/inventory", get(inventory))
+        .route("/preferences", get(preferences).post(save_preferences))
         .route("/operation", post(operation))
         .route("/heartbeat", post(heartbeat))
         .route("/leave", post(leave))
@@ -182,6 +183,15 @@ fn router(state: WebState) -> Router {
                 )
             }),
         )
+        .route(
+            "/warmup.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/warmup.js"),
+                )
+            }),
+        )
         .route("/api/session", post(pair))
         .nest("/api", api)
         .layer(DefaultBodyLimit::max(32 * 1024))
@@ -237,12 +247,11 @@ async fn authorize(State(state): State<WebState>, request: Request, next: Next) 
             .into_response();
     }
     let _activity = match request.uri().path() {
-        "/inventory" | "/operation" | "/api/inventory" | "/api/operation" => {
-            match state.lifecycle.activity() {
-                Ok(activity) => Some(activity),
-                Err(error) => return api_error(error),
-            }
-        }
+        "/inventory" | "/operation" | "/preferences" | "/api/inventory" | "/api/operation"
+        | "/api/preferences" => match state.lifecycle.activity() {
+            Ok(activity) => Some(activity),
+            Err(error) => return api_error(error),
+        },
         _ => None,
     };
     next.run(request).await
@@ -322,6 +331,20 @@ async fn inventory(State(state): State<WebState>) -> Response {
     }
 }
 
+async fn preferences(State(state): State<WebState>) -> Response {
+    Json(state.manager.preferences()).into_response()
+}
+
+async fn save_preferences(
+    State(state): State<WebState>,
+    Json(preferences): Json<ManagerPreferences>,
+) -> Response {
+    match state.manager.save_preferences(preferences) {
+        Ok(()) => Json(preferences).into_response(),
+        Err(error) => api_error(error),
+    }
+}
+
 async fn operation(
     State(state): State<WebState>,
     Json(operation): Json<AccountManagerOperation>,
@@ -373,3 +396,7 @@ async fn browser_headers(request: Request, next: Next) -> Response {
 #[cfg(test)]
 #[path = "web_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "web_preferences_tests.rs"]
+mod preferences_tests;

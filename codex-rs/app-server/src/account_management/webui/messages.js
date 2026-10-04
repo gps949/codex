@@ -1,22 +1,59 @@
 "use strict";
 
 (() => {
-  const storageKey = "codex.accountManager.language";
   let language = "en";
-  try {
-    if (localStorage.getItem(storageKey) === "zh-CN") language = "zh-CN";
-  } catch {
-    /* Language preference can remain in memory. */
-  }
+  let chosenInTab = false;
   // An explicit launch language overrides the remembered preference for this tab.
   const requestedLanguage = new URLSearchParams(location.search).get("lang");
+  const explicitLaunch = ["en", "zh-CN", "zh-cn", "zh"].includes(
+    requestedLanguage,
+  );
   if (requestedLanguage === "en") language = "en";
   else if (["zh-CN", "zh-cn", "zh"].includes(requestedLanguage))
     language = "zh-CN";
   // Keep each translation pair on one line for review.
   // prettier-ignore
   const chinese = {
+    "Language saved for browser and terminal managers.": "已保存语言，浏览器和终端管理界面共用此设置。",
+    "Language changed for this tab; saving failed: {message}": "本次界面已切换语言，但保存失败：{message}",
+    "Saved language could not be read. Account management is still available.": "无法读取已保存的语言，账号管理仍可使用。",
+    "Standby warmup": "备用账号预热",
+    "Warmup uses a small generating request. Viewing this page and refreshing quota do not start warmup.": "预热会产生少量生成请求。查看本页与刷新额度不会启动预热。",
+    "Latest evidence": "最新证据",
+    "Last attempt": "上次尝试",
+    "Next eligible check": "下次最早可检查时间",
+    "Consecutive failures: {count}": "连续失败次数：{count}",
+    "No recent warmup attempt recorded. A quota window may also start during normal use.": "暂无近期预热记录；正常使用也可能启动额度窗口。",
+    "A completed request or reset timestamp alone does not confirm a quota window started; positive current usage does.": "仅请求完成或重置时间不能确认窗口已启动；当前正用量才能提供证据。",
+    "Current quota confirms the window is active": "当前额度证实窗口正在运行",
+    "Warmup request is running": "预热请求正在运行",
+    "Request sent; window start unconfirmed": "请求已发出，窗口启动待确认",
+    "Request completed; window start unconfirmed": "请求已完成，窗口启动待确认",
+    "Login is needed before warmup": "预热前需完成登录",
+    "Deferred until the next eligible check": "已延后，等待下次可检查时间",
+    "Request failed; waiting before retry": "请求失败，等待重试",
+    "A retry is eligible when the scheduler runs": "调度器运行时可再次尝试",
+    "Earlier evidence has expired": "此前记录已过期",
+    "No confirmed warmup evidence": "暂无已确认的预热证据",
+    "Saved source: {label}": "保存的登录来源：{label}",
+    "Observed host identity: {identity}": "主机实际观测身份：{identity}",
+    "Remote service: {status}": "远程服务：{status}",
+    "Connected to relay": "已连接远程中继",
+    "Remote disabled by account requirements": "账号策略禁止 Remote",
+    "Host authentication denied by requirements": "主登录认证被账号策略拒绝",
+    "Connection needs attention": "连接需要处理",
+    "No recent host confirmation for this selection. Stored credentials do not confirm Remote Control is connected.": "主机尚未近期确认此选择；已保存凭据不代表远程控制已连接。",
+    "Inference accounts rotate independently. An enabled Remote service reconnects after an explicit host login change. A new owner may require phone pairing again.": "推理账号独立轮换。明确修改主登录后，已启用的远程服务会重新连接；主登录身份变化后手机可能需要重新配对。",
+    "Sign out host and disconnect Remote Control. Pool accounts and credentials are retained.": "退出主登录并断开远程控制，账号池账号和凭据仍保留。",
+    "Use root login for host sign-in. An already enabled Remote service reconnects for this owner; a disabled service stays disabled. Pool inference selection is unchanged.": "将根目录登录用作主登录，已启用的远程服务会以此身份重连；已关闭的服务保持关闭，账号池推理选择不变。",
+    "Use this exact subscription profile for host sign-in. An enabled Remote service reconnects; a disabled service stays disabled. The phone must use the matching account and workspace and may need pairing again. Inference selection is unchanged.": "使用此订阅档案作为主登录，已启用的远程服务会重连，已关闭的服务保持关闭。手机需使用对应账号和工作区，可能需重新配对；推理选择不变。",
     "Host sign-in / Remote Control": "主登录 / 远程控制",
+    "Host sign-in is managed by the running host": "主登录由运行中的宿主管理",
+    "External host sign-in is resolved by the running host. Stored root credentials are not its current identity.": "外部主登录由运行中的宿主解析；保存的根登录凭据不代表其当前身份。",
+    "Host-managed workload identity is resolved by the running host.": "工作负载身份由运行中的宿主解析。",
+    "Host sign-in is managed by the running host": "主登录由运行中的宿主管理",
+    "External host sign-in is resolved by the running host. Stored root credentials are not its current identity.": "外部主登录由运行中的宿主解析；保存的根登录凭据不代表其当前身份。",
+    "Host-managed workload identity is resolved by the running host.": "工作负载身份由运行中的宿主解析。",
     "Stored host sign-in is available": "已保存可用的主登录信息",
     "Host sign-in needs attention": "主登录需要处理",
     "Host sign-in unavailable": "主登录不可用",
@@ -81,6 +118,22 @@
     "Requesting browser verification code": "正在申请浏览器验证码",
     "Unsupported quota scope; no credit will be consumed": "不支持此额度范围，不会消耗此券",
     "Codex quota; the backend determines affected windows": "Codex 额度，重置窗口由服务端确认",
+    "Use reset credit for {label}": "为 {label} 使用重置券",
+    "Enable this account and complete login first.": "请先启用账号并完成登录。",
+    "Choose a credit. Nothing is consumed until you confirm.": "选择一张券，确认后才会消耗。",
+    "Use this credit": "使用这张券",
+    "Confirm to consume one credit for this account.": "确认后将为此账号消耗一张券。",
+    "Help & session details": "帮助与会话详情",
+    "Credit": "重置券",
+    "Account actions": "账号操作",
+    "Used quota · cached": "已用额度 · 缓存",
+    "About this credit": "重置券说明",
+    "Earliest-expiring available credit selected.": "已选择最早到期的可用重置券。",
+    "Choose another credit": "换一张券",
+    "Remove from pool": "移出账号池",
+    "Remove and delete sign-in": "移除并删除登录",
+    "Remove this account from the pool. Keep its saved sign-in credentials.": "移出账号池，保留已保存的登录凭据。",
+    "Remove this account and delete its saved sign-in credentials. Adding it again requires login. Server revocation is attempted.": "移除账号并删除登录凭据，再次添加需登录；会尝试撤销服务器凭据。",
     "Accounts": "账号管理",
     "Language": "语言",
     "Connected": "已连接",
@@ -486,17 +539,20 @@
   }
   function setLanguage(value) {
     language = value === "zh-CN" ? value : "en";
-    try {
-      localStorage.setItem(storageKey, language);
-    } catch {
-      /* A storage failure never affects account operations. */
-    }
+    chosenInTab = true;
     applyStatic();
+  }
+  function applyPreferences(preferences) {
+    if (!explicitLaunch && !chosenInTab) {
+      language = preferences?.language === "zh-CN" ? "zh-CN" : "en";
+      applyStatic();
+    }
   }
   window.AccountManagerMessages = Object.freeze({
     t,
     applyStatic,
     setLanguage,
+    applyPreferences,
     language: () => language,
     locale: () => (language === "zh-CN" ? "zh-CN" : "en"),
   });
