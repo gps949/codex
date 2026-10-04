@@ -292,6 +292,8 @@ struct ManagedAccount {
 struct AccountPoolState {
     accounts: HashMap<AccountProfileId, ManagedAccount>,
     active_profile: Option<AccountProfileId>,
+    /// Last shared state imported by this pool or acknowledged after a successful write.
+    runtime_state: Option<crate::AccountRuntimeState>,
     generation: u64,
     /// When true, the pool returns to the most preferred profile at the moment
     /// a quota cooldown expires instead of staying on the current account.
@@ -307,6 +309,7 @@ impl Default for AccountPoolState {
         Self {
             accounts: HashMap::new(),
             active_profile: None,
+            runtime_state: None,
             generation: 1,
             return_to_preferred: true,
             pending_return_to_preferred: false,

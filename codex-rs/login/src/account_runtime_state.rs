@@ -391,7 +391,7 @@ impl AccountRuntimeStateStore {
     /// Three-way merge of the live pool against disk. Use this after mutating
     /// warmup or quota so another process sees the observation immediately.
     pub fn synchronize(&self, pool: &AccountPool) -> Result<(), AccountRuntimeStateError> {
-        let mut previous = self.load()?;
+        let mut previous = AccountRuntimeState::default();
         self.synchronize_pool(pool, &mut previous)
     }
 
@@ -401,7 +401,7 @@ impl AccountRuntimeStateStore {
         let Some(_lock) = crate::account_file::try_lock(&self.codex_home)? else {
             return Ok(false);
         };
-        let mut previous = self.load_unlocked()?;
+        let mut previous = AccountRuntimeState::default();
         self.synchronize_pool_unlocked(pool, &mut previous)?;
         Ok(true)
     }
@@ -618,6 +618,10 @@ pub enum AccountRuntimeStateError {
 #[cfg(test)]
 #[path = "account_runtime_quota_probe_tests.rs"]
 mod quota_probe_tests;
+
+#[cfg(test)]
+#[path = "account_runtime_sync_tests.rs"]
+mod sync_tests;
 
 #[cfg(test)]
 mod tests {

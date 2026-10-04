@@ -13,6 +13,7 @@ impl AccountPool {
                 account.quota_failure_pending = false;
             }
         }
+        state.runtime_state = Some(saved.clone());
     }
 
     /// Three-way merge under the pool mutex. Disk changes win selection conflicts, while
@@ -24,6 +25,12 @@ impl AccountPool {
         profiles: Option<&[crate::AccountProfileRecord]>,
     ) -> AccountRuntimeState {
         let mut state = self.lock_state();
+        // Immediate imports and the background writer share one baseline. A caller's previous
+        // snapshot may predate an import already completed through another entry point.
+        let previous = state
+            .runtime_state
+            .clone()
+            .unwrap_or_else(|| previous.clone());
         let now = Utc::now();
         let external_selection = remote.selection_revision != previous.selection_revision;
         let mut merged = remote.clone();
@@ -373,6 +380,9 @@ impl AccountPool {
                 .cmp(&priority_for(&right.profile_id))
                 .then_with(|| left.profile_id.as_str().cmp(right.profile_id.as_str()))
         });
+        // The remote state was imported, but local differences remain pending until saved.
+        // Using an unsaved merged result here would lose those differences after a write error.
+        state.runtime_state = Some(remote.clone());
         drop(state);
         if changed {
             self.notify_change();
