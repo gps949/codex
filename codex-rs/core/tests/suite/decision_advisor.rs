@@ -176,3 +176,81 @@ async fn decision_advisor_unknown_ids_fall_back_to_original_search() -> Result<(
     assert_eq!(output["tools"][0]["name"], json!("advisor_code"));
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decision_advisor_tool_search_applies_off_rank_off_without_restarting_the_thread()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    Mock::given(method("POST"))
+        .and(path("/decision-fixture"))
+        .respond_with(AdvisorResponse::Valid)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = format!("{}/decision-fixture", server.uri());
+    let configured_endpoint = endpoint.clone();
+    let mut builder = test_codex().with_pre_build_hook(move |home| {
+        std::fs::write(home.join("config.toml"), format!("[decision_advisor]\nmode = 'off'\nendpoint = '{configured_endpoint}'\napi_key_env = ''\nallow_local_http = true\n")).expect("valid local advisor fixture");
+    }).with_config(configure_search_capable_model);
+    let mut test = builder.build_with_auto_env(&server).await?;
+    let tools = [
+        ("advisor_weather", "forecast", "Weather forecasting: unique semantic-weather fixture"),
+        ("advisor_code", "source_search", "Find and inspect code repositories"),
+    ].into_iter().map(|(name, tool, description)| DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: name.into(), description: description.into(), tools: vec![DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+            name: tool.into(), description: description.into(), input_schema: json!({"type":"object","properties":{},"additionalProperties":false}), defer_loading: true,
+        })],
+    })).collect();
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            dynamic_tools: tools,
+            environments: Some(vec![test.executor_environment().selection().clone()]),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?;
+    test.codex = thread.thread;
+    test.session_configured = thread.session_configured;
+    let mut output = Vec::new();
+    let sequence = (0..3)
+        .flat_map(|index| {
+            [
+                responses::sse(vec![
+                    responses::ev_tool_search_call(
+                        &format!("find-tool-{index}"),
+                        &json!({"query":"advisor_code source_search","limit":1}),
+                    ),
+                    responses::ev_completed(&format!("search-{index}")),
+                ]),
+                responses::sse(vec![
+                    responses::ev_assistant_message(&format!("answer-{index}"), "done"),
+                    responses::ev_completed(&format!("answer-{index}")),
+                ]),
+            ]
+        })
+        .collect();
+    let mock = responses::mount_sse_sequence(&server, sequence).await;
+    for (index, mode) in ["off", "rank", "off"].into_iter().enumerate() {
+        std::fs::write(
+            test.home.path().join("config.toml"),
+            format!(
+                "[decision_advisor]\nmode = '{mode}'\nendpoint = '{endpoint}'\napi_key_env = ''\nallow_local_http = true\n"
+            ),
+        )?;
+        let call_id = format!("find-tool-{index}");
+        test.submit_turn("Discover a matching tool.").await?;
+        output.push(
+            mock.requests()[index * 2 + 1].tool_search_output(&call_id)["tools"][0]["name"].clone(),
+        );
+    }
+    assert_eq!(
+        output,
+        vec![
+            json!("advisor_code"),
+            json!("advisor_weather"),
+            json!("advisor_code")
+        ]
+    );
+    Ok(())
+}

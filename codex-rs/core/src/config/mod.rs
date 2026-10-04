@@ -166,6 +166,9 @@ use toml_edit::DocumentMut;
 
 mod auth_keyring;
 mod decision_advisor;
+pub use decision_advisor::resolve as resolve_decision_advisor_settings;
+mod decision_advisor_current;
+pub use decision_advisor_current::DecisionAdvisorSnapshot;
 pub mod edit;
 mod managed_features;
 mod metrics;
@@ -883,6 +886,7 @@ pub struct Config {
 
     /// Optional independent semantic ranking for deferred tool-search results.
     pub decision_advisor: codex_model_provider::DecisionAdvisorSettings,
+    decision_advisor_source: Option<decision_advisor_current::DecisionAdvisorLocalSource>,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: Constrained<HashMap<String, McpServerConfig>>,
@@ -1515,6 +1519,8 @@ impl ConfigBuilder {
         let cli_overrides = cli_overrides.unwrap_or_default();
         let mut harness_overrides = harness_overrides.unwrap_or_default();
         let loader_overrides = loader_overrides.unwrap_or_default();
+        let mut decision_advisor_source =
+            decision_advisor_current::DecisionAdvisorLocalSource::from_overrides(&loader_overrides);
         let cwd_override = harness_overrides.cwd.as_deref().or(fallback_cwd.as_deref());
         let cwd = match cwd_override {
             Some(path) => AbsolutePathBuf::relative_to_current_dir(path)?,
@@ -1560,14 +1566,17 @@ impl ConfigBuilder {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, err));
             }
         };
-        Config::load_config_with_layer_stack(
+        let mut config = Config::load_config_with_layer_stack(
             LOCAL_FS.as_ref(),
             config_toml,
             harness_overrides,
             codex_home,
             config_layer_stack,
         )
-        .await
+        .await?;
+        decision_advisor_source.initial_settings = config.decision_advisor.clone();
+        config.decision_advisor_source = Some(decision_advisor_source);
+        Ok(config)
     }
 
     #[cfg(test)]
@@ -4338,6 +4347,7 @@ impl Config {
                 ),
             },
             decision_advisor: decision_advisor::resolve(cfg.decision_advisor.as_ref())?,
+            decision_advisor_source: None,
             account_pool: cfg.account_pool.unwrap_or_default(),
             mcp_servers,
             non_prefixed_mcp_tool_servers,

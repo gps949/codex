@@ -53,10 +53,9 @@ pub(crate) async fn run(command: DecisionAdvisorCommand) -> anyhow::Result<()> {
         )
         .build()
         .await?;
-    let settings = &config.decision_advisor;
-    let credential = (!settings.api_key_env.is_empty())
-        .then(|| std::env::var(&settings.api_key_env).ok())
-        .flatten();
+    let snapshot = config.decision_advisor_snapshot().await?;
+    let settings = &snapshot.effective;
+    let credential = config.decision_advisor_credential(settings)?;
     match command.action {
         AdvisorAction::Status => {
             println!(
@@ -65,7 +64,9 @@ pub(crate) async fn run(command: DecisionAdvisorCommand) -> anyhow::Result<()> {
                     "mode":settings.mode,"provider":settings.provider,"model":settings.model,
                     "suggestSkills": settings.suggest_skills,
                     "endpointConfigured":!settings.endpoint.is_empty(),"apiKeyEnv":settings.api_key_env,
-                    "credentialPresent":credential.as_ref().is_some_and(|value| !value.is_empty()),
+                    "credentialPresent":credential.as_ref().is_some_and(|value| !value.expose_secret().is_empty()),
+                    "credentialSource":settings.credential_source,
+                    "overridden":snapshot.overridden,
                     "timeoutMs":settings.timeout.as_millis(),"minConfidence":settings.min_confidence,
                     "scope":"tool_search ranking and independently enabled skill hints",
                     "diagnostics":"Anonymous runtime counters appear in debug logs; counters are process-local.",
@@ -110,7 +111,9 @@ pub(crate) async fn run(command: DecisionAdvisorCommand) -> anyhow::Result<()> {
                         candidates: &candidates,
                         catalog_revision: b"explicit-cli-probe",
                     },
-                    credential.as_deref(),
+                    credential
+                        .as_ref()
+                        .map(codex_model_provider::DecisionAdvisorSecret::expose_secret),
                 )
                 .await;
             let names = match &result {

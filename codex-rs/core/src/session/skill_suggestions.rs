@@ -29,7 +29,8 @@ pub(super) async fn suggest(
     explicitly_selected: &[SkillMetadata],
     cancellation: &CancellationToken,
 ) -> Option<ResponseItem> {
-    let settings = &turn.config.decision_advisor;
+    let snapshot = turn.config.decision_advisor_snapshot().await.ok()?;
+    let settings = &snapshot.effective;
     if settings.mode == DecisionAdvisorMode::Off
         || !settings.suggest_skills
         || !turn.config.include_skill_instructions
@@ -72,9 +73,7 @@ pub(super) async fn suggest(
     if candidates.is_empty() {
         return None;
     }
-    let credential = (!settings.api_key_env.is_empty())
-        .then(|| std::env::var(&settings.api_key_env).ok())
-        .flatten();
+    let credential = turn.config.decision_advisor_credential(settings).ok()?;
     let factory = turn.config.http_client_factory();
     let advisor = decision_advisor();
     let advice = tokio::select! {
@@ -82,7 +81,7 @@ pub(super) async fn suggest(
         _ = cancellation.cancelled() => return None,
         advice = advisor.rank(settings,&factory,DecisionSearchRequest {
             scope:DecisionSearchScope::Skills,query,candidates:&candidates,catalog_revision:&revision,
-        },credential.as_deref()) => advice,
+        },credential.as_ref().map(codex_model_provider::DecisionAdvisorSecret::expose_secret)) => advice,
     };
     let DecisionAdvice::Ranked(ids) = advice else {
         return None;

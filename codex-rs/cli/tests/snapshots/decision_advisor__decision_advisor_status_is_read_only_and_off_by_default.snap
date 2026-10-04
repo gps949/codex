@@ -1,6 +1,6 @@
 ---
 source: cli/tests/decision_advisor.rs
-assertion_line: 13
+assertion_line: 19
 expression: "String::from_utf8(output.stdout)?"
 ---
 {
@@ -11,6 +11,8 @@ expression: "String::from_utf8(output.stdout)?"
   "endpointConfigured": true,
   "apiKeyEnv": "TYPESAFE_API_KEY",
   "credentialPresent": false,
+  "credentialSource": "environment",
+  "overridden": false,
   "timeoutMs": 650,
   "minConfidence": 0.35,
   "scope": "tool_search ranking and independently enabled skill hints",

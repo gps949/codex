@@ -31,7 +31,10 @@ pub(super) async fn ranked_ids(
     limit: usize,
 ) -> Vec<usize> {
     let config = &invocation.step_context.turn.config;
-    let settings = &config.decision_advisor;
+    let Ok(snapshot) = config.decision_advisor_snapshot().await else {
+        return baseline.to_vec();
+    };
+    let settings = &snapshot.effective;
     if settings.mode == DecisionAdvisorMode::Off || invocation.cancellation_token.is_cancelled() {
         return baseline.to_vec();
     }
@@ -79,9 +82,9 @@ pub(super) async fn ranked_ids(
             }
         })
         .collect::<Vec<_>>();
-    let credential = (!settings.api_key_env.is_empty())
-        .then(|| std::env::var(&settings.api_key_env).ok())
-        .flatten();
+    let Ok(credential) = config.decision_advisor_credential(settings) else {
+        return baseline.to_vec();
+    };
     let advisor = decision_advisor();
     let factory = config.http_client_factory();
     let advice = tokio::select! {
@@ -90,7 +93,7 @@ pub(super) async fn ranked_ids(
         advice = advisor.rank(settings,&factory,DecisionSearchRequest {
             scope: DecisionSearchScope::Tools,
             query,candidates:&candidates,catalog_revision:&handler.catalog_revision,
-        },credential.as_deref()) => advice,
+        },credential.as_ref().map(codex_model_provider::DecisionAdvisorSecret::expose_secret)) => advice,
     };
     let DecisionAdvice::Ranked(ids) = advice else {
         return baseline.to_vec();
