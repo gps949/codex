@@ -2,6 +2,7 @@
 
 use crate::account_management::AccountManagerInventory;
 use crate::account_management::ManagedRateLimitWindow;
+use crate::account_management::RefreshStatus;
 use crate::native_account_capabilities::NativeAccountLanguage;
 use crate::native_account_capabilities::bounded_text;
 
@@ -11,6 +12,8 @@ pub(crate) mod actions;
 mod details;
 #[path = "native_account_pages.rs"]
 mod pages;
+#[path = "native_account_view_quota.rs"]
+mod quota_details;
 
 pub(crate) const PAGE_SIZE: usize = 4;
 const MAX_ACCOUNTS: usize = 128;
@@ -46,6 +49,9 @@ enum AccountDetail {
         primary_observed_at: Option<i64>,
         secondary_observed_at: Option<i64>,
         credits: Option<u64>,
+        refresh: Option<RefreshStatus>,
+        cooldown_until: Option<i64>,
+        backend_resets_at: Option<i64>,
     },
     Api {
         account: codex_login::ApiAccount,
@@ -187,6 +193,9 @@ impl FrozenAccountInventory {
                     primary_observed_at: account.rate_limits.primary_observed_at,
                     secondary_observed_at: account.rate_limits.secondary_observed_at,
                     credits: account.reset_credit_count,
+                    refresh: account.refresh,
+                    cooldown_until: account.cooldown_until,
+                    backend_resets_at: account.backend_resets_at,
                 },
             })
             .collect::<Vec<_>>();
@@ -319,7 +328,7 @@ fn state_name(state: &str, language: NativeAccountLanguage) -> &'static str {
         "ready" => language.text("Ready", "可用"),
         "disabled" => language.text("Disabled", "已停用"),
         "needsLogin" => language.text("Login required", "需要登录"),
-        "coolingDown" => language.text("Cooling down", "等待重置"),
+        "coolingDown" => language.text("Cooldown · recheck quota", "冷却中 · 额度待复核"),
         "paused" => language.text("Paused", "已暂停"),
         "manual" => language.text("Manual API", "手动 API"),
         _ => language.text("Unknown", "未知"),

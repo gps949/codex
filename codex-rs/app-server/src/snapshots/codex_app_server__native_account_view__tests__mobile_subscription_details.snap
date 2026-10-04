@@ -19,4 +19,9 @@ alpha@example.test
 ID: slot-1
 Reset credits (cached): 2
 
+Quota check and status
+Local cooldown is active
+Cached percentages do not confirm recovery after a quota refusal
+Refresh both windows; after an external reset, use the retry action
+
 Back

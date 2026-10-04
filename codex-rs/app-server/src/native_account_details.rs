@@ -42,7 +42,7 @@ impl FrozenAccountInventory {
                     MenuPage::Usage(_) => {
                         let mut choices = Vec::new();
                         match &account.detail {
-                            AccountDetail::Subscription { plan, email, primary, secondary, primary_observed_at, secondary_observed_at, credits } => {
+                            AccountDetail::Subscription { plan, email, primary, secondary, primary_observed_at, secondary_observed_at, credits, .. } => {
                                 for (en, zh, window, observed) in [("Primary quota", "主额度", primary.as_ref(), *primary_observed_at), ("Secondary quota", "次额度", secondary.as_ref(), *secondary_observed_at)] {
                                     let mut detail = window_quota(language.text("Used", "已用"), window, now, language);
                                     if let Some(reset) = window.and_then(|window| window.resets_at) { detail.push_str(&format!("\n{}: {}", language.text("Reset", "重置"), timestamp(reset))); }
@@ -51,6 +51,9 @@ impl FrozenAccountInventory {
                                 }
                                 choices.push(nav("Identity", "账号身份", format!("{plan}\n{}\nID: {}\n{}: {}", email.as_deref().unwrap_or("Unknown"), account.id,
                                     language.text("Reset credits (cached)", "重置券（缓存）"), credits.map(|value| value.to_string()).unwrap_or_else(|| "?".into())), page));
+                                if let Some(status) = quota_details::status_description(account, language, now) {
+                                    choices.push(nav("Quota check and status", "查询结果与状态", status, page));
+                                }
                             }
                             AccountDetail::Api { account, has_key } => choices.push(nav("API details", "API 详情", format!("{}\n{}\n{}\n{}", account.model, account.base_url,
                                 if *has_key { language.text("Key configured", "已配置密钥") } else { language.text("Key missing", "缺少密钥") }, language.text("Provider charges apply; no subscription quota", "使用由提供商计费，不适用订阅额度")), page)),

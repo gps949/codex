@@ -28,6 +28,9 @@ fn fixture() -> FrozenAccountInventory {
                 primary_observed_at: Some(1_699_827_200),
                 secondary_observed_at: Some(1_700_000_000),
                 credits: Some(2),
+                refresh: None,
+                cooldown_until: None,
+                backend_resets_at: None,
             },
         }],
         total: 1,
@@ -469,4 +472,78 @@ fn host_runtime_heartbeat_expires_while_the_same_inventory_is_open() {
             .contains("No recent running-host confirmation")
     );
     assert!(!later.choices[2].description.contains("Connected to relay"));
+}
+
+#[test]
+fn incomplete_quota_refresh_keeps_window_ages_separate_from_the_last_check_and_cooldown() {
+    use crate::account_management::ManagedAccountView;
+    use crate::account_management::ManagedRateLimits;
+    use crate::account_management::RefreshStatus;
+
+    let inventory = FrozenAccountInventory::from_inventory(AccountManagerInventory {
+        host_now: NOW,
+        primary_login: None,
+        paused: false,
+        active_profile_id: None,
+        accounts: vec![ManagedAccountView {
+            profile_id: "quota-fixture".into(),
+            label: "CEO fixture".into(),
+            custom_label: None,
+            priority: 10,
+            disabled: false,
+            login_state: "signedIn".into(),
+            availability: "coolingDown".into(),
+            cooldown_until: Some(NOW + 7200),
+            backend_resets_at: Some(NOW + 7200),
+            plan: Some("Business".into()),
+            email: Some("quota@example.test".into()),
+            rate_limits: ManagedRateLimits {
+                primary: Some(ManagedRateLimitWindow {
+                    used_percent: 41.0,
+                    resets_at: Some(NOW + 7200),
+                    window_minutes: Some(300),
+                }),
+                secondary: Some(ManagedRateLimitWindow {
+                    used_percent: 31.0,
+                    resets_at: Some(NOW + 86_400),
+                    window_minutes: Some(10_080),
+                }),
+                observed_at: Some(NOW - 60),
+                primary_observed_at: Some(NOW - 1680),
+                secondary_observed_at: Some(NOW - 60),
+            },
+            reset_credit_count: None,
+            refresh: Some(RefreshStatus {
+                in_progress: false,
+                attempted_at: NOW - 60,
+                succeeded: false,
+                message: "Primary window not refreshed (omitted by backend); Secondary window updated. Refresh again; cached values kept.".into(),
+                reset_credit_count: None,
+            }),
+            warmup: None,
+        }],
+        settings: serde_json::json!({}),
+        login_jobs: vec![],
+        api_accounts: vec![],
+        api_selection: codex_login::ApiAccountSelection::Subscription,
+        api_fallback: codex_login::ApiAccountFallback::default(),
+    });
+    let question = inventory.question_at(MenuPage::Usage(0), NativeAccountLanguage::English, NOW);
+    assert!(question.choices[0].description.contains("41% used"));
+    assert!(question.choices[0].description.contains("28 m old"));
+    assert!(question.choices[1].description.contains("31% used"));
+    assert!(question.choices[1].description.contains("1 m old"));
+    let status = question
+        .choices
+        .iter()
+        .find(|choice| choice.label == "Quota check and status")
+        .unwrap();
+    assert!(status.description.contains("Last quota check: 1 m old"));
+    assert!(status.description.contains("Primary window not refreshed"));
+    assert!(
+        status
+            .description
+            .contains("Cached percentages do not confirm recovery")
+    );
+    insta::assert_snapshot!("mobile_incomplete_quota_refresh", render(question));
 }

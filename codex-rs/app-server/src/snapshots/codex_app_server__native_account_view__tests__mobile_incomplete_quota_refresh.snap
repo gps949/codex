@@ -1,0 +1,30 @@
+---
+source: app-server/src/native_account_view_tests.rs
+expression: render(question)
+---
+Quota and identity
+Primary quota
+Used (5h): 41% used
+Reset: 11-15 00:13 UTC
+28 m old
+
+Secondary quota
+Used (7d): 31% used
+Reset: 11-15 22:13 UTC
+1 m old
+
+Identity
+Business
+quota@example.test
+ID: quota-fixture
+Reset credits (cached): ?
+
+Quota check and status
+Last quota check: 1 m old
+Primary window not refreshed (omitted by backend); Secondary window updated. Refresh again; cached values kept.
+Local cooldown until: 11-15 00:13 UTC
+Cached percentages do not confirm recovery after a quota refusal
+Backend reset reported: 11-15 00:13 UTC
+Refresh both windows; after an external reset, use the retry action
+
+Back
