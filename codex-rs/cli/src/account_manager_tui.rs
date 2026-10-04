@@ -7,6 +7,9 @@ use std::sync::Arc;
 #[path = "account_manager_display.rs"]
 mod display;
 
+#[path = "account_manager_decision.rs"]
+mod decision;
+
 #[path = "account_manager_actions.rs"]
 mod actions;
 #[path = "account_manager_credits.rs"]
@@ -88,6 +91,10 @@ pub(crate) async fn run(manager: Arc<AccountManager>, mut locale: Locale) -> any
                     }
                 }
                 "s" => settings::choose(&inventory.settings, locale).await?,
+                "d" => {
+                    decision::choose(&manager, locale).await?;
+                    None
+                }
                 "h" => primary::choose(&inventory, locale).await?,
                 "p" => {
                     actions::api_actions(&manager, locale).await?;

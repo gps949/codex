@@ -2,6 +2,8 @@
 
 #[path = "account_manager_locale_actions.rs"]
 mod actions;
+#[path = "account_manager_locale_decision.rs"]
+mod decision;
 #[path = "account_manager_locale_settings.rs"]
 mod settings;
 
@@ -93,7 +95,7 @@ impl Locale {
     }
 
     pub(super) fn main_menu(self) -> &'static str {
-        self.text("[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions\n[H] Host sign-in  [C] Cancel login  [number] Account actions  [G] Language / 中文  [Q] Quit")
+        self.text("[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions\n[D] Jev / Clef  [H] Host sign-in  [C] Cancel login  [number] Account actions\n[G] Language / 中文  [Q] Quit")
     }
 }
 
@@ -259,7 +261,11 @@ fn chinese(english: &str) -> Option<&'static str> {
         "Reset outcome is unconfirmed. Refresh quota before retrying the same operation ID." => {
             "重置结果待确认。请先刷新额度，再使用同一操作编号重试。"
         }
-        _ => return actions::chinese(english).or_else(|| settings::chinese(english)),
+        _ => {
+            return actions::chinese(english)
+                .or_else(|| settings::chinese(english))
+                .or_else(|| decision::chinese(english));
+        }
     };
     Some(translated)
 }

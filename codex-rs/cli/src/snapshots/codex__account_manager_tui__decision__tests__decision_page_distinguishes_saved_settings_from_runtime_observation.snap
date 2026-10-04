@@ -1,0 +1,18 @@
+---
+source: cli/src/account_manager_decision_tests.rs
+assertion_line: 6
+expression: "format!(\"{}\\n---\\n{}\", render(&view, Locale::English),\nrender(&view, Locale::SimplifiedChinese))"
+---
+Decision assistance
+Service: Cloudflare Clef
+Mode: Observe only
+Token available
+Settings apply to subsequent advisor calls. Other hosts have not been observed.
+[S] Choose one service  [T] Test saved connection  [X] Disable  [K] Remove saved token  [Enter] Back
+---
+决策辅助
+服务商：Cloudflare Clef
+模式：仅观察
+令牌可用
+设置适用于后续辅助请求；其他宿主的实际状态尚未观测。
+[S] 选择一个服务  [T] 测试已保存连接  [X] 关闭  [K] 删除已保存令牌  [Enter] 返回
