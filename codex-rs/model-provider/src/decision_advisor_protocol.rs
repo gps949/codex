@@ -31,11 +31,20 @@ pub enum DecisionAdvisorProvider {
     Cloudflare,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionAdvisorCredentialSource {
+    #[default]
+    Environment,
+    Stored,
+}
+
 /// Nonsecret settings for an independent, optional tool-search decision service.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DecisionAdvisorSettings {
     pub mode: DecisionAdvisorMode,
     pub provider: DecisionAdvisorProvider,
+    pub credential_source: DecisionAdvisorCredentialSource,
     pub suggest_skills: bool,
     pub endpoint: String,
     pub model: String,
@@ -50,6 +59,7 @@ impl Default for DecisionAdvisorSettings {
         Self {
             mode: DecisionAdvisorMode::Off,
             provider: DecisionAdvisorProvider::Typesafe,
+            credential_source: DecisionAdvisorCredentialSource::Environment,
             suggest_skills: false,
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             model: "jev-1.13.0".into(),
@@ -97,13 +107,14 @@ impl DecisionAdvisorSettings {
             self.api_key_env.to_ascii_uppercase().as_str(),
             "CODEX_ACCESS_TOKEN" | "CODEX_API_KEY" | "OPENAI_API_KEY" | "CHATGPT_ACCESS_TOKEN"
         );
-        if reserved
-            || self.api_key_env.len() > 128
-            || !self
-                .api_key_env
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            || self.api_key_env.is_empty() && !local_http
+        if self.credential_source == DecisionAdvisorCredentialSource::Environment
+            && (reserved
+                || self.api_key_env.len() > 128
+                || !self
+                    .api_key_env
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                || self.api_key_env.is_empty() && !local_http)
         {
             return Err(
                 "decision_advisor.api_key_env must name a separate credential environment variable",

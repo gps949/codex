@@ -23,14 +23,26 @@ pub enum DecisionAdvisorProviderToml {
     Cloudflare,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionAdvisorCredentialSourceToml {
+    #[default]
+    Environment,
+    Stored,
+}
+
 /// This service never uses subscription-pool credentials or authorizes tool execution.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct DecisionAdvisorConfigToml {
     #[serde(default)]
     pub mode: DecisionAdvisorModeToml,
     #[serde(default)]
     pub provider: DecisionAdvisorProviderToml,
+    /// Independent credentials; a missing stored key never falls back to environment auth.
+    #[serde(default)]
+    pub credential_source: DecisionAdvisorCredentialSourceToml,
     /// Independently opt into bounded skill suggestions at root user-turn boundaries.
     /// Suggestions never load skills or authorize operations. Defaults to false.
     #[serde(default)]

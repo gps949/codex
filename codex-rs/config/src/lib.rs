@@ -141,6 +141,7 @@ pub use constraint::Constrained;
 pub use constraint::ConstraintError;
 pub use constraint::ConstraintResult;
 pub use decision_advisor::DecisionAdvisorConfigToml;
+pub use decision_advisor::DecisionAdvisorCredentialSourceToml;
 pub use decision_advisor::DecisionAdvisorModeToml;
 pub use decision_advisor::DecisionAdvisorProviderToml;
 pub use diagnostics::ConfigError;

@@ -1556,6 +1556,15 @@
           "description": "Separate environment variable containing the API credential; never a literal key. An empty name is accepted only for explicitly allowed loopback HTTP services.",
           "type": "string"
         },
+        "credential_source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DecisionAdvisorCredentialSourceToml"
+            }
+          ],
+          "default": "environment",
+          "description": "Independent credentials; a missing stored key never falls back to environment auth."
+        },
         "endpoint": {
           "description": "Exact HTTP endpoint. Cloud services require HTTPS and reject URL credentials. TypeSafe defaults to https://api.typesafe.ai/v1/systemone.",
           "type": "string"
@@ -1601,6 +1610,13 @@
         }
       },
       "type": "object"
+    },
+    "DecisionAdvisorCredentialSourceToml": {
+      "enum": [
+        "environment",
+        "stored"
+      ],
+      "type": "string"
     },
     "DecisionAdvisorModeToml": {
       "oneOf": [

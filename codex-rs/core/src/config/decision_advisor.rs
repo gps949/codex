@@ -1,15 +1,15 @@
 use codex_config::DecisionAdvisorConfigToml;
+use codex_config::DecisionAdvisorCredentialSourceToml;
 use codex_config::DecisionAdvisorModeToml;
 use codex_config::DecisionAdvisorProviderToml;
+use codex_model_provider::DecisionAdvisorCredentialSource;
 use codex_model_provider::DecisionAdvisorMode;
 use codex_model_provider::DecisionAdvisorProvider;
 use codex_model_provider::DecisionAdvisorSettings;
 use std::io;
 use std::time::Duration;
 
-pub(super) fn resolve(
-    config: Option<&DecisionAdvisorConfigToml>,
-) -> io::Result<DecisionAdvisorSettings> {
+pub fn resolve(config: Option<&DecisionAdvisorConfigToml>) -> io::Result<DecisionAdvisorSettings> {
     let Some(config) = config else {
         return Ok(DecisionAdvisorSettings::default());
     };
@@ -24,6 +24,12 @@ pub(super) fn resolve(
             DecisionAdvisorModeToml::Rank => DecisionAdvisorMode::Rank,
         },
         provider,
+        credential_source: match config.credential_source {
+            DecisionAdvisorCredentialSourceToml::Environment => {
+                DecisionAdvisorCredentialSource::Environment
+            }
+            DecisionAdvisorCredentialSourceToml::Stored => DecisionAdvisorCredentialSource::Stored,
+        },
         suggest_skills: config.suggest_skills,
         endpoint: config.endpoint.clone().unwrap_or_else(|| match provider {
             DecisionAdvisorProvider::Typesafe => "https://api.typesafe.ai/v1/systemone".into(),
