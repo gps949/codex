@@ -165,7 +165,13 @@ impl ChatWidget {
         reset_credits: &RateLimitResetCreditsSummary,
     ) -> SelectionViewParams {
         let confirmation_gate = Arc::new(AtomicBool::new(true));
-        let mut items = reset_credit_options(reset_credits, self.clock_format)
+        let options = reset_credit_options(reset_credits, self.clock_format);
+        if options.is_empty() {
+            return Self::rate_limit_reset_message_params(
+                "No eligible Codex resets are available. Refresh usage or check credit details.",
+            );
+        }
+        let mut items = options
             .into_iter()
             .map(|option| {
                 let confirmation_gate = confirmation_gate.clone();

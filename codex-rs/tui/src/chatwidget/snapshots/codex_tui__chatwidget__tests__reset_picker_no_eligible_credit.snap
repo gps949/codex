@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/usage.rs
+assertion_line: 124
+expression: "render_bottom_popup(&chat, 60)"
+---
+  Usage limit resets
+  No eligible Codex resets are available. Refresh usage or
+  check credit details.
+
+
+› 1. Close
+
+  enter select · esc back

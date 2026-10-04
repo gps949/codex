@@ -4,6 +4,7 @@ use chrono::Local;
 use chrono::Utc;
 use codex_app_server_protocol::RateLimitResetCreditStatus;
 use codex_app_server_protocol::RateLimitResetCreditsSummary;
+use codex_app_server_protocol::RateLimitResetType;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct ResetCreditOption {
@@ -19,12 +20,17 @@ pub(super) fn reset_credit_options(
 ) -> Vec<ResetCreditOption> {
     let available_count = summary.available_count.max(0);
     let detail_limit = usize::try_from(available_count).unwrap_or(usize::MAX);
+    let now = Utc::now().timestamp();
     let mut available_credits = summary
         .credits
         .as_deref()
         .unwrap_or_default()
         .iter()
-        .filter(|credit| credit.status == RateLimitResetCreditStatus::Available)
+        .filter(|credit| {
+            credit.status == RateLimitResetCreditStatus::Available
+                && credit.reset_type == RateLimitResetType::CodexRateLimits
+                && credit.expires_at.is_none_or(|expires| expires > now)
+        })
         .collect::<Vec<_>>();
     available_credits.sort_by_key(|credit| credit.expires_at.unwrap_or(i64::MAX));
 
@@ -66,7 +72,7 @@ pub(super) fn reset_credit_options(
         })
         .collect::<Vec<_>>();
 
-    if options.is_empty() {
+    if options.is_empty() && available_count > 0 && summary.credits.is_none() {
         options.push(ResetCreditOption {
             credit_id: None,
             name: "Full reset".to_string(),

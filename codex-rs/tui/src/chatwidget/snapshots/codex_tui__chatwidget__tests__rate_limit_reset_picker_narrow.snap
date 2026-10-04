@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/usage.rs
+assertion_line: 447
 expression: "render_bottom_popup(&chat, 44)"
 ---
   Usage limit resets
@@ -7,7 +8,7 @@ expression: "render_bottom_popup(&chat, 44)"
 
 
 › 1. Full reset  Expires 9:39 AM on 18 Jun
-                 2026
+                 2036
   2. Full reset  Does not expire
   3. Cancel
 
