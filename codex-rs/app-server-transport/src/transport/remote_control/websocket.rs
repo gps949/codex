@@ -787,13 +787,29 @@ impl RemoteControlWebsocket {
                                     .and_then(|cause| cause.downcast_ref::<NetworkPolicyDenied>()),
                                 Some(NetworkPolicyDenied::Unavailable)
                             );
-                            tokio::select! {
-                                _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
-                                _ = self.desired_state_rx.wait_for(|state| !state.is_enabled()) => return ConnectOutcome::Disabled,
-                                _ = changes.changed() => continue,
-                                // A failed initial load need not publish a change. Retry its owner
-                                // loader while keeping all destination checks and permits closed.
-                                _ = tokio::time::sleep(REMOTE_CONTROL_POLICY_RETRY_INTERVAL), if policy_unavailable => continue,
+                            let retry_delay = if policy_unavailable {
+                                REMOTE_CONTROL_POLICY_RETRY_INTERVAL
+                            } else {
+                                std::time::Duration::from_secs(/*secs*/ 60)
+                            };
+                            // Mark self-generated load/failure events seen. They cannot cause a hot
+                            // retry loop; unavailable policy always waits its minimum retry interval.
+                            changes.borrow_and_update();
+                            if policy_unavailable {
+                                tokio::select! {
+                                    _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
+                                    _ = self.desired_state_rx.wait_for(|state| !state.is_enabled()) => return ConnectOutcome::Disabled,
+                                    _ = self.auth_change_rx.changed() => continue,
+                                    _ = tokio::time::sleep(retry_delay) => continue,
+                                }
+                            } else {
+                                tokio::select! {
+                                    _ = shutdown_token.cancelled() => return ConnectOutcome::Shutdown,
+                                    _ = self.desired_state_rx.wait_for(|state| !state.is_enabled()) => return ConnectOutcome::Disabled,
+                                    _ = self.auth_change_rx.changed() => continue,
+                                    _ = changes.changed() => continue,
+                                    _ = tokio::time::sleep(retry_delay) => continue,
+                                }
                             }
                         }
                     }

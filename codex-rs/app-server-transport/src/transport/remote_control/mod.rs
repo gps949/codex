@@ -4,6 +4,7 @@ mod clients;
 mod controller;
 mod persistence;
 pub use controller::RemoteControlHandle;
+pub use controller::RemoteControlHandover;
 pub use controller::start_remote_control;
 mod desired_state;
 mod enroll;

@@ -12,6 +12,26 @@ pub struct RemoteControlHandle {
     pub(super) inner: Arc<RemoteControl>,
 }
 
+/// Captures an already-enabled Remote session before an explicit primary-login transition.
+/// An intervening explicit Remote command invalidates this one-time continuation capability.
+#[derive(Clone)]
+pub struct RemoteControlHandover {
+    revision: u64,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum HandoverPermission {
+    #[default]
+    Allowed,
+    Blocked,
+}
+
+#[derive(Default)]
+struct ControlState {
+    revision: u64,
+    handover: HandoverPermission,
+}
+
 struct CurrentSession {
     authenticated: bool,
     session: Arc<RemoteControlSession>,
@@ -19,6 +39,7 @@ struct CurrentSession {
 
 pub(super) struct RemoteControl {
     config: RemoteControlStartConfig,
+    control_revision: StdMutex<ControlState>,
     state_db: Option<Arc<StateRuntime>>,
     auth_manager: Arc<AuthManager>,
     transport_event_tx: mpsc::Sender<TransportEvent>,
@@ -177,6 +198,61 @@ impl RemoteControlSession {
 }
 
 impl RemoteControlHandle {
+    pub fn prepare_primary_login_handover(&self) -> Option<RemoteControlHandover> {
+        let revision = self
+            .inner
+            .control_revision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if revision.handover == HandoverPermission::Blocked {
+            return None;
+        }
+        let current = self
+            .inner
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        current
+            .as_ref()
+            .filter(|current| {
+                current.authenticated
+                    && current.session.auth_manager.owner.is_current()
+                    && current.session.desired_state_tx.borrow().is_enabled()
+            })
+            .map(|_| RemoteControlHandover {
+                revision: revision.revision,
+            })
+    }
+
+    /// Continues an enabled session only for the explicitly selected owner. Explicit Remote
+    /// commands serialize with this check so a concurrent disable cannot be undone.
+    pub fn continue_primary_login_handover(
+        &self,
+        handover: &RemoteControlHandover,
+        intent: &codex_login::PrimaryLoginHandover,
+    ) -> Result<bool, RemoteControlEnableError> {
+        let mut revision = self
+            .inner
+            .control_revision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if revision.revision != handover.revision
+            || revision.handover == HandoverPermission::Blocked
+            || !intent.is_current()
+            || self
+                .inner
+                .auth_manager
+                .auth_cached()
+                .is_none_or(|auth| !intent.matches_auth(&auth))
+        {
+            return Ok(false);
+        }
+        self.inner.session().enable_ephemeral()?;
+        // Consume the process-local capability even if it is accidentally presented twice.
+        revision.revision = revision.revision.wrapping_add(1);
+        Ok(true)
+    }
+
     pub fn ensure_remote_control_allowed(&self) -> Result<(), RemoteControlDisabledByRequirements> {
         self.inner.session().ensure_remote_control_allowed()
     }
@@ -193,10 +269,26 @@ impl RemoteControlHandle {
     pub fn enable_ephemeral(
         &self,
     ) -> Result<RemoteControlStatusChangedNotification, RemoteControlEnableError> {
+        let mut revision = self
+            .inner
+            .control_revision
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        revision.revision = revision.revision.wrapping_add(1);
+        revision.handover = HandoverPermission::Allowed;
         self.inner.session().enable_ephemeral()
     }
 
     pub async fn disable_ephemeral(&self) -> RemoteControlStatusChangedNotification {
+        {
+            let mut revision = self
+                .inner
+                .control_revision
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            revision.revision = revision.revision.wrapping_add(1);
+            revision.handover = HandoverPermission::Blocked;
+        }
         self.inner.session().disable_ephemeral().await
     }
 
@@ -204,6 +296,15 @@ impl RemoteControlHandle {
         &self,
         app_server_client_name: Option<&str>,
     ) -> io::Result<RemoteControlStatusChangedNotification> {
+        {
+            let mut revision = self
+                .inner
+                .control_revision
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            revision.revision = revision.revision.wrapping_add(1);
+            revision.handover = HandoverPermission::Allowed;
+        }
         let session = self.inner.session();
         session.run(session.enable(app_server_client_name)).await
     }
@@ -212,6 +313,15 @@ impl RemoteControlHandle {
         &self,
         app_server_client_name: Option<&str>,
     ) -> io::Result<RemoteControlStatusChangedNotification> {
+        {
+            let mut revision = self
+                .inner
+                .control_revision
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            revision.revision = revision.revision.wrapping_add(1);
+            revision.handover = HandoverPermission::Blocked;
+        }
         let session = self.inner.session();
         session.run(session.disable(app_server_client_name)).await
     }
@@ -294,6 +404,7 @@ pub async fn start_remote_control(
     });
     let inner = Arc::new(RemoteControl {
         config,
+        control_revision: StdMutex::new(ControlState::default()),
         state_db,
         auth_manager,
         transport_event_tx,

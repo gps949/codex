@@ -67,6 +67,8 @@ use tokio_tungstenite::tungstenite;
 use tokio_util::sync::CancellationToken;
 
 mod clients_tests;
+#[path = "tests/handover_tests.rs"]
+mod handover_tests;
 mod pairing_tests;
 #[path = "tests/retry_tests.rs"]
 mod retry_tests;

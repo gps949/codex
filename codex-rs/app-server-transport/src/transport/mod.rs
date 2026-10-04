@@ -34,6 +34,7 @@ pub use remote_control::REMOTE_CONTROL_DISABLED_ENV_VAR;
 pub use remote_control::RemoteControlDisabledByRequirements;
 pub use remote_control::RemoteControlEnableError;
 pub use remote_control::RemoteControlHandle;
+pub use remote_control::RemoteControlHandover;
 pub use remote_control::RemoteControlPolicy;
 pub use remote_control::RemoteControlStartConfig;
 pub use remote_control::RemoteControlStartupMode;

@@ -27,6 +27,7 @@ pub use transport::REMOTE_CONTROL_DISABLED_ENV_VAR;
 pub use transport::RemoteControlDisabledByRequirements;
 pub use transport::RemoteControlEnableError;
 pub use transport::RemoteControlHandle;
+pub use transport::RemoteControlHandover;
 pub use transport::RemoteControlPolicy;
 pub use transport::RemoteControlStartConfig;
 pub use transport::RemoteControlStartupMode;
