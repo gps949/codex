@@ -18,6 +18,96 @@ fn create_config_toml(codex_home: &Path, chatgpt_base_url: &str) -> std::io::Res
     )
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pool_quota_read_uses_standby_requirements_with_warmup_disabled() -> Result<()> {
+    use wiremock::Mock;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    let home = TempDir::new()?;
+    let server = wiremock::MockServer::start().await;
+    app_test_support::mount_workspace_routing(&server).await;
+    write_pool_fixture(home.path(), "enterprise");
+    write_models_cache(home.path()).await?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "chatgpt_base_url = '{}'\ncli_auth_credentials_store = 'file'\n[account_pool]\nwindow_warmup = false\n",
+            server.uri()
+        ),
+    )?;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/config/bundle"))
+        .and(header("authorization", "Bearer access-standby"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "requirements_toml":{"enterprise_managed":[{
+                "id":"standby-restricted","name":"Standby requirements",
+                "contents":"[application.network]\n[application.network.domains]\n'blocked.example' = 'allow'\n"
+            }]}
+        })))
+        .with_priority(1)
+        .mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/config/bundle"))
+        .and(header("authorization", "Bearer access-selected"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "requirements_toml":{"enterprise_managed":[{
+                "id":"selected-unrestricted","name":"Selected requirements",
+                "contents":"[application.network]\nenabled = false\n"
+            }]}
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .and(header("authorization", "Bearer access-standby"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .and(header("authorization", "Bearer access-selected"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "plan_type":"enterprise","rate_limit":{"allowed":true,"limit_reached":false,
+                "primary_window":{"used_percent":25,"limit_window_seconds":18000,"reset_after_seconds":18000,
+                    "reset_at":chrono::Utc::now().timestamp()+18000}}
+        })))
+        .expect(1)
+        .mount(&server).await;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .with_env_overrides(&[("OPENAI_API_KEY", None), ("CODEX_API_KEY", None)])
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let id = mcp.send_raw_request("accountPool/read", None).await?;
+    let result: codex_app_server_protocol::AccountPoolReadResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(id)).await??;
+    assert_eq!(result.active_profile_id.as_deref(), Some("selected-acct"));
+    let observed: Vec<_> = result
+        .accounts
+        .iter()
+        .map(|account| {
+            (
+                account.profile_id.as_str(),
+                account
+                    .rate_limits
+                    .primary
+                    .as_ref()
+                    .map(|window| window.used_percent),
+            )
+        })
+        .collect();
+    assert_eq!(
+        observed,
+        vec![("selected-acct", Some(25.0)), ("standby-acct", None)]
+    );
+    Ok(())
+}
+
 fn write_profile_credentials(codex_home: &Path, id: &str, access_token: &str, plan_type: &str) {
     let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let header = b64(br#"{"alg":"none","typ":"JWT"}"#);

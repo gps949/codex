@@ -11,7 +11,6 @@ use codex_login::AccountProfileStore;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
 use codex_login::AccountRuntimeStateStore;
-use codex_login::AuthManager;
 use futures::FutureExt;
 use futures::StreamExt;
 
@@ -39,6 +38,8 @@ pub(super) async fn refresh(
     };
     let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
     let pool = execution_pool.account_pool();
+    let managers: std::collections::HashMap<_, _> =
+        execution_pool.auth_managers().into_iter().collect();
     let jobs: Vec<_> = records
         .into_iter()
         .filter(|record| {
@@ -59,8 +60,7 @@ pub(super) async fn refresh(
                 })
         })
         .map(|record| {
-            let mut auth_config = config.auth_config();
-            auth_config.codex_home = record.profile.credential_home.clone();
+            let manager = managers.get(&record.profile.id).cloned();
             let base_url = config.chatgpt_base_url.clone();
             let pool = pool.clone();
             async move {
@@ -69,14 +69,18 @@ pub(super) async fn refresh(
                     if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
                         return None;
                     }
-                    let manager =
-                        AuthManager::shared_managed_profile_from_auth_config(auth_config).await;
-                    let (auth, factory) = manager.auth_with_http_client_factory().await?;
+                    let manager = manager?;
+                    let (auth, mut factory) = manager.auth_with_http_client_factory().await?;
                     if !auth.is_chatgpt_auth() {
                         return None;
                     }
                     if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
                         return None;
+                    }
+                    let mut base_url = base_url;
+                    if let Some(clients) = manager.maintenance_clients(&auth).await.ok()? {
+                        factory = clients.http_client_factory;
+                        base_url = clients.chatgpt_base_url;
                     }
                     let client = BackendClient::from_auth(base_url, &auth, factory);
                     let store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());

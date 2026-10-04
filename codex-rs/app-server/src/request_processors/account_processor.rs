@@ -1379,11 +1379,10 @@ impl AccountRequestProcessor {
             })
             .await;
 
-        if config.account_pool.effective_window_warmup() {
-            self.profile_routing_owners
-                .synchronize(self.execution_account_pool.auth_managers())
-                .await;
-        }
+        // Quota recovery and explicit reads also need each profile's maintenance policy.
+        self.profile_routing_owners
+            .synchronize(self.execution_account_pool.auth_managers())
+            .await;
 
         // Re-login via CLI writes tokens out-of-process; resync before building the picker so
         // sticky AuthenticationUnavailable / stale caches do not hide freshly repaired profiles.
