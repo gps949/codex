@@ -708,3 +708,128 @@ async fn installed_runtime_registers_profiles_added_after_install() {
     assert_eq!(ids.len(), 2);
     assert!(runtime.sync_missing_profiles().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn account_pool_profiles_ignore_process_auth_after_reload() -> anyhow::Result<()> {
+    const CHILD_MARKER: &str = "CODEX_POOL_AUTH_ISOLATION_TEST_CHILD";
+    const TEST_NAME: &str =
+        "account_runtime::tests::account_pool_profiles_ignore_process_auth_after_reload";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_MARKER, "1")
+            .env("CODEX_ACCESS_TOKEN", "invalid.synthetic.jwt")
+            .env_remove("CODEX_API_KEY")
+            .env_remove("OPENAI_IDENTITY_TOKEN_FILE")
+            .env_remove("OPENAI_FEDERATION_RULE_ID")
+            .env_remove("OPENAI_WORKLOAD_IDENTITY_CONTEXT")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "Child credential-isolation test failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+    let home = TempDir::new()?;
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    save_auth(
+        home.path(),
+        &chatgpt_auth("root-seat"),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?;
+    let root_profile =
+        store.ensure_legacy_root_profile(/*label*/ None, /*priority*/ 20)?;
+    let mut profiles = vec![(root_profile, "root-seat")];
+    for (priority, owner) in [(0, "first-seat"), (10, "second-seat")] {
+        let profile = store.allocate_profile(/*label*/ None, priority)?;
+        save_auth(
+            &profile.credential_home,
+            &chatgpt_auth(owner),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )?;
+        store.complete_profile(&profile.id)?;
+        profiles.push((profile, owner));
+    }
+    // The process login is deliberately different; inference must use only the enrolled homes.
+    let outer = AuthManager::from_auth_for_testing(
+        crate::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
+    let config = test_auth_config(home.path().to_path_buf());
+    let runtime = AccountPoolRuntime::install(
+        outer,
+        config.clone(),
+        /*include_existing_root_login*/ false,
+    )
+    .await?;
+    let pool = runtime.pool();
+    assert_eq!(pool.snapshots().len(), 3);
+    let managers: std::collections::HashMap<_, _> = pool.auth_managers().into_iter().collect();
+    for (profile, owner) in &profiles {
+        let manager = &managers[&profile.id];
+        assert_eq!(
+            manager
+                .auth()
+                .await
+                .unwrap()
+                .get_chatgpt_user_id()
+                .as_deref(),
+            Some(*owner)
+        );
+        crate::auth::login_with_chatgpt_auth_tokens(
+            &profile.credential_home,
+            &chatgpt_auth("unrelated-process-owner")
+                .tokens
+                .unwrap()
+                .id_token
+                .raw_jwt,
+            "unrelated-workspace",
+            Some("pro"),
+        )?;
+        manager.reload().await;
+        assert_eq!(
+            manager
+                .auth()
+                .await
+                .unwrap()
+                .get_chatgpt_user_id()
+                .as_deref(),
+            Some(*owner)
+        );
+        runtime.runtime_state_store().select(
+            profile.id.clone(),
+            crate::AccountSelectionMode::AvailableOnly,
+        )?;
+        pool.activate(&profile.id)?;
+        let lease = pool.lease()?;
+        assert_eq!(
+            (
+                lease.profile().id.clone(),
+                lease.auth_manager().auth().await.unwrap().get_token()?
+            ),
+            (profile.id.clone(), format!("{owner}-access"))
+        );
+    }
+    let administration = crate::load_account_pool_for_management(&config).await?;
+    let administrative_owners: Vec<_> = administration
+        .auth_managers()
+        .into_iter()
+        .map(|(_, manager)| {
+            manager
+                .auth_cached()
+                .unwrap()
+                .get_chatgpt_user_id()
+                .unwrap()
+        })
+        .collect();
+    let mut administrative_owners = administrative_owners;
+    administrative_owners.sort();
+    assert_eq!(
+        administrative_owners,
+        vec!["first-seat", "root-seat", "second-seat"]
+    );
+    Ok(())
+}

@@ -136,9 +136,6 @@ impl AccountPoolRuntime {
             match materialize_profile(&pool, &auth_config, profile).await? {
                 MaterializeProfile::Registered | MaterializeProfile::Duplicate => {}
                 MaterializeProfile::Unsupported(issue) => profile_issues.push(issue),
-                MaterializeProfile::WorkloadIdentity => {
-                    return Err(AccountPoolRuntimeError::WorkloadIdentitySelected);
-                }
             }
         }
 
@@ -317,12 +314,6 @@ impl AccountPoolRuntime {
                         "skipping newly added account profile"
                     );
                 }
-                MaterializeProfile::WorkloadIdentity => {
-                    tracing::warn!(
-                        %id,
-                        "skipping newly added account profile that uses workload identity"
-                    );
-                }
             }
         }
         if !added.is_empty()
@@ -371,7 +362,6 @@ enum MaterializeProfile {
     Registered,
     Duplicate,
     Unsupported(AccountPoolRuntimeProfileIssue),
-    WorkloadIdentity,
 }
 
 async fn materialize_profile(
@@ -381,15 +371,7 @@ async fn materialize_profile(
 ) -> Result<MaterializeProfile, AccountPoolRuntimeError> {
     let mut profile_auth_config = auth_config.clone();
     profile_auth_config.codex_home = profile.credential_home.clone();
-    let manager = AuthManager::shared_from_auth_config(
-        profile_auth_config,
-        /*enable_codex_api_key_env*/ false,
-    )
-    .await?;
-
-    if manager.is_workload_identity_selected() {
-        return Ok(MaterializeProfile::WorkloadIdentity);
-    }
+    let manager = AuthManager::shared_managed_profile_from_auth_config(profile_auth_config).await;
 
     // A disabled profile keeps its slot without an auth probe: the user parked it on
     // purpose and its credentials must not be touched until it is re-enabled.
@@ -419,7 +401,7 @@ async fn materialize_profile(
         None => Ok(MaterializeProfile::Unsupported(
             AccountPoolRuntimeProfileIssue {
                 profile,
-                reason: "profile has no usable stored authentication".to_string(),
+                reason: "profile has no usable persisted ChatGPT OAuth credentials".to_string(),
             },
         )),
     }

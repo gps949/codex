@@ -25,9 +25,7 @@ pub async fn load_account_pool_for_management(
     {
         let mut config = auth_config.clone();
         config.codex_home = record.profile.credential_home.clone();
-        let manager =
-            AuthManager::shared_from_auth_config(config, /*enable_codex_api_key_env*/ false)
-                .await?;
+        let manager = AuthManager::shared_managed_profile_from_auth_config(config).await;
         // Loading cached credentials never refreshes OAuth for unrelated or parked accounts.
         if manager
             .auth_cached()

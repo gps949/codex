@@ -5,7 +5,7 @@ use pretty_assertions::assert_eq;
 fn save_email(record: &AccountProfileRecord, email: &str) -> anyhow::Result<()> {
     let token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
-        &serde_json::json!({"email": email}),
+        &serde_json::json!({"email": email,"https://api.openai.com/auth": { "chatgpt_user_id":"synthetic-user", "chatgpt_account_id":"synthetic-workspace" }}),
         &jsonwebtoken::EncodingKey::from_secret(b"synthetic-test-key"),
     )?;
     std::fs::write(
@@ -157,5 +157,34 @@ async fn pending_or_unreadable_identity_keeps_label_and_id_selection_without_usi
             record
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_oauth_profile_cannot_be_selected_using_an_obsolete_email() -> anyhow::Result<()> {
+    let home = tempfile::TempDir::new()?;
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    let profile = store.allocate_profile(Some("API artifact".into()), /*priority*/ 10)?;
+    store.complete_profile(&profile.id)?;
+    let records = store.load_profile_records()?;
+    save_email(&records[0], "obsolete@example.com")?;
+    let path = profile.credential_home.join("auth.json");
+    let mut auth: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    auth["auth_mode"] = serde_json::json!("apikey");
+    auth["OPENAI_API_KEY"] = serde_json::json!("synthetic-api");
+    std::fs::write(path, serde_json::to_vec(&auth)?)?;
+    let config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    assert!(
+        resolve_account_with_config(&records, "obsolete@example.com", &config.auth_config())
+            .is_err()
+    );
+    assert_eq!(
+        resolve_account_with_config(&records, profile.id.as_str(), &config.auth_config())
+            .map_err(anyhow::Error::msg)?,
+        &records[0]
+    );
     Ok(())
 }

@@ -23,14 +23,14 @@ pub(crate) fn resolve_account_with_config<'a>(
             return true;
         }
         record.state == AccountProfileState::Ready
-            && codex_login::load_auth_dot_json(
+            && codex_login::account_identity::load_login_identity(
                 &record.profile.credential_home,
                 auth_config.auth_credentials_store_mode,
                 auth_config.keyring_backend_kind,
             )
             .ok()
             .flatten()
-            .and_then(|auth| auth.tokens.and_then(|tokens| tokens.id_token.email))
+            .and_then(|identity| identity.email)
             .is_some_and(|email| email.trim() == name)
     });
     let Some(record) = matches.next() else {

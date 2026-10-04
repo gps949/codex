@@ -7,6 +7,7 @@ use super::AuthCredentialsStoreMode;
 use super::AuthKeyringBackendKind;
 use super::AuthManager;
 use super::CodexAuth;
+use super::CredentialSource;
 use super::load_auth_dot_json;
 
 impl AuthManager {
@@ -32,18 +33,26 @@ impl AuthManager {
         if !Self::auths_equal_for_refresh(cached.auth.as_ref(), Some(expected)) {
             return Ok(false);
         }
-        // Use the same ephemeral-first precedence and configured persistent backend as reload.
-        let stored = match load_auth_dot_json(
-            &self.codex_home,
-            AuthCredentialsStoreMode::Ephemeral,
-            AuthKeyringBackendKind::default(),
-        )? {
-            Some(stored) => Some(stored),
-            None => load_auth_dot_json(
+        // Match the manager's reload source. A process-local overlay cannot replace or veto a
+        // persisted subscription seat; standard managers keep their existing precedence.
+        let stored = match self.credential_source {
+            CredentialSource::ManagedProfile => load_auth_dot_json(
                 &self.codex_home,
                 self.auth_credentials_store_mode,
                 self.keyring_backend_kind,
             )?,
+            CredentialSource::Standard => match load_auth_dot_json(
+                &self.codex_home,
+                AuthCredentialsStoreMode::Ephemeral,
+                AuthKeyringBackendKind::default(),
+            )? {
+                Some(stored) => Some(stored),
+                None => load_auth_dot_json(
+                    &self.codex_home,
+                    self.auth_credentials_store_mode,
+                    self.keyring_backend_kind,
+                )?,
+            },
         };
         Ok(stored.is_some_and(|stored| {
             stored.resolved_mode() == expected.api_auth_mode()

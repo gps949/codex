@@ -81,33 +81,33 @@ pub(super) async fn run_account_view(
                 config.auth_keyring_backend_kind(),
             ) {
                 Ok(Some(auth)) => {
-                    let has_material = auth
-                        .tokens
-                        .as_ref()
-                        .is_some_and(|tokens| !tokens.access_token.is_empty())
-                        || auth
-                            .openai_api_key
+                    let managed_mode = auth.auth_mode
+                        == Some(codex_protocol::auth::AuthMode::Chatgpt)
+                        || (auth.auth_mode.is_none()
+                            && auth.openai_api_key.is_none()
+                            && auth.personal_access_token.is_none()
+                            && auth.agent_identity.is_none()
+                            && auth.bedrock_api_key.is_none()
+                            && auth.bedrock_access_keys.is_none());
+                    let has_material = managed_mode
+                        && auth.last_refresh.is_some()
+                        && auth.tokens.as_ref().is_some_and(|tokens| {
+                            !tokens.access_token.trim().is_empty()
+                                && !tokens.refresh_token.trim().is_empty()
+                        });
+                    let (plan, email) = if has_material {
+                        auth.tokens
                             .as_ref()
-                            .is_some_and(|key| !key.is_empty())
-                        || auth
-                            .personal_access_token
-                            .as_ref()
-                            .is_some_and(|token| !token.is_empty())
-                        || auth.agent_identity.as_ref().is_some_and(
-                            codex_login::auth::AgentIdentityStorage::has_auth_material,
-                        )
-                        || auth.bedrock_api_key.is_some()
-                        || auth.bedrock_access_keys.is_some();
-                    let (plan, email) = auth
-                        .tokens
-                        .as_ref()
-                        .map(|tokens| {
-                            (
-                                tokens.id_token.get_chatgpt_plan_type(),
-                                tokens.id_token.email.clone(),
-                            )
-                        })
-                        .unwrap_or_default();
+                            .map(|tokens| {
+                                (
+                                    tokens.id_token.get_chatgpt_plan_type(),
+                                    tokens.id_token.email.clone(),
+                                )
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        (None, None)
+                    };
                     (
                         plan,
                         email,

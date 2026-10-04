@@ -4,6 +4,9 @@ impl AuthConfig {
     /// Loads only persisted OAuth credentials for one explicitly selected pool profile.
     /// Host environment tokens and process-local external auth are never adopted.
     pub(crate) async fn load_managed_profile_auth(&self) -> std::io::Result<Option<CodexAuth>> {
+        if self.auth_credentials_store_mode == AuthCredentialsStoreMode::Ephemeral {
+            return Ok(None);
+        }
         let Some(saved) = load_auth_dot_json(
             &self.codex_home,
             self.auth_credentials_store_mode,
@@ -126,9 +129,11 @@ impl AuthManager {
     }
 
     /// Creates an OAuth-only manager bound to persisted credentials at this exact home.
-    pub(crate) async fn shared_managed_profile_from_auth_config(
-        auth_config: AuthConfig,
-    ) -> Arc<Self> {
+    ///
+    /// Both initialization and reload ignore environment tokens, process-local auth and workload
+    /// identity. The caller must enforce host workload selection before installing an inference
+    /// pool; login-method, workspace and network policies still apply to these credentials.
+    pub async fn shared_managed_profile_from_auth_config(auth_config: AuthConfig) -> Arc<Self> {
         let auth = auth_config.load_managed_profile_auth().await.ok().flatten();
         Arc::new(Self::from_loaded_auth_config(
             auth_config,
@@ -138,3 +143,7 @@ impl AuthManager {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "host_login_tests.rs"]
+mod tests;

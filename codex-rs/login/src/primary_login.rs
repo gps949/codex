@@ -269,7 +269,7 @@ pub(crate) fn stored_owner_hash(config: &AuthConfig) -> io::Result<String> {
     tokens_owner_hash(tokens)
 }
 
-fn validate_stored_mode(auth: &AuthDotJson) -> io::Result<()> {
+pub(crate) fn validate_stored_mode(auth: &AuthDotJson) -> io::Result<()> {
     let managed = auth.auth_mode == Some(AuthMode::Chatgpt)
         || (auth.auth_mode.is_none()
             && auth.openai_api_key.is_none()

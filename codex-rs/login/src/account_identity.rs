@@ -40,6 +40,7 @@ pub fn load_login_identity(
 }
 
 pub(crate) fn login_identity_from_auth(auth: &AuthDotJson) -> Option<AccountLoginIdentity> {
+    crate::primary_login::validate_stored_mode(auth).ok()?;
     let tokens = auth.tokens.as_ref()?;
     let chatgpt_user_id = tokens
         .id_token
