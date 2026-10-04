@@ -7,7 +7,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::io;
 
-pub(super) fn stored_auth(
+pub(crate) fn stored_auth(
     config: &AuthConfig,
     source: &PrimaryLoginSource,
 ) -> io::Result<Option<AuthDotJson>> {

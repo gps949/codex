@@ -591,3 +591,59 @@ async fn temporary_policy_unavailability_preserves_login_and_retries_with_networ
             .is_ok()
     );
 }
+
+struct ConfirmedPolicyDenial {
+    failure: crate::PrimaryLoginPolicyFailure,
+    controller: codex_http_client::NetworkPolicyController,
+}
+impl PrimaryLoginPolicyLoader for ConfirmedPolicyDenial {
+    fn prepare(&self, _manager: Arc<crate::AuthManager>) -> crate::ExternalAuthFuture<'_, ()> {
+        Box::pin(async move {
+            self.controller.publish(
+                self.controller.policy().revision(),
+                codex_http_client::DestinationPolicy::Restricted {
+                    allowed_hosts: Default::default(),
+                },
+            );
+            Err(self.failure.into_io_error())
+        })
+    }
+}
+
+#[tokio::test]
+async fn primary_login_policy_denial_is_reported_only_for_its_selection_revision() {
+    let home = TempDir::new().unwrap();
+    let mut cfg = config(home.path().to_path_buf());
+    let policy = Arc::new(ConfirmedPolicyDenial {
+        failure: crate::PrimaryLoginPolicyFailure::RemoteDisabled,
+        controller: Default::default(),
+    });
+    let factory = cfg
+        .auth_route_config
+        .http_client_factory()
+        .clone()
+        .with_network_policy(policy.controller.policy());
+    cfg.auth_route_config = crate::AuthRouteConfig::from_http_client_factory(factory);
+    let profile = ready_profile(home.path(), "policy-seat", "policy-workspace");
+    let store = PrimaryLoginStore::new(home.path().to_path_buf());
+    let selected = store.select_profile(&cfg, &profile.id).await.unwrap();
+    let runtime = PrimaryLoginRuntime::start(cfg).await.unwrap();
+    let loader: Arc<dyn PrimaryLoginPolicyLoader> = policy;
+    runtime.set_policy_loader(Arc::downgrade(&loader));
+    let resolved = runtime.auth_manager().auth_with_http_client_factory().await;
+    let (_, factory) = resolved.expect("Policy denial preserves local login");
+    assert!(matches!(
+        factory
+            .network_policy()
+            .acquire(&"https://chatgpt.com".parse().unwrap()),
+        Err(codex_http_client::NetworkPolicyDenied::Destination)
+    ));
+    assert_eq!(
+        runtime.policy_failure(selected.revision),
+        Some(crate::PrimaryLoginPolicyFailure::RemoteDisabled)
+    );
+    assert_eq!(runtime.policy_failure(selected.revision + 1), None);
+    assert!(runtime.auth_manager().auth_cached().is_some());
+    let root = store.use_root().unwrap();
+    assert_eq!(runtime.policy_failure(root.revision), None);
+}

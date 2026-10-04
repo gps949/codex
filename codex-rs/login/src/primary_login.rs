@@ -22,7 +22,7 @@ use crate::AuthDotJson;
 use crate::CodexAuth;
 use crate::TokenData;
 
-const PRIMARY_LOGIN_VERSION: u32 = 1;
+const PRIMARY_LOGIN_VERSION: u32 = 2;
 const PRIMARY_LOGIN_FILE: &str = ".primary-login.json";
 const MAX_SOURCE_BYTES: u64 = 64 * 1024;
 
@@ -46,6 +46,8 @@ pub struct PrimaryLoginState {
     pub version: u32,
     pub revision: u64,
     pub source: PrimaryLoginSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_handover: Option<crate::PrimaryLoginHandover>,
 }
 
 impl Default for PrimaryLoginState {
@@ -54,6 +56,7 @@ impl Default for PrimaryLoginState {
             version: PRIMARY_LOGIN_VERSION,
             revision: 0,
             source: PrimaryLoginSource::RootLogin,
+            remote_handover: None,
         }
     }
 }
@@ -143,10 +146,13 @@ impl PrimaryLoginStore {
                     "selected profile identity changed during sign-in",
                 ));
             }
-            store.write_source_unlocked(PrimaryLoginSource::Profile {
-                profile_id: id,
-                owner_hash,
-            })
+            store.write_source_unlocked(
+                PrimaryLoginSource::Profile {
+                    profile_id: id,
+                    owner_hash,
+                },
+                Some(crate::PrimaryLoginHandover::for_auth(&auth)?),
+            )
         })
         .await
         .map_err(io::Error::other)?
@@ -155,7 +161,7 @@ impl PrimaryLoginStore {
     /// Returns to the root login. This action does not create, copy or revoke credentials.
     pub fn use_root(&self) -> io::Result<PrimaryLoginState> {
         let _lock = crate::account_file::lock(&self.codex_home)?;
-        self.write_source_unlocked(PrimaryLoginSource::RootLogin)
+        self.write_source_unlocked(PrimaryLoginSource::RootLogin, /*remote_handover*/ None)
     }
 
     /// Signs the application out while keeping root and pool credentials available for inference.
@@ -167,7 +173,7 @@ impl PrimaryLoginStore {
             ));
         }
         let _lock = crate::account_file::lock(&self.codex_home)?;
-        self.write_source_unlocked(PrimaryLoginSource::SignedOut)
+        self.write_source_unlocked(PrimaryLoginSource::SignedOut, /*remote_handover*/ None)
     }
 
     /// Checks a deletion guard without acquiring another metadata lock.
@@ -187,7 +193,95 @@ impl PrimaryLoginStore {
         Self::is_profile_selected_unlocked(home, id)
     }
 
-    fn write_source_unlocked(&self, source: PrimaryLoginSource) -> io::Result<PrimaryLoginState> {
+    /// Explicit root selection may continue an already-enabled Remote connection for this owner.
+    pub async fn select_root(&self, config: &AuthConfig) -> io::Result<PrimaryLoginState> {
+        if config.codex_home != self.codex_home || crate::is_workload_identity_selected() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Host-managed authentication cannot be replaced",
+            ));
+        }
+        // Host PAT/Agent Identity hydration belongs to the request path. Selecting a source
+        // must not contact a network merely to render the management page.
+        let local = config.root_auth_load_is_local()?;
+        let auth = if local {
+            config.load_auth(/*enable_codex_api_key_env*/ false).await?
+        } else {
+            None
+        };
+        let handover = auth
+            .as_ref()
+            .and_then(|auth| crate::PrimaryLoginHandover::for_auth(auth).ok());
+        let _lock = crate::account_file::lock(&self.codex_home)?;
+        if let Some(intent) = &handover {
+            let saved = crate::primary_login_runtime::fingerprint::stored_auth(
+                config,
+                &PrimaryLoginSource::RootLogin,
+            )?;
+            let owner = saved
+                .as_ref()
+                .and_then(|saved| saved.tokens.as_ref())
+                .and_then(|tokens| tokens_owner_hash(tokens).ok());
+            if owner.as_deref() != Some(&intent.target_owner_hash) {
+                return Err(invalid_source("root login changed during selection"));
+            }
+        }
+        self.write_source_unlocked(PrimaryLoginSource::RootLogin, handover)
+    }
+
+    /// Runs a short local continuation while retaining the source and credential transaction.
+    /// The callback must not await or acquire another account metadata lock.
+    pub fn with_current_handover<T>(
+        &self,
+        config: &AuthConfig,
+        expected: &PrimaryLoginState,
+        apply: impl FnOnce(&crate::PrimaryLoginHandover) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let _metadata = crate::account_file::try_lock(&self.codex_home)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "host selection is busy"))?;
+        if config.codex_home != self.codex_home || self.load()? != *expected {
+            return Err(invalid_source(
+                "host selection changed before Remote continuation",
+            ));
+        }
+        let intent = expected
+            .remote_handover
+            .as_ref()
+            .filter(|intent| intent.is_current())
+            .ok_or_else(|| invalid_source("Remote continuation expired"))?;
+        let mut selected_config = config.clone();
+        if let PrimaryLoginSource::Profile { profile_id, .. } = &expected.source {
+            selected_config.codex_home = ready_profile(
+                &AccountProfileStore::new(self.codex_home.clone()),
+                profile_id,
+            )?
+            .credential_home;
+        }
+        let _credentials = crate::account_file::try_refresh_lock(&selected_config.codex_home)?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::WouldBlock, "host credentials are busy")
+            })?;
+        let saved = crate::primary_login_runtime::fingerprint::stored_auth(
+            &selected_config,
+            &expected.source,
+        )?;
+        let owner = saved
+            .as_ref()
+            .and_then(|saved| saved.tokens.as_ref())
+            .and_then(|tokens| tokens_owner_hash(tokens).ok());
+        if owner.as_deref() != Some(&intent.target_owner_hash) {
+            return Err(invalid_source(
+                "host credentials changed before Remote continuation",
+            ));
+        }
+        apply(intent)
+    }
+
+    fn write_source_unlocked(
+        &self,
+        source: PrimaryLoginSource,
+        remote_handover: Option<crate::PrimaryLoginHandover>,
+    ) -> io::Result<PrimaryLoginState> {
         let current = self.load()?;
         let state = PrimaryLoginState {
             version: PRIMARY_LOGIN_VERSION,
@@ -196,6 +290,7 @@ impl PrimaryLoginStore {
                 .checked_add(1)
                 .ok_or_else(|| invalid_source("primary-login revision limit reached"))?,
             source,
+            remote_handover,
         };
         validate_state(&state)?;
         fs::create_dir_all(&self.codex_home)?;
@@ -319,8 +414,16 @@ pub(crate) fn tokens_owner_hash(tokens: &TokenData) -> io::Result<String> {
 }
 
 fn validate_state(state: &PrimaryLoginState) -> io::Result<()> {
-    if state.version != PRIMARY_LOGIN_VERSION {
+    if !matches!(state.version, 1 | PRIMARY_LOGIN_VERSION) {
         return Err(invalid_source("unsupported primary-login metadata version"));
+    }
+    if let Some(handover) = &state.remote_handover {
+        handover.validate()?;
+        if state.version == 1 || state.source == PrimaryLoginSource::SignedOut {
+            return Err(invalid_source(
+                "primary-login handover is not permitted for this state",
+            ));
+        }
     }
     if let PrimaryLoginSource::Profile {
         profile_id,

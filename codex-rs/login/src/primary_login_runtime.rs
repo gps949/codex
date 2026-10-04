@@ -29,10 +29,13 @@ use crate::primary_login::ready_profile;
 use crate::primary_login::stored_owner_hash;
 
 #[path = "primary_login_fingerprint.rs"]
-mod fingerprint;
+pub(crate) mod fingerprint;
 use fingerprint::fingerprint_auth;
 use fingerprint::storage_fingerprint;
 use fingerprint::stored_auth;
+
+#[path = "primary_login_source_validation.rs"]
+mod source_validation;
 
 /// Publishes the selected host account's destination requirements before a Remote request.
 /// Implementations must keep this policy owner separate from inference and must never
@@ -67,6 +70,8 @@ struct PrimaryLoginResolver {
     policy_loader: RwLock<Option<Weak<dyn PrimaryLoginPolicyLoader>>>,
     root_external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
     root_external_revision: AtomicU64,
+    policy_failure: RwLock<Option<(u64, crate::PrimaryLoginPolicyFailure)>>,
+    transition_observer: RwLock<Option<Weak<dyn crate::PrimaryLoginTransitionObserver>>>,
 }
 
 impl PrimaryLoginResolver {
@@ -75,6 +80,14 @@ impl PrimaryLoginResolver {
         // for every inference account. Source changes are rechecked after every asynchronous load.
         let mut selected = Arc::clone(&self.selected).lock_owned().await;
         let state = self.store.load()?;
+        if let Some(observer) = self
+            .transition_observer
+            .read()
+            .ok()
+            .and_then(|value| value.as_ref().and_then(Weak::upgrade))
+        {
+            observer.before_selection(&state);
+        }
         let root_external_revision = self.root_external_revision.load(Ordering::Acquire);
         if state.source == PrimaryLoginSource::SignedOut {
             *selected = None;
@@ -182,12 +195,17 @@ impl PrimaryLoginResolver {
         {
             let policy = loader.prepare(Arc::clone(&cached.manager)).await;
             self.verify_source(&state, &cached.config)?;
-            if policy.is_err() {
-                // The policy owner closes network permits. Preserve this login lifetime so the
-                // Remote transport can retry without forgetting its enable state or pairing.
-                return Err(io::Error::other(RefreshTokenError::Policy(
-                    codex_http_client::NetworkPolicyDenied::Unavailable,
-                )));
+            if let Ok(mut failure) = self.policy_failure.write() {
+                *failure = policy
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.get_ref())
+                    .and_then(|error| error.downcast_ref::<crate::PrimaryLoginPolicyFailure>())
+                    .copied()
+                    .map(|failure| (state.revision, failure));
+            }
+            if let Err(error) = policy {
+                return Err(crate::primary_login_policy::classified_policy_error(error));
             }
         }
         let mut auth = match resolution {
@@ -253,80 +271,6 @@ impl PrimaryLoginResolver {
         cached.fingerprint = fingerprint_auth(current.as_ref())?;
         Ok(auth)
     }
-
-    fn cached_owner_is_current(&self, auth: Option<&CodexAuth>) -> io::Result<bool> {
-        let state = self.store.load()?;
-        match state.source {
-            PrimaryLoginSource::SignedOut => Ok(false),
-            PrimaryLoginSource::Profile {
-                profile_id,
-                owner_hash,
-            } => {
-                let profile = ready_profile(
-                    &AccountProfileStore::new(self.config.codex_home.clone()),
-                    &profile_id,
-                )?;
-                let mut config = self.config.clone();
-                config.codex_home = profile.credential_home;
-                if stored_owner_hash(&config)? != owner_hash {
-                    return Err(source_changed());
-                }
-                Ok(auth.is_some_and(|auth| {
-                    managed_owner_hash(auth).is_ok_and(|current| current == owner_hash)
-                }))
-            }
-            PrimaryLoginSource::RootLogin => {
-                let Some(auth) = auth else {
-                    return Ok(true);
-                };
-                if matches!(
-                    auth,
-                    CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_)
-                ) {
-                    let stored = stored_auth(&self.config, &PrimaryLoginSource::RootLogin)?;
-                    let tokens = stored
-                        .as_ref()
-                        .and_then(|auth| auth.tokens.as_ref())
-                        .ok_or_else(source_changed)?;
-                    return Ok(crate::primary_login::tokens_owner_hash(tokens)?
-                        == crate::primary_login::tokens_owner_hash(&auth.get_token_data()?)?);
-                }
-                // Hydrating a new root PAT can await HTTP. Retire the old cached identity before
-                // that wait while retaining stock environment-token precedence in the resolver.
-                let stored = stored_auth(&self.config, &PrimaryLoginSource::RootLogin)?;
-                if auth.is_personal_access_token_auth()
-                    && let Some(previous) = stored
-                        .as_ref()
-                        .and_then(|stored| stored.personal_access_token.as_ref())
-                {
-                    return Ok(auth.get_token().is_ok_and(|current| &current == previous));
-                }
-                Ok(true)
-            }
-        }
-    }
-
-    fn verify_source(&self, expected: &PrimaryLoginState, config: &AuthConfig) -> io::Result<()> {
-        if self.store.load()? != *expected {
-            return Err(source_changed());
-        }
-        if let PrimaryLoginSource::Profile {
-            profile_id,
-            owner_hash,
-        } = &expected.source
-        {
-            let profile = ready_profile(
-                &AccountProfileStore::new(self.config.codex_home.clone()),
-                profile_id,
-            )?;
-            if profile.credential_home != config.codex_home
-                || stored_owner_hash(config)? != *owner_hash
-            {
-                return Err(source_changed());
-            }
-        }
-        Ok(())
-    }
 }
 
 impl ExternalAuth for PrimaryLoginResolver {
@@ -388,6 +332,8 @@ impl PrimaryLoginRuntime {
             policy_loader: RwLock::new(None),
             root_external_auth: RwLock::new(None),
             root_external_revision: AtomicU64::new(0),
+            policy_failure: RwLock::new(None),
+            transition_observer: RwLock::new(None),
         });
         facade
             .install_host_login_source(resolver.clone())
@@ -446,6 +392,29 @@ impl PrimaryLoginRuntime {
         }
     }
 
+    pub fn set_transition_observer(
+        &self,
+        observer: Weak<dyn crate::PrimaryLoginTransitionObserver>,
+    ) {
+        if let Some(resolver) = &self.resolver
+            && let Ok(mut current) = resolver.transition_observer.write()
+        {
+            *current = Some(observer);
+        }
+    }
+
+    /// Returns a confirmed policy denial only for the requested source revision.
+    pub fn policy_failure(&self, revision: u64) -> Option<crate::PrimaryLoginPolicyFailure> {
+        self.resolver
+            .as_ref()?
+            .policy_failure
+            .read()
+            .ok()?
+            .as_ref()
+            .filter(|(observed, _)| *observed == revision)
+            .map(|(_, failure)| *failure)
+    }
+
     pub fn auth_manager(&self) -> Arc<AuthManager> {
         Arc::clone(&self.facade)
     }
@@ -456,6 +425,24 @@ impl PrimaryLoginRuntime {
         let Some(resolver) = &self.resolver else {
             return Ok(());
         };
+        let observer = resolver
+            .transition_observer
+            .read()
+            .ok()
+            .and_then(|value| value.as_ref().and_then(Weak::upgrade));
+        let state = match resolver.store.load() {
+            Ok(state) => state,
+            Err(error) => {
+                self.facade.sync_host_login_cached_auth(None)?;
+                if let Some(observer) = &observer {
+                    observer.selection_unavailable();
+                }
+                return Err(error);
+            }
+        };
+        if let Some(observer) = &observer {
+            observer.before_selection(&state);
+        }
         // Revocation must not queue behind an OAuth request in the selected manager. This local
         // check still clears the old owner when the observation budget cancels the later wait.
         if !resolver
@@ -465,9 +452,21 @@ impl PrimaryLoginRuntime {
             self.facade.sync_host_login_cached_auth(None)?;
         }
         match resolver.resolve_selected(Resolution::Observe).await {
-            Ok(auth) => self.facade.sync_host_login_cached_auth(Some(auth)),
+            Ok(auth) => {
+                self.facade
+                    .sync_host_login_cached_auth(Some(auth.clone()))?;
+                if resolver.store.load()? == state
+                    && let Some(observer) = &observer
+                {
+                    observer.after_selection(&state, Some(&auth));
+                }
+                Ok(())
+            }
             Err(error) => {
                 self.facade.sync_host_login_cached_auth(None)?;
+                if let Some(observer) = &observer {
+                    observer.after_selection(&state, None);
+                }
                 if error.kind() == io::ErrorKind::NotConnected
                     && resolver
                         .store

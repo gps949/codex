@@ -23,6 +23,62 @@ use crate::AuthKeyringBackendKind;
 use crate::TokenData;
 use crate::save_auth;
 
+#[tokio::test]
+async fn explicit_handover_is_bound_to_owner_and_implicit_login_cancels_it() {
+    let home = TempDir::new().unwrap();
+    let cfg = config(home.path().to_path_buf());
+    let profile = ready_profile(home.path(), "seat-a", "shared-workspace");
+    let store = PrimaryLoginStore::new(home.path().to_path_buf());
+    let selected = store.select_profile(&cfg, &profile.id).await.unwrap();
+    assert_eq!(
+        store
+            .with_current_handover(&cfg, &selected, |intent| Ok(intent.is_current()))
+            .unwrap(),
+        true
+    );
+    write_auth(
+        &profile.credential_home,
+        &credentials("seat-b", "shared-workspace", "b"),
+    );
+    assert!(
+        store
+            .with_current_handover::<()>(&cfg, &selected, |_| panic!(
+                "must reject replacement owner"
+            ))
+            .is_err()
+    );
+    let implicit = store.use_root().unwrap();
+    assert_eq!(implicit.remote_handover, None);
+    assert!(
+        store
+            .with_current_handover::<()>(&cfg, &selected, |_| panic!("must reject newer source"))
+            .is_err()
+    );
+    write_auth(home.path(), &credentials("root", "root-workspace", "root"));
+    let root = store.select_root(&cfg).await.unwrap();
+    assert!(root.remote_handover.is_some());
+    assert_eq!(store.sign_out().unwrap().remote_handover, None);
+}
+
+#[tokio::test]
+async fn version_one_metadata_upgrades_only_when_the_user_selects_a_source() {
+    let home = TempDir::new().unwrap();
+    let store = PrimaryLoginStore::new(home.path().to_path_buf());
+    fs::write(
+        store.path(),
+        r#"{"version":1,"revision":4,"source":{"type":"root_login"}}"#,
+    )
+    .unwrap();
+    assert_eq!(store.load().unwrap().version, 1);
+    let profile = ready_profile(home.path(), "seat", "workspace");
+    let selected = store
+        .select_profile(&config(home.path().to_path_buf()), &profile.id)
+        .await
+        .unwrap();
+    assert_eq!((selected.version, selected.revision), (2, 5));
+    assert_eq!(store.load().unwrap(), selected);
+}
+
 pub(crate) fn config(codex_home: PathBuf) -> AuthConfig {
     AuthConfig {
         codex_home,
@@ -274,7 +330,7 @@ async fn primary_profile_obeys_current_login_and_workspace_restrictions() {
 fn malformed_unknown_and_oversized_sources_fail_closed() {
     let home = TempDir::new().unwrap();
     let store = PrimaryLoginStore::new(home.path().to_path_buf());
-    for invalid in ["{".to_string(), r#"{"version":2,"revision":1,"source":{"type":"root_login"}}"#.to_string(), r#"{"version":1,"revision":1,"source":{"type":"profile","profile_id":"../escape","owner_hash":"abc"}}"#.to_string(), " ".repeat(65537)] {
+    for invalid in ["{".to_string(), r#"{"version":3,"revision":1,"source":{"type":"root_login"}}"#.to_string(), r#"{"version":1,"revision":1,"source":{"type":"profile","profile_id":"../escape","owner_hash":"abc"}}"#.to_string(), " ".repeat(65537)] {
         fs::write(store.path(), invalid).unwrap();
         assert!(store.load().is_err());
         assert!(PrimaryLoginStore::is_profile_selected(home.path(), &AccountProfileId::new("other").unwrap()).is_err());
@@ -286,6 +342,7 @@ fn revision_overflow_keeps_existing_choice_intact() {
     let home = TempDir::new().unwrap();
     let store = PrimaryLoginStore::new(home.path().to_path_buf());
     let state = PrimaryLoginState {
+        remote_handover: None,
         version: 1,
         revision: u64::MAX,
         source: PrimaryLoginSource::SignedOut,
@@ -323,4 +380,16 @@ async fn selected_host_profile_refuses_metadata_and_credential_deletion_until_si
         profiles.purge_managed_credentials(&profile.id).unwrap(),
         true
     );
+}
+
+#[test]
+fn malformed_handover_expiration_cannot_panic_or_authorize_continuation() {
+    for expires_at in [i64::MIN, i64::MAX, 0] {
+        let intent = crate::PrimaryLoginHandover {
+            id: uuid::Uuid::new_v4().to_string(),
+            expires_at,
+            target_owner_hash: "a".repeat(64),
+        };
+        assert!(!intent.is_current());
+    }
 }
