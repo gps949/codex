@@ -165,6 +165,7 @@ use toml::Value as TomlValue;
 use toml_edit::DocumentMut;
 
 mod auth_keyring;
+mod decision_advisor;
 pub mod edit;
 mod managed_features;
 mod metrics;
@@ -879,6 +880,9 @@ pub struct Config {
 
     /// Scheduling knobs for the native multi-account execution pool.
     pub account_pool: AccountPoolConfigToml,
+
+    /// Optional independent semantic ranking for deferred tool-search results.
+    pub decision_advisor: codex_model_provider::DecisionAdvisorSettings,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: Constrained<HashMap<String, McpServerConfig>>,
@@ -4333,6 +4337,7 @@ impl Config {
                     env!("CARGO_PKG_VERSION"),
                 ),
             },
+            decision_advisor: decision_advisor::resolve(cfg.decision_advisor.as_ref())?,
             account_pool: cfg.account_pool.unwrap_or_default(),
             mcp_servers,
             non_prefixed_mcp_tool_servers,

@@ -10,6 +10,7 @@ use crate::HooksToml;
 use crate::account_pool::AccountPoolConfigToml;
 use crate::browser_use::BrowserUseConfigToml;
 use crate::computer_use::ComputerUseConfigToml;
+use crate::decision_advisor::DecisionAdvisorConfigToml;
 use crate::permissions_toml::PermissionsToml;
 use crate::profile_toml::ConfigProfile;
 use crate::types::AnalyticsConfigToml;
@@ -205,6 +206,9 @@ pub struct ConfigToml {
     /// Scheduling knobs for the native multi-account execution pool.
     #[serde(default)]
     pub account_pool: Option<AccountPoolConfigToml>,
+
+    /// Optional semantic tool-search advisor, disabled unless explicitly configured.
+    pub decision_advisor: Option<DecisionAdvisorConfigToml>,
 
     pub browser_use: Option<BrowserUseConfigToml>,
 
