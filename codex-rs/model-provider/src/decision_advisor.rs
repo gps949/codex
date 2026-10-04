@@ -364,3 +364,7 @@ impl DecisionAdvisor {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "decision_advisor_tests.rs"]
+mod tests;
