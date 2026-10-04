@@ -57,6 +57,8 @@ The browser manager exposes **Host sign-in / Remote Control** and **Use for host
 
 Use `codex account primary root` to return to the root credentials created by `codex login`, or `codex account primary logout` to sign out the host while retaining pool credentials. A new successful `codex login` selects the root login again. Removing the profile currently used for host sign-in is blocked until you choose another source or sign out.
 
+Explicit host selection is applied by running hosts without restarting Codex. An already enabled Remote service reconnects for the selected owner; a disabled service stays disabled. Old device authorization is not transferred, so a different owner may require pairing again. `status` distinguishes saved credentials from a recent runtime confirmation.
+
 Older `legacy-root` pool entries stay visible after upgrading. Remove that entry explicitly if you want a separate pool; its removal retains root credentials. New enrollments do not create it. The phone must match the selected host account and workspace; changing that identity can require reconnecting or pairing again. Stored authentication being ready does not prove that a Remote device connection is paired.
 
 ## Everyday controls
