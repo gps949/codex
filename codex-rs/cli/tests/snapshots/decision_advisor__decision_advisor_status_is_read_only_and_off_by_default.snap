@@ -1,0 +1,18 @@
+---
+source: cli/tests/decision_advisor.rs
+assertion_line: 13
+expression: "String::from_utf8(output.stdout)?"
+---
+{
+  "mode": "off",
+  "provider": "typesafe",
+  "model": "jev-1.13.0",
+  "suggestSkills": false,
+  "endpointConfigured": true,
+  "apiKeyEnv": "TYPESAFE_API_KEY",
+  "credentialPresent": false,
+  "timeoutMs": 650,
+  "minConfidence": 0.35,
+  "scope": "tool_search ranking and independently enabled skill hints",
+  "diagnostics": "Anonymous runtime counters appear in debug logs; counters are process-local."
+}

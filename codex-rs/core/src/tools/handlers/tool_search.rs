@@ -28,10 +28,11 @@ use std::sync::Weak;
 use tracing::instrument;
 
 pub struct ToolSearchHandler {
-    search_infos: Vec<ToolSearchInfo>,
+    pub(super) search_infos: Vec<ToolSearchInfo>,
     source_listing: ToolSearchSourceListing,
     spec: ToolSpec,
-    search_engine: SearchEngine<usize>,
+    pub(super) search_engine: SearchEngine<usize>,
+    pub(super) catalog_revision: [u8; 20],
 }
 
 #[derive(Default)]
@@ -159,11 +160,13 @@ impl ToolSearchHandler {
         let search_engine =
             SearchEngineBuilder::<usize>::with_documents(Language::English, documents).build();
 
+        let catalog_revision = super::tool_search_advisor::catalog_revision(&search_infos);
         Self {
             search_infos,
             source_listing,
             spec,
             search_engine,
+            catalog_revision,
         }
     }
 }
@@ -195,8 +198,8 @@ impl ToolSearchHandler {
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
         let ToolInvocation {
-            payload,
-            step_context,
+            ref payload,
+            ref step_context,
             ..
         } = invocation;
 
@@ -227,7 +230,21 @@ impl ToolSearchHandler {
             return Ok(boxed_tool_output(ToolSearchOutput { tools: Vec::new() }));
         }
 
-        let mut tools = self.search(query, limit)?;
+        let baseline = self
+            .search_engine
+            .search(query, limit)
+            .into_iter()
+            .map(|result| result.document.id)
+            .collect::<Vec<_>>();
+        let selected =
+            super::tool_search_advisor::ranked_ids(self, &invocation, query, &baseline, limit)
+                .await;
+        let mut tools = self.search_output_tools(
+            selected
+                .iter()
+                .filter_map(|id| self.search_infos.get(*id))
+                .map(|info| &info.entry),
+        )?;
         let model_messages = ResolvedModelMessages::from_model(&step_context.settings.model_info);
         IndirectNamespacePrefixes::new(
             model_messages.indirect_description_prefixes(),
@@ -243,21 +260,6 @@ impl ToolSearchHandler {
 impl CoreToolRuntime for ToolSearchHandler {}
 
 impl ToolSearchHandler {
-    fn search(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<LoadableToolSpec>, FunctionCallError> {
-        let results = self
-            .search_engine
-            .search(query, limit)
-            .into_iter()
-            .map(|result| result.document.id)
-            .filter_map(|id| self.search_infos.get(id))
-            .map(|search_info| &search_info.entry);
-        self.search_output_tools(results)
-    }
-
     fn search_output_tools<'a>(
         &self,
         results: impl IntoIterator<Item = &'a ToolSearchEntry>,

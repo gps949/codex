@@ -256,3 +256,5 @@ mod worktree_trust;
 
 #[path = "guardian_sender_messages_tests.rs"]
 mod guardian_sender_messages;
+
+mod decision_advisor;

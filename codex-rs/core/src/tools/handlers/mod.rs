@@ -30,6 +30,7 @@ mod sleep;
 mod test_sync;
 pub(crate) mod test_sync_spec;
 mod tool_search;
+mod tool_search_advisor;
 pub(crate) mod tool_search_spec;
 pub(crate) mod unified_exec;
 mod view_image;

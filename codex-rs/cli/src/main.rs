@@ -61,6 +61,7 @@ mod app_cmd;
 mod cloud_config;
 mod daemon_install;
 mod daemon_telemetry;
+mod decision_advisor_cmd;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod desktop_app;
 mod doctor;
@@ -168,6 +169,9 @@ enum Subcommand {
 
     /// [experimental] Manage the native multi-account pool.
     Account(AccountCommand),
+
+    /// [experimental] Inspect and probe the opt-in semantic tool-search advisor.
+    DecisionAdvisor(decision_advisor_cmd::DecisionAdvisorCommand),
 
     /// Manage external MCP servers for Codex.
     Mcp(McpCli),
@@ -1839,6 +1843,15 @@ async fn cli_main(
             );
             run_logout(logout_cli.config_overrides).await;
         }
+        Some(Subcommand::DecisionAdvisor(mut command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "decision-advisor",
+            )?;
+            prepend_config_flags(&mut command.config_overrides, root_config_overrides.clone());
+            decision_advisor_cmd::run(command).await?;
+        }
         Some(Subcommand::Account(mut account_cli)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2687,6 +2700,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Login(_)) => Some("login"),
         Some(Subcommand::Logout(_)) => Some("logout"),
         Some(Subcommand::Account(_)) => Some("account"),
+        Some(Subcommand::DecisionAdvisor(_)) => Some("decision-advisor"),
         Some(Subcommand::Completion(_)) => Some("completion"),
         Some(Subcommand::Update) => Some("update"),
         Some(Subcommand::Cloud(_)) => Some("cloud"),
