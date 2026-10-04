@@ -316,6 +316,39 @@ async fn cancellation_while_waiting_for_the_spending_lock_prevents_a_consume_pos
 }
 
 #[tokio::test]
+async fn corrupt_pending_reset_operation_blocks_automatic_spending() -> anyhow::Result<()> {
+    use sha1::Digest;
+    let server = MockServer::start().await;
+    mount_exhausted_usage(&server, /*recovered*/ None).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(/*s*/ 500))
+        .expect(/*r*/ 0)
+        .mount(&server)
+        .await;
+    let fixture =
+        exhausted_credit_fixture(format!("{}/backend-api", server.uri()), /*count*/ 2).await?;
+    let id = fixture.failed.profile_id().expect("failed profile");
+    let key = format!("{:x}", sha1::Sha1::digest(id.as_str().as_bytes()));
+    let path = fixture
+        .config
+        .codex_home
+        .join(format!(".rate-limit-reset-credit-{key}.json"));
+    std::fs::write(&path, b"{interrupted")?;
+    assert!(
+        try_reset_credit_rescue(
+            &fixture.execution,
+            &fixture.failed,
+            &fixture.config,
+            &CancellationToken::new()
+        )
+        .await
+        .is_none()
+    );
+    assert_eq!(std::fs::read(path)?, b"{interrupted".to_vec());
+    Ok(())
+}
+
+#[tokio::test]
 async fn cancellation_after_a_consume_post_retains_the_ambiguous_request_id() -> anyhow::Result<()>
 {
     let server = MockServer::start().await;
@@ -330,7 +363,7 @@ async fn cancellation_after_a_consume_post_retains_the_ambiguous_request_id() ->
                 .set_body_json(json!({"code": "reset", "windows_reset": 2}))
                 .set_delay(std::time::Duration::from_millis(500))
         })
-        .expect(/*requests*/ 1)
+        .expect(/*r*/ 2)
         .mount(&server)
         .await;
     let fixture =
@@ -362,6 +395,363 @@ async fn cancellation_after_a_consume_post_retains_the_ambiguous_request_id() ->
         })
         .count();
     assert_eq!(records, 1);
+    let path = std::fs::read_dir(&fixture.config.codex_home)?
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rate-limit-reset-credit-")
+        })
+        .expect("pending operation")
+        .path();
+    let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    record["attemptedAt"] = json!(Utc::now().timestamp() - 3600);
+    record
+        .as_object_mut()
+        .expect("legacy journal")
+        .remove("attemptedAtPrecise");
+    std::fs::write(&path, serde_json::to_vec(&record)?)?;
+    let restarted = ExecutionAuth::legacy(AuthManager::from_auth_for_testing(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    ));
+    assert!(
+        restarted
+            .ensure_runtime_from_config(&fixture.config)
+            .await?
+    );
+    assert!(
+        try_reset_credit_rescue(
+            &restarted,
+            &fixture.failed,
+            &fixture.config,
+            &CancellationToken::new()
+        )
+        .await
+        .is_some()
+    );
+    let requests = server.received_requests().await.expect("requests");
+    let ids: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method == "POST")
+        .map(|request| {
+            request
+                .body_json::<serde_json::Value>()
+                .expect("operation request")["redeem_request_id"]
+                .clone()
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![record["requestId"].clone(), record["requestId"].clone()]
+    );
+    Ok(())
+}
+
+enum RecoveredPendingCandidate {
+    Original,
+    Other,
+}
+
+async fn confirmed_free_recovery_reconciles_pending_operation(
+    candidate: RecoveredPendingCandidate,
+) -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let recovered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let usage_recovered = Arc::clone(&recovered);
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(move |request: &wiremock::Request| {
+            let bearer = request.headers.get("authorization").expect("bound token")
+                .to_str().expect("synthetic bearer");
+            let owner = bearer.strip_prefix("Bearer ").expect("bearer")
+                .strip_suffix("-access").expect("synthetic token");
+            let allowed = owner == "primary" && usage_recovered.load(std::sync::atomic::Ordering::SeqCst);
+            let reset = (Utc::now() + Duration::hours(2)).timestamp();
+            ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+                "plan_type": "pro", "account_id": owner, "user_id": owner,
+                "rate_limit": {"allowed": allowed, "limit_reached": !allowed,
+                    "primary_window": {"used_percent": if allowed { 0 } else { 100 },
+                        "limit_window_seconds": 18000, "reset_after_seconds": 7200, "reset_at": reset},
+                    "secondary_window": {"used_percent": if allowed { 0 } else { 100 },
+                        "limit_window_seconds": 604800, "reset_after_seconds": 7200, "reset_at": reset}},
+            }))
+        }).mount(&server).await;
+    let posted = Arc::new(tokio::sync::Notify::new());
+    let seen = Arc::clone(&posted);
+    let posts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
+        .respond_with(move |_request: &wiremock::Request| {
+            let response = ResponseTemplate::new(/*status*/ 200)
+                .set_body_json(json!({"code": "reset", "windows_reset": 2}));
+            if posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                seen.notify_one();
+                response.set_delay(std::time::Duration::from_millis(500))
+            } else {
+                response
+            }
+        })
+        .mount(&server)
+        .await;
+    let fixture =
+        exhausted_credit_fixture(format!("{}/backend-api", server.uri()), /*count*/ 2).await?;
+    let pool = fixture.execution.account_pool().expect("pool");
+    let cancellation = CancellationToken::new();
+    let cancel = async {
+        tokio::time::timeout(std::time::Duration::from_secs(2), posted.notified())
+            .await
+            .expect("first POST started");
+        cancellation.cancel();
+    };
+    let (rescue, ()) = tokio::join!(
+        try_reset_credit_rescue(
+            &fixture.execution,
+            &fixture.failed,
+            &fixture.config,
+            &cancellation
+        ),
+        cancel
+    );
+    assert!(rescue.is_none());
+    recovered.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Model a separately confirmed recovery without the original process's recent-GET cache.
+    let recovery_execution = ExecutionAuth::legacy(AuthManager::from_auth_for_testing(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    ));
+    assert!(
+        recovery_execution
+            .ensure_runtime_from_config(&fixture.config)
+            .await?
+    );
+    assert_eq!(
+        crate::account_pool_recovery::coverage_for_spending(
+            &recovery_execution,
+            &fixture.config,
+            &CancellationToken::new()
+        )
+        .await,
+        crate::account_pool_recovery::SpendingRecoveryCoverage::Recovered
+    );
+    codex_login::AccountRuntimeStateStore::new(fixture.config.codex_home.to_path_buf())
+        .synchronize(&pool)?;
+    recovered.store(false, std::sync::atomic::Ordering::SeqCst);
+    let recovered_lease = fixture
+        .execution
+        .active_lease()
+        .expect("confirmed free recovery");
+    pool.mark_exhausted(
+        recovered_lease.account_lease().expect("pool lease"),
+        Some(fixture.reset),
+    )?;
+    let failed = match candidate {
+        RecoveredPendingCandidate::Original => recovered_lease,
+        RecoveredPendingCandidate::Other => {
+            pool.force_activate(&fixture.standby)?;
+            let failed = fixture.execution.active_lease().expect("other candidate");
+            pool.mark_exhausted(
+                failed.account_lease().expect("pool lease"),
+                Some(fixture.reset),
+            )?;
+            failed
+        }
+    };
+    let store = codex_login::AccountRuntimeStateStore::new(fixture.config.codex_home.to_path_buf());
+    store.synchronize(&pool)?;
+    let rescue = try_reset_credit_rescue(
+        &fixture.execution,
+        &failed,
+        &fixture.config,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("confirmed recovery permits a fresh credit operation");
+    assert_eq!(rescue.redeemed_profile_id, failed.profile_id().cloned());
+    let requests = server.received_requests().await.expect("requests");
+    let ids: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method == "POST")
+        .map(|request| {
+            request
+                .body_json::<serde_json::Value>()
+                .expect("operation request")["redeem_request_id"]
+                .clone()
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(
+        ids[0], ids[1],
+        "the confirmed old operation cannot consume again"
+    );
+    let original = std::fs::read_dir(&fixture.config.codex_home)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rate-limit-reset-credit-")
+        })
+        .map(|entry| -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::from_slice(&std::fs::read(entry.path())?)?)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .find(|record| {
+            record["scope"]["profileId"]
+                == fixture
+                    .failed
+                    .profile_id()
+                    .expect("original profile")
+                    .as_str()
+        })
+        .expect("original journal retained");
+    let confirmed = if original["requestId"] == ids[0] {
+        &original
+    } else {
+        &original["previousConfirmed"]
+    };
+    assert_eq!(
+        (confirmed["requestId"].clone(), confirmed["phase"].clone()),
+        (
+            ids[0].clone(),
+            json!({"state": "confirmed", "outcome": "quotaRecovered"})
+        )
+    );
+    assert!(confirmed["reconciledRecovery"]["observedAt"].is_string());
+    Ok(())
+}
+
+#[tokio::test]
+async fn confirmed_free_recovery_permits_a_new_reset_operation_after_reexhaustion()
+-> anyhow::Result<()> {
+    confirmed_free_recovery_reconciles_pending_operation(RecoveredPendingCandidate::Original).await
+}
+
+#[tokio::test]
+async fn confirmed_free_recovery_of_pending_profile_permits_another_candidate() -> anyhow::Result<()>
+{
+    confirmed_free_recovery_reconciles_pending_operation(RecoveredPendingCandidate::Other).await
+}
+
+#[tokio::test]
+async fn pending_reset_operation_requires_owner_bound_confirmed_recovery() -> anyhow::Result<()> {
+    use super::operation::ResetCreditOperation;
+    use super::operation::ResetCreditScope;
+    enum UntrustedRecovery {
+        SameEpoch,
+        OldObservation,
+        MissingObservation,
+        DifferentOwner,
+        ForceProbe,
+        CorruptJournal,
+    }
+    for evidence in [
+        UntrustedRecovery::SameEpoch,
+        UntrustedRecovery::OldObservation,
+        UntrustedRecovery::MissingObservation,
+        UntrustedRecovery::DifferentOwner,
+        UntrustedRecovery::ForceProbe,
+        UntrustedRecovery::CorruptJournal,
+    ] {
+        let fixture = exhausted_credit_fixture(
+            "https://synthetic.invalid/backend-api".into(),
+            /*count*/ 2,
+        )
+        .await?;
+        let pool = fixture.execution.account_pool().expect("pool");
+        let profile_id = fixture.failed.profile_id().expect("profile");
+        let manager = pool
+            .auth_managers()
+            .into_iter()
+            .find(|(id, _)| id == profile_id)
+            .expect("profile auth")
+            .1;
+        let auth = manager.auth_cached().expect("synthetic auth");
+        let owner = serde_json::to_vec(&(auth.get_account_id(), auth.get_chatgpt_user_id()))?;
+        use sha1::Digest as _;
+        let epoch = Utc::now() - Duration::hours(2);
+        let scope = ResetCreditScope {
+            profile_id: profile_id.to_string(),
+            owner_key: format!("{:x}", sha1::Sha1::digest(owner)),
+            credit_id: None,
+            reset_key: Some(123),
+            quota_epoch: Some(epoch.timestamp_millis()),
+        };
+        let store =
+            codex_login::AccountRuntimeStateStore::new(fixture.config.codex_home.to_path_buf());
+        let _lock = store.try_lock_reset_credit()?.expect("spending lock");
+        ResetCreditOperation::prepare(
+            &fixture.config.codex_home,
+            scope.clone(),
+            "original-request",
+        )?;
+        let path = std::fs::read_dir(&fixture.config.codex_home)?
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".rate-limit-reset-credit-")
+            })
+            .expect("journal")
+            .path();
+        let mut journal: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        // Exercise legacy, seconds-only request ordering without treating elapsed time as proof.
+        journal["attemptedAt"] = json!((Utc::now() - Duration::hours(1)).timestamp());
+        journal
+            .as_object_mut()
+            .expect("journal object")
+            .remove("attemptedAtPrecise");
+        if matches!(evidence, UntrustedRecovery::DifferentOwner) {
+            journal["scope"]["ownerKey"] = json!("another-owner");
+        }
+        let bytes = if matches!(evidence, UntrustedRecovery::CorruptJournal) {
+            b"{interrupted".to_vec()
+        } else {
+            serde_json::to_vec(&journal)?
+        };
+        std::fs::write(&path, &bytes)?;
+        let mut state = store.load()?;
+        let profile = state
+            .profiles
+            .iter_mut()
+            .find(|entry| &entry.profile_id == profile_id)
+            .expect("persisted profile");
+        profile.quota_reset_at = Some(Utc::now());
+        profile.quota_reset_observed_at = Some(Utc::now());
+        match evidence {
+            UntrustedRecovery::SameEpoch => profile.quota_reset_at = Some(epoch),
+            UntrustedRecovery::OldObservation => profile.quota_reset_observed_at = Some(epoch),
+            UntrustedRecovery::MissingObservation => profile.quota_reset_observed_at = None,
+            UntrustedRecovery::ForceProbe => {
+                profile.quota_reset_at = Some(epoch);
+                profile.quota_reset_observed_at = None;
+            }
+            UntrustedRecovery::DifferentOwner | UntrustedRecovery::CorruptJournal => {}
+        }
+        store.save(&state)?;
+        if matches!(evidence, UntrustedRecovery::ForceProbe) {
+            store.select(
+                profile_id.clone(),
+                codex_login::AccountSelectionMode::ForceProbe,
+            )?;
+        }
+        super::load_synced_credit_state(
+            &store,
+            &pool,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("synchronized state");
+        assert_eq!(std::fs::read(&path)?, bytes);
+        let mut other = scope;
+        other.profile_id = fixture.standby.to_string();
+        assert!(
+            ResetCreditOperation::prepare(&fixture.config.codex_home, other, "replacement-request")
+                .is_err()
+        );
+    }
     Ok(())
 }
 
@@ -545,7 +935,7 @@ async fn redemption_loads_the_target_profiles_maintenance_transport() -> anyhow:
             &CancellationToken::new()
         )
         .await,
-        super::ResetCreditOutcome::Reset(_),
+        super::ResetCreditOutcome::Reset(..),
     ));
     assert_eq!(
         inherited.received_requests().await.expect("requests").len(),
@@ -749,7 +1139,7 @@ async fn ambiguous_redemption_verifies_the_bound_profile_before_recovery() -> an
         /*priority*/ 0,
     )
     .await?;
-    let super::ResetCreditOutcome::AlreadyUsable(probe, observed) =
+    let super::ResetCreditOutcome::AlreadyUsable(probe, observed, _) =
         consume_reset_credit_for_profile(
             &pool,
             &profile.id,
@@ -906,7 +1296,7 @@ async fn redemption_uses_the_failed_profile_auth_on_the_real_backend_route() -> 
             &CancellationToken::new()
         )
         .await,
-        super::ResetCreditOutcome::Reset(_),
+        super::ResetCreditOutcome::Reset(..),
     ));
     let auth_headers = server
         .received_requests()

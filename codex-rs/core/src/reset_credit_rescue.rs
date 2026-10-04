@@ -5,10 +5,6 @@
 //! free account is always preferred) and only when waiting for the earliest
 //! natural reset would take longer than the user-configured threshold.
 
-#[cfg(test)]
-#[path = "reset_credit_operation.rs"]
-mod operation;
-
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
@@ -20,7 +16,6 @@ use codex_login::AccountProfileId;
 use codex_login::AccountRuntimeStateStore;
 use codex_login::account_runtime_state::AccountQuotaEvidence;
 use codex_login::account_runtime_state::AccountQuotaProbe;
-use sha1::Digest;
 use tokio_util::sync::CancellationToken;
 
 use crate::account_pool_recovery::SpendingRecoveryCoverage;
@@ -30,16 +25,23 @@ use crate::execution_auth::ExecutionAuth;
 use crate::execution_auth::ExecutionAuthLease;
 use crate::reset_credit_singleflight::ResetCreditRescueAttempt;
 
+#[path = "reset_credit_operation.rs"]
+mod operation;
+use operation::ResetCreditCompletion;
+use operation::ResetCreditOperation;
+use operation::ResetCreditScope;
+
 const REDEEM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const REDEEM_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 enum ResetCreditOutcome {
-    Reset(AccountQuotaProbe),
+    Reset(AccountQuotaProbe, ResetCreditOperation),
     AlreadyUsable(
         AccountQuotaProbe,
         codex_backend_client::RateLimitsWithResetCredits,
+        ResetCreditOperation,
     ),
-    NoReset,
+    NoReset(ResetCreditOperation),
     Unknown,
 }
 
@@ -257,64 +259,11 @@ pub(crate) async fn try_reset_credit_rescue(
             continue;
         }
         let profile_id = candidate.profile.id;
-        // Reuse an id for an ambiguous, recent attempt rather than spend another
-        // credit after a transport timeout. This file contains no credentials.
-        let profile_key = format!("{:x}", sha1::Sha1::digest(profile_id.as_str().as_bytes()));
-        let attempt_path = config
-            .codex_home
-            .join(format!(".rate-limit-reset-credit-{profile_key}.json"));
-        let Some(failed_snapshot) = pool
-            .snapshots()
-            .into_iter()
-            .find(|snapshot| snapshot.profile.id == profile_id)
-        else {
-            continue;
-        };
-        let reset_key = match failed_snapshot.availability {
-            AccountAvailability::Exhausted { .. } => failed_snapshot
-                .backend_resets_at
-                .map(|reset| reset.timestamp() / 60),
-            AccountAvailability::Available
-            | AccountAvailability::AuthenticationUnavailable { .. }
-            | AccountAvailability::Disabled => continue,
-        };
-        let quota_epoch = failed_snapshot
-            .quota_reset_at
-            .map(|reset| reset.timestamp_millis());
-        let previous = std::fs::metadata(&attempt_path)
-            .ok()
-            .filter(|metadata| metadata.len() <= 4096)
-            .and_then(|_| std::fs::read(&attempt_path).ok())
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-        let previous = previous.as_ref().filter(|attempt| {
-            attempt["profileId"].as_str() == Some(profile_id.as_str())
-                && attempt["resetKey"].as_i64() == reset_key
-                && attempt["quotaEpoch"].as_i64() == quota_epoch
-                && attempt["attemptedAt"]
-                    .as_i64()
-                    .is_some_and(|time| now.timestamp().saturating_sub(time) < 300)
-        });
-        let first_attempt_at = previous
-            .and_then(|attempt| attempt["attemptedAt"].as_i64())
-            .unwrap_or_else(|| now.timestamp());
-        let new_request_id = if profile_id == failed_profile_id {
+        let request_id = if profile_id == failed_profile_id {
             leader.redeem_request_id().to_string()
         } else {
             uuid::Uuid::new_v4().to_string()
         };
-        let request_id = previous
-            .and_then(|attempt| attempt["requestId"].as_str())
-            .unwrap_or(&new_request_id)
-            .to_string();
-        std::fs::write(
-            &attempt_path,
-            serde_json::to_vec(&serde_json::json!({
-                "profileId": profile_id.as_str(), "resetKey": reset_key, "quotaEpoch": quota_epoch,
-                "attemptedAt": first_attempt_at, "requestId": request_id,
-            }))
-            .ok()?,
-        )
-        .ok()?;
 
         let outcome = tokio::select! {
             biased;
@@ -327,12 +276,13 @@ pub(crate) async fn try_reset_credit_rescue(
         if cancellation.is_cancelled() {
             return None;
         }
-        let (redeemed, applied) = match outcome {
-            ResetCreditOutcome::Reset(probe) => (
+        let (redeemed, applied, operation) = match outcome {
+            ResetCreditOutcome::Reset(probe, operation) => (
                 true,
                 store.confirm_quota_reset(&pool, probe, Utc::now()).ok()?,
+                operation,
             ),
-            ResetCreditOutcome::AlreadyUsable(probe, observed) => (
+            ResetCreditOutcome::AlreadyUsable(probe, observed, operation) => (
                 false,
                 store
                     .reconcile_quota_probe(
@@ -346,9 +296,10 @@ pub(crate) async fn try_reset_credit_rescue(
                         },
                     )
                     .ok()?,
+                operation,
             ),
-            ResetCreditOutcome::NoReset => {
-                let _ = std::fs::remove_file(&attempt_path);
+            ResetCreditOutcome::NoReset(operation) => {
+                operation.complete(ResetCreditCompletion::NoCredit).ok()?;
                 continue;
             }
             ResetCreditOutcome::Unknown => return None,
@@ -369,7 +320,9 @@ pub(crate) async fn try_reset_credit_rescue(
 
         let mut rescue = reactivate_redeemed_profile(&pool, profile_id.clone())?;
         rescue.redeemed_profile_id = redeemed.then_some(profile_id.clone());
-        let _ = std::fs::remove_file(&attempt_path);
+        operation
+            .complete(ResetCreditCompletion::QuotaRecovered)
+            .ok()?;
         return Some(rescue);
     }
     None
@@ -388,6 +341,15 @@ async fn load_synced_credit_state(
         if store.try_synchronize(pool).ok()?
             && let Some(state) = store.try_load().ok()?
         {
+            let reconciled = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return None,
+                _ = tokio::time::sleep_until(deadline) => return None,
+                result = ResetCreditOperation::reconcile_pending(pool, store, &state) => result,
+            };
+            if let Err(error) = reconciled {
+                tracing::warn!(%error, "reset-credit journal reconciliation failed; unresolved operations remain blocked");
+            }
             return Some(state);
         }
         tokio::select! {
@@ -461,13 +423,46 @@ async fn consume_reset_credit_for_profile(
     let Ok(Some(probe)) = store.capture_quota_probe(pool, profile_id, &auth) else {
         return ResetCreditOutcome::Unknown;
     };
+    let Some(snapshot) = pool.snapshots().into_iter().find(|snapshot| {
+        &snapshot.profile.id == profile_id
+            && matches!(snapshot.availability, AccountAvailability::Exhausted { .. })
+    }) else {
+        return ResetCreditOutcome::Unknown;
+    };
+    let Some(owner_key) = operation::owner_key(&auth) else {
+        return ResetCreditOutcome::Unknown;
+    };
+    let operation = match ResetCreditOperation::prepare(
+        &config.codex_home,
+        ResetCreditScope {
+            profile_id: profile_id.to_string(),
+            owner_key,
+            credit_id: None,
+            reset_key: snapshot
+                .backend_resets_at
+                .map(|reset| reset.timestamp() / 60),
+            quota_epoch: snapshot
+                .quota_reset_at
+                .map(|reset| reset.timestamp_millis()),
+        },
+        redeem_request_id,
+    ) {
+        Ok(operation) => operation,
+        Err(error) => {
+            tracing::warn!(%profile_id, %error, "reset-credit operation could not be reconciled; no credit was spent");
+            return ResetCreditOutcome::Unknown;
+        }
+    };
+    if cancellation.is_cancelled() || !still_owned() {
+        return ResetCreditOutcome::Unknown;
+    }
     let client = codex_backend_client::Client::from_auth(base_url, &auth, factory);
 
     let response = tokio::select! {
         biased;
         _ = cancellation.cancelled() => return ResetCreditOutcome::Unknown,
         result = tokio::time::timeout(REDEEM_REQUEST_TIMEOUT,
-            client.consume_rate_limit_reset_credit(redeem_request_id)) => result,
+            client.consume_rate_limit_reset_credit(operation.request_id())) => result,
     };
     manager.reload().await;
     if cancellation.is_cancelled() || !still_owned() {
@@ -478,7 +473,7 @@ async fn consume_reset_credit_for_profile(
             if response.code == ConsumeRateLimitResetCreditCode::Reset
                 && response.windows_reset >= 2 =>
         {
-            ResetCreditOutcome::Reset(probe)
+            ResetCreditOutcome::Reset(probe, operation)
         }
         Ok(Ok(response)) if response.code == ConsumeRateLimitResetCreditCode::Reset => {
             ResetCreditOutcome::Unknown
@@ -522,7 +517,7 @@ async fn consume_reset_credit_for_profile(
                                 })
                         }) =>
                 {
-                    ResetCreditOutcome::AlreadyUsable(probe, observed)
+                    ResetCreditOutcome::AlreadyUsable(probe, observed, operation)
                 }
                 Ok(Ok(_)) | Ok(Err(_)) | Err(_) => ResetCreditOutcome::Unknown,
             }
@@ -533,7 +528,7 @@ async fn consume_reset_credit_for_profile(
                 code = ?response.code,
                 "automatic reset-credit redemption did not reset a rate-limit window"
             );
-            ResetCreditOutcome::NoReset
+            ResetCreditOutcome::NoReset(operation)
         }
         Ok(Err(error)) => {
             tracing::info!(
