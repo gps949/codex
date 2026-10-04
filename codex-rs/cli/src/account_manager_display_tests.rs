@@ -75,6 +75,30 @@ fn manager_inventory_aligns_numbers_and_unicode_labels() {
 }
 
 #[test]
+fn manager_interrupted_reset_guidance_is_visible_in_both_languages() {
+    let mut inventory = inventory();
+    inventory
+        .reset_journals
+        .push(codex_app_server::account_management::ResetJournalView {
+            file_name: "synthetic-file".into(),
+            digest: "synthetic-digest".into(),
+            profile_id: Some("fixture-0".into()),
+            attempted_at: None,
+            legacy: true,
+            archive_available: true,
+            message: "Legacy record needs review".into(),
+        });
+    insta::assert_snapshot!(
+        "manager_interrupted_reset_english",
+        render(&inventory, /*columns*/ 80, Locale::English)
+    );
+    insta::assert_snapshot!(
+        "manager_interrupted_reset_chinese",
+        render(&inventory, /*columns*/ 80, Locale::SimplifiedChinese)
+    );
+}
+
+#[test]
 fn manager_inventory_narrow_cards_wrap_without_losing_actions_or_unknown_quota() {
     let output = render(&inventory(), /*columns*/ 40, Locale::English);
     assert!(

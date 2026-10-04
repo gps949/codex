@@ -1,6 +1,6 @@
 ---
 source: cli/src/account_manager_display_tests.rs
-assertion_line: 71
+assertion_line: 74
 expression: output
 ---
 Codex Accounts
@@ -13,7 +13,7 @@ Next: Choose an account number to view quota, credits and actions.
 
      ACCOUNT                    PLAN       AVAILABILITY    PRIMARY  WEEKLY  CREDITS
 *  1 Personal                   Pro        Ready                1%       ?        2
-   2 工作席位                   Pro        Waiting reset      100%       ?        ?
+   2 工作席位                   Pro        Cooling down       100%       ?        ?
    3 Standby                    Pro        Ready                9%       ?       10
 
 API accounts · fallback off

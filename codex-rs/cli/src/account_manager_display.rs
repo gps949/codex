@@ -60,6 +60,13 @@ pub(super) fn render(
             &checking.to_string(),
         ],
     ));
+    if !inventory.reset_journals.is_empty() {
+        rows.push(
+            locale
+                .text("J  Review interrupted reset operations (automatic credit use paused)")
+                .into(),
+        );
+    }
     rows.push(
         locale
             .text("Quota percentages show USED allowance; ? means not checked.")
@@ -299,7 +306,7 @@ mod tests;
 pub(super) fn availability(value: &str, locale: Locale) -> &'static str {
     locale.text(match value {
         "ready" => "Ready",
-        "coolingDown" => "Waiting reset",
+        "coolingDown" => "Cooling down",
         "needsLogin" => "Needs login",
         "disabled" => "Disabled",
         "paused" => "Paused",

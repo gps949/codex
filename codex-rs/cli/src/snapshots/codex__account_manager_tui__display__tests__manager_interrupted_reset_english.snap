@@ -1,18 +1,16 @@
 ---
 source: cli/src/account_manager_display_tests.rs
-assertion_line: 97
-expression: output
+assertion_line: 85
+expression: "render(&inventory, 80, Locale::English)"
 ---
 Codex Accounts
 
 Target: Automatic subscriptions
 Subscription pool: Enabled
-3 subscription accounts · 2 ready ·
-0 checking
-Quota percentages show USED allowance; ?
-means not checked.
-Next: Choose an account number to view
-quota, credits and actions.
+3 subscription accounts · 2 ready · 0 checking
+J  Review interrupted reset operations (automatic credit use paused)
+Quota percentages show USED allowance; ? means not checked.
+Next: Choose an account number to view quota, credits and actions.
 
 *  1 Personal
      Pro · Ready

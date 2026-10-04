@@ -101,6 +101,36 @@ impl Locale {
 
 fn chinese(english: &str) -> Option<&'static str> {
     let translated = match english {
+        "J  Review interrupted reset operations (automatic credit use paused)" => {
+            "J  复核中断的重置操作（自动兑券暂缓）"
+        }
+        "Interrupted reset operations" => "中断的额度重置操作",
+        "Unknown account" => "未知账号",
+        "Legacy reset attempt needs review." => "旧版重置记录待复核。",
+        "Damaged reset record needs review." => "损坏的重置记录待复核。",
+        "Owner-bound reset is awaiting confirmed recovery." => "账号绑定的重置操作等待确认恢复。",
+        "Unknown reset record needs manual review." => "未知格式的重置记录需要手动检查。",
+        "Reset record is unreadable or exceeds 4096 bytes." => "重置记录无法读取或超过 4096 字节。",
+        "Reset records could not be inspected. Other account management remains available." => {
+            "无法检查重置记录；其他账号管理功能仍可使用。"
+        }
+        "This record cannot be archived safely. Refresh quota or review its status." => {
+            "此记录不能安全归档，请刷新额度或检查其状态。"
+        }
+        "Legacy record needs review" => "旧版记录待复核",
+        "Waiting for confirmed quota recovery" => "等待确认额度恢复",
+        "Record number (Enter returns)" => "记录编号（回车返回）",
+        "Choose a listed record number" => "请选择列表中的记录编号",
+        "Refresh quota to reconcile this owner-bound operation; it cannot be abandoned here." => {
+            "请刷新额度以复核此账号绑定的操作；这里不能放弃此操作。"
+        }
+        "Check this account's quota and reset history first. Archiving abandons the old request and may allow another credit to be used later. A backup is kept; quota is unchanged." => {
+            "请先核对该账号的额度和重置历史。归档会放弃旧请求，之后可能使用另一张券。原记录会备份保留，额度不变。"
+        }
+        "Type yes to archive the reviewed record" => "输入 yes 归档已复核的记录",
+        "Unconfirmed legacy reset record archived. No credit was used and quota was not changed." => {
+            "未确认的旧版重置记录已备份归档；没有使用券或修改额度。"
+        }
         "Language saved for browser and terminal managers." => {
             "已保存语言，浏览器和终端管理界面共用此设置。"
         }
@@ -176,6 +206,7 @@ fn chinese(english: &str) -> Option<&'static str> {
         "provider billed" | "Provider billed" => "提供商计费",
         "Ready" => "可用",
         "Waiting reset" => "等待额度重置",
+        "Cooling down" => "冷却中",
         "Needs login" => "需要登录",
         "Check status" => "请检查状态",
         "Choose" => "请选择",

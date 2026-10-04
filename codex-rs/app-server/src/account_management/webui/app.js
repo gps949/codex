@@ -427,6 +427,13 @@
   function renderInventory() {
     const inventory = state.inventory;
     const focused = document.activeElement?.dataset.focusKey;
+    window.AccountManagerResetJournal.render(inventory.resetJournals || [], {
+      element,
+      button,
+      confirmOperation,
+      busy: state.busy,
+      accounts: inventory.accounts,
+    });
     window.AccountManagerDecision.render(inventory.decisionAdvisor, {
       element,
       field,

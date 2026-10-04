@@ -13,7 +13,7 @@ Next: Choose an account number to view quota, credits and actions.
 
      ACCOUNT                    PLAN       AVAILABILITY    PRIMARY  WEEKLY  CREDITS
 *  1 Personal                   Pro        Ready                1%       ?        2
-   2 工作席位                   Pro        Waiting reset      100%       ?        ?
+   2 工作席位                   Pro        Cooling down       100%       ?        ?
    3 Standby                    Pro        Ready                9%       ?       10
 
 API accounts · fallback off
@@ -32,7 +32,7 @@ Codex 账号管理
 
      账号                       订阅       状态               短期    长期   重置券
 *  1 Personal                   Pro        可用                 1%       ?        2
-   2 工作席位                   Pro        等待额度重置       100%       ?        ?
+   2 工作席位                   Pro        冷却中             100%       ?        ?
    3 Standby                    Pro        可用                 9%       ?       10
 
 API 账号 · 最终兜底已关闭

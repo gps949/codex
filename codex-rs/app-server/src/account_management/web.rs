@@ -140,6 +140,15 @@ fn router(state: WebState) -> Router {
             }),
         )
         .route(
+            "/reset-journal.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/reset-journal.js"),
+                )
+            }),
+        )
+        .route(
             "/app.js",
             get(|| async {
                 (
