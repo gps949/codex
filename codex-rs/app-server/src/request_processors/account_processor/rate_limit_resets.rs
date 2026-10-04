@@ -1,8 +1,9 @@
 use super::*;
+use sha2::Digest;
 
-#[cfg(test)]
 #[path = "manual_reset_credit_journal.rs"]
 mod manual_reset_credit_journal;
+use manual_reset_credit_journal::ManualResetCreditJournal;
 
 const RATE_LIMIT_RESET_REQUEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 10);
 const RATE_LIMIT_RESET_DETAILS_REQUEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
@@ -16,6 +17,34 @@ struct ResetProfileIdentity {
     owner_generation: u64,
     account_id: Option<String>,
     user_id: Option<String>,
+    selection: (Option<String>, Option<u64>),
+    shared_selection: (Option<codex_login::AccountProfileId>, u64),
+}
+
+impl ResetProfileIdentity {
+    async fn still_owned(&self) -> bool {
+        self.manager.reload().await;
+        self.manager
+            .auth_change_state_receiver()
+            .borrow()
+            .owner_generation
+            == self.owner_generation
+            && self.manager.auth_cached().is_some_and(|auth| {
+                auth.get_account_id() == self.account_id
+                    && auth.get_chatgpt_user_id() == self.user_id
+            })
+    }
+}
+
+fn eligible_reset_credit(credit: &BackendRateLimitResetCreditDetails) -> bool {
+    !credit.id.is_empty()
+        && credit.id.len() <= 256
+        && credit.reset_type == "codex_rate_limits"
+        && credit.status == "available"
+        && credit.expires_at.as_deref().is_none_or(|expires| {
+            chrono::DateTime::parse_from_rfc3339(expires)
+                .is_ok_and(|expires| expires > chrono::Utc::now())
+        })
 }
 
 impl AccountRequestProcessor {
@@ -61,11 +90,21 @@ impl AccountRequestProcessor {
         if params.idempotency_key.is_empty() {
             return Err(invalid_request("idempotencyKey must not be empty"));
         }
+        if params.idempotency_key.len() > manual_reset_credit_journal::MAX_IDEMPOTENCY_KEY_BYTES {
+            return Err(invalid_request("idempotencyKey must not exceed 128 bytes"));
+        }
         if params.credit_id.as_deref().is_some_and(str::is_empty) {
             return Err(invalid_request("creditId must not be empty"));
         }
+        if params
+            .credit_id
+            .as_ref()
+            .is_some_and(|id| id.len() > manual_reset_credit_journal::MAX_CREDIT_ID_BYTES)
+        {
+            return Err(invalid_request("creditId must not exceed 256 bytes"));
+        }
 
-        let (client, profile) = self.rate_limit_reset_backend_client().await?;
+        let (client, auth, profile) = self.rate_limit_reset_backend_client().await?;
         let request_timeout = RATE_LIMIT_RESET_REQUEST_TIMEOUT;
         #[cfg(debug_assertions)]
         let request_timeout = std::env::var(RATE_LIMIT_RESET_REQUEST_TIMEOUT_ENV_VAR)
@@ -73,20 +112,162 @@ impl AccountRequestProcessor {
             .and_then(|value| value.parse::<u64>().ok())
             .map(Duration::from_millis)
             .unwrap_or(request_timeout);
-        let response = tokio::time::timeout(request_timeout, async {
-            match params.credit_id.as_deref() {
-                Some(credit_id) => {
-                    client
-                        .consume_rate_limit_reset_credit_by_id(&params.idempotency_key, credit_id)
-                        .await
+        let deadline = tokio::time::Instant::now() + request_timeout;
+        let store =
+            codex_login::AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf());
+        let _spending_lock = tokio::time::timeout_at(deadline, async {
+            loop {
+                if let Some(lock) = store.try_lock_reset_credit()? {
+                    break Ok::<_, std::io::Error>(lock);
                 }
-                None => {
-                    client
-                        .consume_rate_limit_reset_credit(&params.idempotency_key)
-                        .await
-                }
+                tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
             }
         })
+        .await
+        .map_err(|_| {
+            internal_error("another reset operation is running; retry with the same idempotencyKey")
+        })?
+        .map_err(|error| {
+            internal_error(format!("failed to lock reset credit spending: {error}"))
+        })?;
+        let account_id = auth
+            .get_account_id()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                invalid_request("account identity required to bind rate limit reset retries")
+            })?;
+        let user_id = auth
+            .get_chatgpt_user_id()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                invalid_request("account identity required to bind rate limit reset retries")
+            })?;
+        let mut owner = sha2::Sha256::new();
+        owner.update(b"codex-manual-reset-credit-owner-v1\0");
+        for value in [
+            self.config.chatgpt_base_url.trim_end_matches('/'),
+            account_id.as_str(),
+            user_id.as_str(),
+        ] {
+            owner.update((value.len() as u64).to_be_bytes());
+            owner.update(value.as_bytes());
+        }
+        let owner_digest = format!("{:x}", owner.finalize());
+        let mut journal =
+            ManualResetCreditJournal::load(&self.config.codex_home).map_err(internal_error)?;
+        let known_credit = journal
+            .known_credit(
+                &owner_digest,
+                &params.idempotency_key,
+                params.credit_id.as_deref(),
+            )
+            .map_err(invalid_request)?
+            .map(str::to_owned);
+        let inventory = if known_credit.is_some() {
+            None
+        } else {
+            Some(
+                tokio::time::timeout_at(deadline, client.list_rate_limit_reset_credits())
+                    .await
+                    .map_err(|_| internal_error("rate limit reset credit check timed out"))?
+                    .map_err(|error| {
+                        internal_error(format!("failed to validate reset credit: {error}"))
+                    })?,
+            )
+        };
+        let credit = inventory.as_ref().and_then(|inventory| {
+            inventory
+                .credits
+                .iter()
+                .filter(|credit| {
+                    params.credit_id.as_deref().is_none_or(|id| credit.id == id)
+                        && eligible_reset_credit(credit)
+                })
+                .min_by_key(|credit| {
+                    (
+                        credit
+                            .expires_at
+                            .as_deref()
+                            .and_then(|expires| chrono::DateTime::parse_from_rfc3339(expires).ok())
+                            .map_or(chrono::DateTime::<chrono::Utc>::MAX_UTC, |expires| {
+                                expires.with_timezone(&chrono::Utc)
+                            }),
+                        credit.id.as_str(),
+                    )
+                })
+        });
+        if known_credit.is_none() && credit.is_none() {
+            if params.credit_id.is_some() {
+                return Err(invalid_request(
+                    "reset credit is unavailable, expired, or has a different quota scope",
+                ));
+            }
+            return Ok(Some(
+                ConsumeAccountRateLimitResetCreditResponse {
+                    outcome: ConsumeAccountRateLimitResetCreditOutcome::NoCredit,
+                }
+                .into(),
+            ));
+        }
+        let credit_id = known_credit
+            .as_deref()
+            .or_else(|| credit.map(|credit| credit.id.as_str()))
+            .ok_or_else(|| internal_error("No reset credit selected"))?;
+        let pool = self.execution_account_pool.account_pool();
+        if profile.is_some() && pool.is_none() {
+            return Err(invalid_request(
+                "account pool changed before reset; refresh before retrying",
+            ));
+        }
+        let probe = if let (Some(profile), Some(pool)) = (profile.as_ref(), pool.as_ref()) {
+            store.try_synchronize(pool).map_err(|error| {
+                internal_error(format!(
+                    "failed to synchronize reset credit account: {error}"
+                ))
+            })?;
+            let selected = self.get_account_pool_response().await?;
+            let shared_selection = store
+                .try_load()
+                .map_err(|error| internal_error(error.to_string()))?
+                .map(|state| (state.active_profile_id, state.selection_revision));
+            if (selected.active_profile_id, selected.active_generation) != profile.selection
+                || shared_selection.as_ref() != Some(&profile.shared_selection)
+                || !profile.still_owned().await
+                || !store
+                    .validate_profile_auth(pool, &profile.profile_id, &auth)
+                    .map_err(|error| internal_error(error.to_string()))?
+            {
+                return Err(invalid_request(
+                    "account changed before reset; refresh before retrying",
+                ));
+            }
+            store
+                .capture_quota_probe(pool, &profile.profile_id, &auth)
+                .map_err(|error| internal_error(error.to_string()))?
+        } else {
+            self.auth_manager.reload().await;
+            if !self.auth_manager.auth_cached().is_some_and(|current| {
+                current.get_account_id() == auth.get_account_id()
+                    && current.get_chatgpt_user_id() == auth.get_chatgpt_user_id()
+            }) {
+                return Err(invalid_request(
+                    "account changed before reset; refresh before retrying",
+                ));
+            }
+            None
+        };
+        if credit.is_some_and(|credit| !eligible_reset_credit(credit)) {
+            return Err(invalid_request(
+                "reset credit expired before spending; refresh available credits",
+            ));
+        }
+        journal
+            .remember(&owner_digest, &params.idempotency_key, credit_id)
+            .map_err(internal_error)?;
+        let response = tokio::time::timeout_at(
+            deadline,
+            client.consume_rate_limit_reset_credit_by_id(&params.idempotency_key, credit_id),
+        )
         .await
         .map_err(|_| internal_error("rate limit reset consume timed out"))?
         .map_err(|err| internal_error(format!("failed to consume rate limit reset: {err}")))?;
@@ -104,41 +285,41 @@ impl AccountRequestProcessor {
                 ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed
             }
         };
-        if matches!(
-            outcome,
-            ConsumeAccountRateLimitResetCreditOutcome::Reset
-                | ConsumeAccountRateLimitResetCreditOutcome::NothingToReset
-        ) && let Some(profile) = profile
+        if let (Some(profile), Some(pool), Some(probe)) = (profile.as_ref(), pool.as_ref(), probe)
+            && profile.still_owned().await
         {
-            // Redemption belongs to the request's seat, even if another account was selected
-            // while the backend call was in flight. A re-login may also replace this owner.
-            profile.manager.reload().await;
-            let auth = profile.manager.auth().await;
-            let owner_generation = profile
-                .manager
-                .auth_change_state_receiver()
-                .borrow()
-                .owner_generation;
-            if owner_generation == profile.owner_generation
-                && auth.as_ref().is_some_and(|auth| {
-                    auth.get_account_id() == profile.account_id
-                        && auth.get_chatgpt_user_id() == profile.user_id
-                })
-            {
-                let reset_at = chrono::Utc::now();
-                if let Err(error) =
-                    codex_login::AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf())
-                        .record_quota_reset(&profile.profile_id, reset_at)
-                {
-                    tracing::warn!(%error, "failed to persist redeemed account quota reset");
-                } else if let Some(pool) = self.execution_account_pool.account_pool()
-                    && pool.auth_managers().iter().any(|(id, manager)| {
-                        id == &profile.profile_id && Arc::ptr_eq(manager, &profile.manager)
-                    })
-                    && let Err(error) = pool.apply_quota_reset(&profile.profile_id, reset_at)
-                {
-                    tracing::warn!(%error, "failed to apply redeemed account quota reset");
+            let confirmed = match response.code {
+                BackendConsumeRateLimitResetCreditCode::Reset if response.windows_reset >= 2 => {
+                    store.confirm_quota_reset(pool, probe, chrono::Utc::now())
                 }
+                BackendConsumeRateLimitResetCreditCode::Reset
+                | BackendConsumeRateLimitResetCreditCode::NothingToReset
+                | BackendConsumeRateLimitResetCreditCode::AlreadyRedeemed => {
+                    if let Ok(Ok(observed)) = tokio::time::timeout_at(
+                        deadline,
+                        client.get_rate_limits_with_reset_credits(),
+                    )
+                    .await
+                        && profile.still_owned().await
+                    {
+                        store.reconcile_quota_probe(
+                            pool,
+                            probe,
+                            codex_login::account_runtime_state::AccountQuotaEvidence {
+                                rate_limits: &observed.rate_limits,
+                                ordinary_usage_allowed: observed.ordinary_usage_allowed,
+                                account_id: observed.account_id.as_deref(),
+                                user_id: observed.user_id.as_deref(),
+                            },
+                        )
+                    } else {
+                        Ok(false)
+                    }
+                }
+                BackendConsumeRateLimitResetCreditCode::NoCredit => Ok(false),
+            };
+            if let Err(error) = confirmed {
+                tracing::warn!(%error, "failed to persist confirmed reset-credit quota recovery");
             }
         }
         Ok(Some(
@@ -148,7 +329,14 @@ impl AccountRequestProcessor {
 
     async fn rate_limit_reset_backend_client(
         &self,
-    ) -> Result<(BackendClient, Option<ResetProfileIdentity>), JSONRPCErrorError> {
+    ) -> Result<
+        (
+            BackendClient,
+            codex_login::CodexAuth,
+            Option<ResetProfileIdentity>,
+        ),
+        JSONRPCErrorError,
+    > {
         let pool = self.get_account_pool_response().await?;
         let Some((auth, http_client_factory)) =
             self.auth_manager.auth_with_http_client_factory().await
@@ -164,6 +352,15 @@ impl AccountRequestProcessor {
         }
 
         let profile = if pool.enabled {
+            let shared_selection =
+                codex_login::AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf())
+                    .try_load()
+                    .map_err(|error| internal_error(error.to_string()))?
+                    .ok_or_else(|| {
+                        internal_error(
+                            "account state is busy; retry the reset with the same idempotencyKey",
+                        )
+                    })?;
             let token = auth.get_token().ok();
             let account_id = auth.get_account_id();
             let user_id = auth.get_chatgpt_user_id();
@@ -188,12 +385,26 @@ impl AccountRequestProcessor {
                 .auth_change_state_receiver()
                 .borrow()
                 .owner_generation;
+            if shared_selection
+                .active_profile_id
+                .as_ref()
+                .is_some_and(|id| id != &profile_id)
+            {
+                return Err(invalid_request(
+                    "account selection changed before reset; refresh before retrying",
+                ));
+            }
             Some(ResetProfileIdentity {
                 profile_id,
                 manager,
                 owner_generation,
                 account_id,
                 user_id,
+                selection: (pool.active_profile_id, pool.active_generation),
+                shared_selection: (
+                    shared_selection.active_profile_id,
+                    shared_selection.selection_revision,
+                ),
             })
         } else {
             None
@@ -204,6 +415,7 @@ impl AccountRequestProcessor {
                 &auth,
                 http_client_factory,
             ),
+            auth,
             profile,
         ))
     }

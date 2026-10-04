@@ -296,7 +296,8 @@ async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool
         serde_json::to_vec(&json!({
             "version": 1, "active_profile_id": "selected-acct", "selection_revision": 0,
             "profiles": [
-                {"profile_id": "selected-acct", "rate_limits": {"observed_at": now,
+                {"profile_id": "selected-acct", "exhausted_until": reset, "backend_resets_at": reset,
+                    "rate_limits": {"observed_at": now,
                     "primary": {"used_percent": 100.0, "resets_at": reset, "window_minutes": 300}, "secondary": null}},
                 {"profile_id": "other-seat", "exhausted_until": reset, "rate_limits": {"observed_at": now,
                     "primary": {"used_percent": 73.0, "resets_at": reset, "window_minutes": 300}, "secondary": null}}
@@ -305,6 +306,13 @@ async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool
     )?;
     let entered = Arc::new(Notify::new());
     let request_entered = Arc::clone(&entered);
+    Mock::given(method("GET"))
+        .and(path("/api/codex/rate-limit-reset-credits"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+            "available_count": 1, "credits": [{"id": "business-credit", "reset_type": "codex_rate_limits",
+                "status": "available", "granted_at": "2026-01-01T00:00:00Z", "expires_at": null}]
+        })))
+        .mount(&backend).await;
     Mock::given(method("POST"))
         .and(path("/api/codex/rate-limit-reset-credits/consume"))
         .and(header("authorization", "Bearer access-selected"))
@@ -313,7 +321,7 @@ async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool
             request_entered.notify_one();
             ResponseTemplate::new(200)
                 .set_delay(Duration::from_secs(if switch_during_reset { 3 } else { 0 }))
-                .set_body_json(json!({"code": "reset", "windows_reset": 1}))
+                .set_body_json(json!({"code": "reset", "windows_reset": 2}))
         })
         .expect(1)
         .mount(&backend)
@@ -380,22 +388,28 @@ async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool
         }
     );
     let mut actual = store.load()?;
-    let reset_at = actual
+    let recovered = actual
         .profiles
         .iter()
         .find(|profile| profile.profile_id.as_str() == "selected-acct")
-        .expect("fixture selected seat")
+        .expect("fixture selected seat");
+    let reset_at = recovered
         .quota_reset_at
         .expect("redeemed request seat reset");
+    let observed_at = recovered
+        .quota_reset_observed_at
+        .expect("request-bound observation");
     let restored = expected
         .profiles
         .iter_mut()
         .find(|profile| profile.profile_id.as_str() == "selected-acct")
         .expect("fixture selected seat");
     restored.quota_reset_at = Some(reset_at);
-    restored.quota_reset_observed_at = Some(reset_at);
+    restored.quota_reset_observed_at = Some(observed_at);
+    restored.exhausted_until = None;
+    restored.backend_resets_at = None;
     restored.rate_limits = codex_login::AccountRateLimits {
-        observed_at: Some(reset_at),
+        observed_at: Some(observed_at + chrono::Duration::nanoseconds(1)),
         ..codex_login::AccountRateLimits::default()
     };
     actual
