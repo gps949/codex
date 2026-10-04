@@ -1,4 +1,4 @@
-//! Model-free native controls scoped to their opening connection and synthetic turn.
+//! Model-free native controls scoped to their opening connection and exact turn.
 
 use crate::account_management::AccountManager;
 use crate::native_account_capabilities::NativeAccountCapabilities;
@@ -6,8 +6,11 @@ use crate::native_account_capabilities::NativeAccountLanguage;
 use crate::native_account_capabilities::QuestionObservation;
 use crate::native_account_view::FrozenAccountInventory;
 use crate::native_account_view::MenuAction;
+use crate::native_account_view::MenuChoice;
 use crate::native_account_view::MenuPage;
 use crate::native_account_view::MenuQuestion;
+use crate::native_account_view::actions::MenuAnswer;
+use crate::native_account_view::actions::NativeMenuSession;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -41,6 +44,16 @@ use uuid::Uuid;
 #[path = "native_account_manager_worker.rs"]
 mod worker;
 
+pub(crate) struct NativeMenuTarget {
+    pub(crate) thread_id: ThreadId,
+    pub(crate) turn_id: String,
+}
+
+struct NativeMenuInput {
+    user: ThreadItem,
+    inventory: FrozenAccountInventory,
+}
+
 #[derive(Default)]
 pub(crate) struct NativeAccountManager {
     state: Mutex<MenuState>,
@@ -60,6 +73,13 @@ struct ActiveMenu {
     turn_id: String,
     cancellation: CancellationToken,
     finished: watch::Receiver<Option<Result<(), String>>>,
+    kind: MenuKind,
+}
+
+#[derive(Clone)]
+enum MenuKind {
+    Synthetic,
+    Attached(Arc<codex_core::CodexThread>),
 }
 
 struct MenuLimits {
@@ -72,10 +92,10 @@ struct MenuLimits {
 impl Default for MenuLimits {
     fn default() -> Self {
         Self {
-            question: Duration::from_secs(/*secs*/ 45),
-            session: Duration::from_secs(/*secs*/ 180),
+            question: Duration::from_secs(/*secs*/ 90),
+            session: Duration::from_secs(/*secs*/ 600),
             delivery: Duration::from_secs(/*secs*/ 2),
-            finish: Duration::from_secs(/*secs*/ 8),
+            finish: Duration::from_secs(/*secs*/ 35),
         }
     }
 }
@@ -121,7 +141,8 @@ impl NativeAccountManager {
     ) -> Result<(), String> {
         let thread_id = ThreadId::from_string(&params.thread_id)
             .map_err(|_| "Invalid thread ID".to_string())?;
-        self.cancel_thread(thread_id).await?;
+        self.cancel_thread_for_owner(request_id.connection_id, thread_id)
+            .await?;
         let inventory = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), manager.inventory())
             .await
             .map_err(|_| "Account inventory timed out. Reopen the menu to retry.".to_string())?
@@ -155,16 +176,23 @@ impl NativeAccountManager {
                 "A turn is running. Open the Status panel or wait for it to finish.".into(),
             );
         }
-        self.start_inventory(request_id, thread_id, user, inventory, outgoing, language)
-            .await
+        self.start_inventory(
+            request_id,
+            thread_id,
+            NativeMenuInput { user, inventory },
+            manager,
+            outgoing,
+            language,
+        )
+        .await
     }
 
     async fn start_inventory(
         self: &Arc<Self>,
         request_id: &ConnectionRequestId,
         thread_id: ThreadId,
-        user: ThreadItem,
-        inventory: FrozenAccountInventory,
+        input: NativeMenuInput,
+        manager: Arc<AccountManager>,
         outgoing: Arc<OutgoingMessageSender>,
         language: NativeAccountLanguage,
     ) -> Result<(), String> {
@@ -176,6 +204,7 @@ impl NativeAccountManager {
             turn_id: Uuid::now_v7().to_string(),
             cancellation: CancellationToken::new(),
             finished,
+            kind: MenuKind::Synthetic,
         };
         {
             let mut state = self
@@ -215,7 +244,7 @@ impl NativeAccountManager {
         let coordinator = self.clone();
         tokio::spawn(async move {
             let result = coordinator
-                .run(&menu, user, inventory, outgoing.as_ref(), language, turn)
+                .run(&menu, input, manager, outgoing.as_ref(), language, turn)
                 .await;
             finished_tx.send_replace(Some(result.clone()));
             if result.is_ok() {
@@ -223,6 +252,21 @@ impl NativeAccountManager {
             }
         });
         Ok(())
+    }
+
+    /// Signals a real turn's attached controls synchronously, without blocking its completion.
+    pub(crate) fn cancel_attached_turn(&self, thread_id: ThreadId, turn_id: &str) {
+        if let Some(menu) = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .menus
+            .get(&thread_id)
+            && menu.turn_id == turn_id
+            && matches!(menu.kind, MenuKind::Attached(_))
+        {
+            menu.cancellation.cancel();
+        }
     }
 
     pub(crate) async fn cancel_thread(&self, thread_id: ThreadId) -> Result<(), String> {
@@ -251,6 +295,21 @@ impl NativeAccountManager {
         thread_id: ThreadId,
         turn_id: &str,
     ) -> Result<bool, String> {
+        let attached = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .menus
+            .get(&thread_id)
+            .is_some_and(|menu| {
+                menu.owner == owner
+                    && matches!(menu.kind, MenuKind::Attached(_))
+                    && (turn_id.is_empty() || menu.turn_id == turn_id)
+            });
+        if attached {
+            self.cancel_thread(thread_id).await?;
+            return Ok(false);
+        }
         let matches = self
             .state
             .lock()
@@ -258,7 +317,9 @@ impl NativeAccountManager {
             .menus
             .get(&thread_id)
             .is_some_and(|menu| {
-                menu.owner == owner && (turn_id.is_empty() || menu.turn_id == turn_id)
+                menu.owner == owner
+                    && matches!(menu.kind, MenuKind::Synthetic)
+                    && (turn_id.is_empty() || menu.turn_id == turn_id)
             });
         if !matches {
             return Ok(false);

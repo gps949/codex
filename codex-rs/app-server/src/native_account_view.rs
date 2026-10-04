@@ -1,32 +1,46 @@
-//! Frozen, metadata-only pages for native account controls.
+//! Bounded account metadata and short native-question presentation.
 
 use crate::account_management::AccountManagerInventory;
 use crate::account_management::ManagedRateLimitWindow;
 use crate::native_account_capabilities::NativeAccountLanguage;
 use crate::native_account_capabilities::bounded_text;
 
-const PAGE_SIZE: usize = 5;
+#[path = "native_account_actions.rs"]
+pub(crate) mod actions;
+#[path = "native_account_details.rs"]
+mod details;
+#[path = "native_account_pages.rs"]
+mod pages;
+
+pub(crate) const PAGE_SIZE: usize = 4;
 const MAX_ACCOUNTS: usize = 128;
 
 pub(crate) struct FrozenAccountInventory {
     accounts: Vec<FrozenAccount>,
     total: usize,
     paused: bool,
-    observed_at: i64,
+    settings: serde_json::Value,
+    primary: Option<crate::account_management::PrimaryLoginView>,
+    fallback: codex_login::ApiAccountFallback,
 }
 
+#[derive(Clone)]
 struct FrozenAccount {
+    // Keep exact IDs for operations; only presentation strings are shortened.
     id: String,
     label: String,
     current: bool,
     state: String,
+    login_state: String,
+    disabled: bool,
     detail: AccountDetail,
 }
 
+#[derive(Clone)]
 enum AccountDetail {
     Subscription {
         plan: String,
-        email: String,
+        email: Option<String>,
         primary: Option<ManagedRateLimitWindow>,
         secondary: Option<ManagedRateLimitWindow>,
         primary_observed_at: Option<i64>,
@@ -34,7 +48,7 @@ enum AccountDetail {
         credits: Option<u64>,
     },
     Api {
-        model: String,
+        account: codex_login::ApiAccount,
         has_key: bool,
     },
 }
@@ -44,22 +58,103 @@ pub(crate) enum MenuPage {
     Home,
     Overview(usize),
     Detail(usize),
+    Usage(usize),
+    Actions(usize),
+    More(usize),
+    Membership(usize),
     ChoosePage { first: usize, end: usize },
+    Browse(usize),
+    Settings(usize),
+    Primary,
+    Refresh(usize),
+    Credits(usize, usize),
+    Rename(usize),
+    Confirm,
+    Result,
+    Login,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MenuOperation {
+    Reload,
+    Automatic,
+    Refresh(usize),
+    RefreshAccount(usize),
+    Use(usize),
+    Retry(usize),
+    Disable(usize),
+    Enable(usize),
+    ClearLabel(usize),
+    RemoveKeep(usize),
+    RemoveDelete(usize),
+    Relogin(usize),
+    Add,
+    PrimaryUse(usize),
+    PrimaryRoot,
+    PrimaryLogout,
+    Credits(usize),
+    Redeem(usize, usize),
+    ApiUse(usize),
+    ApiRemove(usize),
+    ApiFallback(usize),
+    FallbackOff,
+    Setting(usize),
+    LoginCheck,
+    LoginCancel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MenuAction {
-    Home,
-    Overview(usize),
-    Detail(usize),
-    ChoosePage { first: usize, end: usize },
+    Page(MenuPage),
+    Prepare(MenuOperation),
+    Execute(MenuOperation),
+    Apply,
     Language,
     Close,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MenuChoice {
+    pub(crate) label: String,
+    pub(crate) description: String,
+    pub(crate) action: MenuAction,
+}
+
 pub(crate) struct MenuQuestion {
+    // The official mobile client renders this as a heading, so it must stay short.
     pub(crate) text: String,
-    pub(crate) choices: Vec<(String, MenuAction)>,
+    pub(crate) choices: Vec<MenuChoice>,
+    pub(crate) free_text: bool,
+}
+
+impl MenuQuestion {
+    fn new(text: impl Into<String>, choices: Vec<MenuChoice>) -> Self {
+        Self {
+            text: text.into(),
+            choices,
+            free_text: false,
+        }
+    }
+}
+
+fn choice(label: &str, description: impl Into<String>, action: MenuAction) -> MenuChoice {
+    MenuChoice {
+        label: bounded_text(label, /*max_chars*/ 56),
+        description: bounded_description(&description.into()),
+        action,
+    }
+}
+
+fn bounded_description(value: &str) -> String {
+    value
+        .lines()
+        .take(6)
+        .map(|line| bounded_text(line, /*max_chars*/ 160))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .take(640)
+        .collect()
 }
 
 impl FrozenAccountInventory {
@@ -79,18 +174,14 @@ impl FrozenAccountInventory {
             .map(|account| FrozenAccount {
                 current: api_active.is_none()
                     && inventory.active_profile_id.as_ref() == Some(&account.profile_id),
-                id: bounded_text(&account.profile_id, /*max_chars*/ 96),
-                label: bounded_text(&account.label, /*max_chars*/ 64),
+                id: account.profile_id,
+                label: bounded_text(&account.label, /*max_chars*/ 80),
                 state: account.availability,
+                login_state: account.login_state,
+                disabled: account.disabled,
                 detail: AccountDetail::Subscription {
-                    plan: account
-                        .plan
-                        .map(|value| bounded_text(&value, /*max_chars*/ 64))
-                        .unwrap_or_default(),
-                    email: account
-                        .email
-                        .map(|value| bounded_text(&value, /*max_chars*/ 96))
-                        .unwrap_or_default(),
+                    plan: account.plan.unwrap_or_default(),
+                    email: account.email,
                     primary: account.rate_limits.primary,
                     secondary: account.rate_limits.secondary,
                     primary_observed_at: account.rate_limits.primary_observed_at,
@@ -107,16 +198,18 @@ impl FrozenAccountInventory {
                 .take(remaining)
                 .map(|view| FrozenAccount {
                     current: api_active == Some(&view.account.id),
-                    id: bounded_text(&view.account.id, /*max_chars*/ 96),
-                    label: bounded_text(&view.account.label, /*max_chars*/ 64),
+                    id: view.account.id.clone(),
+                    label: bounded_text(&view.account.label, /*max_chars*/ 80),
                     state: if view.account.disabled {
                         "disabled"
                     } else {
                         "manual"
                     }
                     .into(),
+                    login_state: "api".into(),
+                    disabled: view.account.disabled,
                     detail: AccountDetail::Api {
-                        model: bounded_text(&view.account.model, /*max_chars*/ 96),
+                        account: view.account,
                         has_key: view.has_key,
                     },
                 }),
@@ -125,119 +218,125 @@ impl FrozenAccountInventory {
             accounts,
             total,
             paused: inventory.paused,
-            observed_at: inventory.host_now,
+            settings: inventory.settings,
+            primary: inventory.primary_login,
+            fallback: inventory.api_fallback,
         }
     }
 
-    pub(crate) fn question(&self, page: MenuPage, language: NativeAccountLanguage) -> MenuQuestion {
-        let choose = |en, zh, action| (language.text(en, zh).into(), action);
-        match page {
-            MenuPage::Home => MenuQuestion {
-                text: format!("{}\n{}: {}\n{}", language.text("Account manager · read-only", "账号管理 · 只读"),
-                    language.text("Accounts", "账号数"), self.total,
-                    language.text("View cached quota and account details without using model quota or credits.", "查看缓存额度与账号详情；不会消耗模型额度或重置券。")),
-                choices: vec![choose("Show overview", "查看概览", MenuAction::Overview(0)),
-                    choose("中文", "English", MenuAction::Language), choose("Close", "关闭", MenuAction::Close)],
+    fn pages(&self) -> usize {
+        self.accounts.len().div_ceil(PAGE_SIZE).max(1)
+    }
+
+    fn account_choice(
+        &self,
+        index: usize,
+        language: NativeAccountLanguage,
+        now: i64,
+    ) -> MenuChoice {
+        let account = &self.accounts[index];
+        let label = format!(
+            "{}. {}",
+            index + 1,
+            bounded_text(&account.label, /*max_chars*/ 38)
+        );
+        choice(
+            &label,
+            self.account_summary(account, language, now),
+            MenuAction::Page(MenuPage::Detail(index)),
+        )
+    }
+
+    fn account_summary(
+        &self,
+        account: &FrozenAccount,
+        language: NativeAccountLanguage,
+        now: i64,
+    ) -> String {
+        let state = format!(
+            "{}{}",
+            if account.current {
+                language.text("Current · ", "当前 · ")
+            } else {
+                ""
             },
-            MenuPage::Overview(page) => {
-                let pages = self.accounts.len().div_ceil(PAGE_SIZE).max(1);
-                let page = page.min(pages - 1);
-                let start = page * PAGE_SIZE;
-                let mut text = format!("{} · {}/{}\n{}\n", language.text("Account overview", "账号概览"), page + 1, pages,
-                    language.text("Cached snapshot; quota may have changed.", "缓存快照；实际额度可能已变化。"));
-                if self.paused { text.push_str(language.text("Pool paused\n", "账号池已暂停\n")); }
-                for (index, account) in self.accounts.iter().enumerate().skip(start).take(PAGE_SIZE) {
-                    text.push_str(&format!("\n{}. {}{} · {}\n", index + 1, account.label,
-                        if account.current { language.text(" · Current", " · 当前") } else { "" }, state_name(&account.state, language)));
-                    match &account.detail {
-                        AccountDetail::Subscription { primary, secondary, primary_observed_at, secondary_observed_at, .. } => {
-                            for (name, window, observed_at) in [
-                                (language.text("Primary", "主额度"), primary, *primary_observed_at),
-                                (language.text("Secondary", "次额度"), secondary, *secondary_observed_at),
-                            ] {
-                                text.push_str(&format!("   {}: {} · {}\n", window_name(name, window.as_ref(), language),
-                                    quota(window.as_ref(), self.observed_at, language), observation_age(observed_at, self.observed_at, language)));
-                            }
-                        }
-                        AccountDetail::Api { model, .. } => text.push_str(&format!("   API · {model}\n")),
-                    }
-                }
-                if self.accounts.is_empty() { text.push_str(language.text("No enrolled accounts.\n", "尚未添加账号。\n")); }
-                if self.total > self.accounts.len() { text.push_str(language.text("Only the first 128 accounts are shown.\n", "仅显示前 128 个账号。\n")); }
-                text.push_str(&format!("\n{}: {}", language.text("Local snapshot created", "本地快照创建时间"), timestamp(self.observed_at)));
-                let mut choices = Vec::new();
-                if !self.accounts.is_empty() { choices.push(choose("Account details", "账号详情", MenuAction::Detail(start))); }
-                if pages > 2 { choices.push(choose("Choose page", "选择页码", MenuAction::ChoosePage { first: 0, end: pages })); }
-                else if pages > 1 { choices.push(choose("Next page", "下一页", MenuAction::Overview((page + 1) % pages))); }
-                if self.accounts.is_empty() { choices.push(choose("Back", "返回", MenuAction::Home)); }
-                choices.push(choose("Close", "关闭", MenuAction::Close));
-                MenuQuestion { text, choices }
-            }
-            MenuPage::Detail(index) => {
-                let Some(account) = self.accounts.get(index) else { return self.question(MenuPage::Home, language); };
-                let mut text = format!("{} · {}/{}\n{}\nID: {}\n{}: {}", language.text("Account details", "账号详情"), index + 1, self.accounts.len(),
-                    account.label, account.id, language.text("State", "状态"), state_name(&account.state, language));
-                match &account.detail {
-                    AccountDetail::Subscription { plan, email, primary, secondary, primary_observed_at, secondary_observed_at, credits } => {
-                        text.push_str(&format!("\n{}: {plan}\n{}: {email}", language.text("Subscription", "订阅"), language.text("Email", "邮箱")));
-                        for (name, window, observed_at) in [
-                            (language.text("Primary", "主额度"), primary, *primary_observed_at),
-                            (language.text("Secondary", "次额度"), secondary, *secondary_observed_at),
-                        ] {
-                            text.push_str(&format!("\n{}: {}", window_name(name, window.as_ref(), language), quota(window.as_ref(), self.observed_at, language)));
-                            if let Some(at) = window.as_ref().and_then(|window| window.resets_at) { text.push_str(&format!(" · {} {}", language.text("Reset", "重置"), timestamp(at))); }
-                            text.push_str(&format!("\n  {}: {} · {}", language.text("Observed", "记录时间"),
-                                observed_at.map(timestamp).unwrap_or_else(|| language.text("Unknown", "未知").into()),
-                                observation_age(observed_at, self.observed_at, language)));
-                        }
-                        if let Some(credits) = credits { text.push_str(&format!("\n{}: {credits}", language.text("Reset credits (cached)", "重置券（缓存）"))); }
-                    }
-                    AccountDetail::Api { model, has_key } => text.push_str(&format!("\nAPI · {model}\n{}\n{}",
-                        if *has_key { language.text("Key configured", "已配置密钥") } else { language.text("Key missing", "缺少密钥") },
-                        language.text("Subscription quota does not apply. API use may incur charges.", "不适用订阅额度。API 使用可能产生费用。"))),
-                }
-                text.push_str(language.text("\n\nRead-only snapshot. Reopen the menu to load current local data.", "\n\n只读快照。重新打开菜单可加载最新本地数据。"));
-                let mut choices = vec![choose("Overview", "概览", MenuAction::Overview(index / PAGE_SIZE))];
-                if self.accounts.len() > 1 { choices.push(choose("Next account", "下一个账号", MenuAction::Detail((index + 1) % self.accounts.len()))); }
-                choices.push(choose("Close", "关闭", MenuAction::Close));
-                MenuQuestion { text, choices }
-            }
-            MenuPage::ChoosePage { first, end } => {
-                let pages = self.accounts.len().div_ceil(PAGE_SIZE).max(1);
-                let first = first.min(pages - 1);
-                let end = end.min(pages).max(first + 1);
-                let text = format!("{} · {}–{}\n{}", language.text("Choose a page", "选择页码"), first + 1, end,
-                    language.text("Select a page range, then a page. All captured accounts are reachable.", "先选择页码范围，再选择一页。可查看所有已捕获的账号。"));
-                let mut choices = Vec::new();
-                if end - first <= 2 {
-                    for page in first..end {
-                        choices.push((format!("{} {} · {}–{}", language.text("Page", "第"), page + 1,
-                            page * PAGE_SIZE + 1, ((page + 1) * PAGE_SIZE).min(self.accounts.len())), MenuAction::Overview(page)));
-                    }
-                } else {
-                    let middle = first + (end - first).div_ceil(2);
-                    for (range_first, range_end) in [(first, middle), (middle, end)] {
-                        choices.push((format!("{} {}–{}", language.text("Pages", "页码"), range_first + 1, range_end),
-                            MenuAction::ChoosePage { first: range_first, end: range_end }));
-                    }
-                }
-                choices.push(choose("Back", "返回", MenuAction::Overview(first)));
-                MenuQuestion { text, choices }
-            }
+            state_name(&account.state, language)
+        );
+        match &account.detail {
+            AccountDetail::Subscription {
+                primary,
+                secondary,
+                primary_observed_at,
+                secondary_observed_at,
+                ..
+            } => format!(
+                "{state}\n{} · {}\n{} · {}",
+                window_quota(
+                    language.text("Primary", "主额度"),
+                    primary.as_ref(),
+                    now,
+                    language
+                ),
+                observation_age(*primary_observed_at, now, language),
+                window_quota(
+                    language.text("Secondary", "次额度"),
+                    secondary.as_ref(),
+                    now,
+                    language
+                ),
+                observation_age(*secondary_observed_at, now, language)
+            ),
+            AccountDetail::Api { account, .. } => format!(
+                "{state}\nAPI · {}\n{}",
+                bounded_text(&account.model, /*max_chars*/ 80),
+                language.text("Provider charges may apply", "使用可能产生提供商费用")
+            ),
         }
     }
+}
+
+fn confirmation_target(account: &FrozenAccount, index: usize) -> String {
+    format!(
+        "{}. {}\nID: {}",
+        index + 1,
+        bounded_text(&account.label, /*max_chars*/ 56),
+        bounded_text(&account.id, /*max_chars*/ 80)
+    )
+}
+
+fn configured_reset_wait_minutes(settings: &codex_config::AccountPoolConfigToml) -> u64 {
+    codex_config::AccountPoolConfigToml {
+        resume_after_reset: Some(true),
+        ..settings.clone()
+    }
+    .effective_reset_wait()
+    .as_secs()
+        / 60
 }
 
 fn state_name(state: &str, language: NativeAccountLanguage) -> &'static str {
     match state {
         "ready" => language.text("Ready", "可用"),
-        "disabled" => language.text("Disabled", "已禁用"),
+        "disabled" => language.text("Disabled", "已停用"),
         "needsLogin" => language.text("Login required", "需要登录"),
         "coolingDown" => language.text("Cooling down", "等待重置"),
         "paused" => language.text("Paused", "已暂停"),
         "manual" => language.text("Manual API", "手动 API"),
         _ => language.text("Unknown", "未知"),
     }
+}
+
+fn window_quota(
+    name: &str,
+    window: Option<&ManagedRateLimitWindow>,
+    now: i64,
+    language: NativeAccountLanguage,
+) -> String {
+    format!(
+        "{}: {}",
+        window_name(name, window, language),
+        quota(window, now, language)
+    )
 }
 
 fn quota(
@@ -307,13 +406,13 @@ fn observation_age(observed_at: Option<i64>, now: i64, language: NativeAccountLa
     }
     let age = now.saturating_sub(at);
     if age < 60 {
-        language.text("recorded just now", "刚刚记录").into()
+        language.text("just now", "刚刚记录").into()
     } else if age < 3600 {
-        format!("{} {}", age / 60, language.text("m old", "分钟前记录"))
+        format!("{} {}", age / 60, language.text("m old", "分钟前"))
     } else if age < 86_400 {
-        format!("{} {}", age / 3600, language.text("h old", "小时前记录"))
+        format!("{} {}", age / 3600, language.text("h old", "小时前"))
     } else {
-        format!("{} {}", age / 86_400, language.text("d old", "天前记录"))
+        format!("{} {}", age / 86_400, language.text("d old", "天前"))
     }
 }
 

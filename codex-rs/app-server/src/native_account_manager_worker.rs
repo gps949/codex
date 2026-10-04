@@ -1,4 +1,9 @@
-//! Question delivery, cancellation and synthetic item lifecycle.
+//! Owned native question delivery; attached controls preserve the real turn lifecycle.
+
+#[path = "native_account_questions.rs"]
+mod questions;
+#[cfg(test)]
+pub(super) use questions::parse_answer;
 
 use super::*;
 
@@ -8,6 +13,88 @@ enum QuestionFailure {
 }
 
 impl NativeAccountManager {
+    /// Opens a nonblocking control request without creating or completing a real turn.
+    pub(crate) async fn start_attached(
+        self: &Arc<Self>,
+        request_id: &ConnectionRequestId,
+        thread: Arc<codex_core::CodexThread>,
+        target: NativeMenuTarget,
+        manager: Arc<AccountManager>,
+        outgoing: Arc<OutgoingMessageSender>,
+        language: NativeAccountLanguage,
+    ) -> Result<(), String> {
+        let thread_id = target.thread_id;
+        let turn_id = target.turn_id.as_str();
+        self.cancel_thread_for_owner(request_id.connection_id, thread_id)
+            .await?;
+        let inventory = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), manager.inventory())
+            .await
+            .map_err(|_| "Account inventory timed out".to_string())?
+            .map_err(|_| "Account inventory could not be loaded".to_string())?;
+        if thread
+            .current_turn_environment_selections(turn_id)
+            .await
+            .is_none()
+        {
+            return Err("The requested turn is no longer running.".into());
+        }
+        let (finished_tx, finished) = watch::channel(/*init*/ None);
+        let menu = ActiveMenu {
+            owner: request_id.connection_id,
+            thread_id,
+            turn_id: turn_id.into(),
+            cancellation: CancellationToken::new(),
+            finished,
+            kind: MenuKind::Attached(thread),
+        };
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !state.connections.contains_key(&menu.owner)
+                || state.menus.contains_key(&thread_id)
+                || state.menus.len() >= 32
+            {
+                return Err(
+                    "Another account menu is active or its connection is unavailable.".into(),
+                );
+            }
+            state.menus.insert(thread_id, menu.clone());
+        }
+        outgoing.record_request_turn_id(request_id, turn_id).await;
+        if tokio::time::timeout(
+            self.limits.delivery,
+            outgoing.send_response(
+                request_id.clone(),
+                codex_app_server_protocol::TurnSteerResponse {
+                    turn_id: turn_id.into(),
+                },
+            ),
+        )
+        .await
+        .is_err()
+        {
+            self.remove_menu(thread_id, turn_id);
+            return Err("Account menu response could not be delivered.".into());
+        }
+        let coordinator = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = coordinator
+                .run_attached(
+                    &menu,
+                    FrozenAccountInventory::from_inventory(inventory),
+                    manager,
+                    outgoing.as_ref(),
+                    language,
+                )
+                .await;
+            finished_tx.send_replace(Some(result));
+            coordinator.remove_menu(thread_id, &menu.turn_id);
+        });
+        Ok(())
+    }
+
     async fn notify(
         &self,
         outgoing: &OutgoingMessageSender,
@@ -57,104 +144,37 @@ impl NativeAccountManager {
     pub(super) async fn run(
         &self,
         menu: &ActiveMenu,
-        user: ThreadItem,
-        inventory: FrozenAccountInventory,
+        input: NativeMenuInput,
+        manager: Arc<AccountManager>,
         outgoing: &OutgoingMessageSender,
-        mut language: NativeAccountLanguage,
+        language: NativeAccountLanguage,
         mut turn: Turn,
     ) -> Result<(), String> {
-        let thread_id = menu.thread_id;
-        let deadline = Instant::now() + self.limits.session;
-        let started = self
+        let NativeMenuInput { user, inventory } = input;
+        let mut result = self
             .notify(
                 outgoing,
                 menu.owner,
                 ServerNotification::TurnStarted(TurnStartedNotification {
-                    thread_id: thread_id.to_string(),
+                    thread_id: menu.thread_id.to_string(),
                     turn: turn.clone(),
                 }),
             )
             .await;
-        let mut result = started;
         if result.is_ok() && !menu.cancellation.is_cancelled() {
-            result = self.item(outgoing, menu, thread_id, user).await;
+            result = self.item(outgoing, menu, menu.thread_id, user).await;
         }
-        let mut page = MenuPage::Home;
-        let mut closing_text = None;
-        for _ in 0..12 {
-            if result.is_err() || menu.cancellation.is_cancelled() {
-                break;
-            }
-            let question = inventory.question(page, language);
-            let item = ThreadItem::AgentMessage {
-                id: Uuid::now_v7().to_string(),
-                text: question.text.clone(),
-                phase: None,
-                memory_citation: None,
-                delivery: None,
-                questions: None,
-            };
-            result = self.item(outgoing, menu, thread_id, item.clone()).await;
-            if result.is_err() || menu.cancellation.is_cancelled() {
-                break;
-            }
-            turn.items = vec![item.clone()];
-            let action = self
-                .ask(outgoing, menu, &item, question, deadline, language)
-                .await;
-            match action {
-                Ok(MenuAction::Home) => page = MenuPage::Home,
-                Ok(MenuAction::ChoosePage { first, end }) => {
-                    page = MenuPage::ChoosePage { first, end }
-                }
-                Ok(MenuAction::Overview(index)) => page = MenuPage::Overview(index),
-                Ok(MenuAction::Detail(index)) => page = MenuPage::Detail(index),
-                Ok(MenuAction::Language) => {
-                    language = language.other();
-                    page = MenuPage::Home;
-                }
-                Ok(MenuAction::Close) => {
-                    closing_text = Some(
-                        language
-                            .text("Account menu closed.", "账号菜单已关闭。")
-                            .into(),
-                    );
-                    break;
-                }
-                Err(QuestionFailure::Message(message)) => {
-                    closing_text = Some(message);
-                    break;
-                }
-                Err(QuestionFailure::Delivery(error)) => {
-                    result = Err(error);
-                    break;
-                }
-            }
-        }
-        if closing_text.is_none() && !menu.cancellation.is_cancelled() && result.is_ok() {
-            closing_text = Some(
-                language
-                    .text(
-                        "Menu session finished. Reopen with /account manage to continue.",
-                        "菜单会话已结束。可用 /account manage 重新打开继续查看。",
-                    )
-                    .into(),
-            );
-        }
-        if let Some(text) = closing_text.filter(|_| !menu.cancellation.is_cancelled()) {
-            let item = ThreadItem::AgentMessage {
-                id: Uuid::now_v7().to_string(),
-                text,
-                phase: None,
-                memory_citation: None,
-                delivery: None,
-                questions: None,
-            };
+        let anchor = menu_anchor(language);
+        if result.is_ok() && !menu.cancellation.is_cancelled() {
             result = self
-                .item(outgoing, menu, thread_id, item.clone())
-                .await
-                .and(result);
-            turn.items = vec![item];
+                .item(outgoing, menu, menu.thread_id, anchor.clone())
+                .await;
+        }
+        turn.items = vec![anchor.clone()];
+        if result.is_ok() && !menu.cancellation.is_cancelled() {
+            result = self
+                .run_pages(menu, &anchor, inventory, manager, outgoing, language)
+                .await;
         }
         turn.status = if result.is_err() {
             TurnStatus::Failed
@@ -181,149 +201,204 @@ impl NativeAccountManager {
         turn.duration_ms = turn
             .started_at
             .map(|at| (chrono::Utc::now().timestamp() - at).max(0) * 1000);
-        let completed = self
-            .notify(
-                outgoing,
-                menu.owner,
-                ServerNotification::TurnCompleted(TurnCompletedNotification {
-                    thread_id: thread_id.to_string(),
-                    turn,
-                }),
-            )
-            .await;
-        // A delivered terminal event retires this menu even when an earlier page failed.
-        completed
-    }
-
-    async fn ask(
-        &self,
-        outgoing: &OutgoingMessageSender,
-        menu: &ActiveMenu,
-        item: &ThreadItem,
-        question: MenuQuestion,
-        deadline: Instant,
-        language: NativeAccountLanguage,
-    ) -> Result<MenuAction, QuestionFailure> {
-        let thread_id = menu.thread_id;
-        let question_id = Uuid::now_v7().to_string();
-        let item_id = match item {
-            ThreadItem::AgentMessage { id, .. } => id.clone(),
-            _ => unreachable!("menu questions attach to their emitted instruction"),
-        };
-        let payload = ServerRequestPayload::ToolRequestUserInput(ToolRequestUserInputParams {
-            thread_id: thread_id.to_string(),
-            turn_id: menu.turn_id.clone(),
-            item_id,
-            questions: vec![ToolRequestUserInputQuestion {
-                id: question_id.clone(),
-                header: language.text("Accounts", "账号管理").into(),
-                question: question.text,
-                is_other: false,
-                is_secret: false,
-                options: Some(
-                    question
-                        .choices
-                        .iter()
-                        .map(|(label, _)| ToolRequestUserInputOption {
-                            label: label.clone(),
-                            description: language
-                                .text("Read-only account menu", "只读账号菜单")
-                                .into(),
-                        })
-                        .collect(),
-                ),
-            }],
-            is_blocking: true,
-            auto_resolution_ms: None,
-        });
-        let cancellation = menu.cancellation.child_token();
-        let timer_token = cancellation.clone();
-        let question_deadline = deadline.min(Instant::now() + self.limits.question);
-        let timer = tokio::spawn(async move {
-            tokio::time::sleep_until(question_deadline).await;
-            timer_token.cancel();
-        });
-        let (request_id, response) = outgoing
-            .send_connection_owned_request_with_cancellation(
-                menu.owner,
-                payload,
-                thread_id,
-                cancellation.clone(),
-            )
-            .await;
-        let response = tokio::select! { biased; _ = cancellation.cancelled() => None, result = response => Some(result) };
-        timer.abort();
-        outgoing.cancel_request(&request_id).await;
+        // A delivered terminal event retires this synthetic menu, never an attached real turn.
         self.notify(
             outgoing,
             menu.owner,
-            ServerNotification::ServerRequestResolved(ServerRequestResolvedNotification {
-                thread_id: thread_id.to_string(),
-                request_id,
+            ServerNotification::TurnCompleted(TurnCompletedNotification {
+                thread_id: menu.thread_id.to_string(),
+                turn,
             }),
         )
         .await
-        .map_err(QuestionFailure::Delivery)?;
-        match response {
-            Some(Ok(Ok(value))) => {
-                let action = parse_answer(value, &question_id, &question.choices);
-                self.observe(
-                    menu.owner,
-                    if action.is_ok() {
-                        QuestionObservation::Responded
-                    } else {
-                        QuestionObservation::InvalidAnswer
-                    },
-                );
-                action.map_err(|_| QuestionFailure::Message(language.text("Answer not accepted. Reopen with /account manage and choose one option.", "未接受此回复。请用 /account manage 重新打开，并选择一个选项。").into()))
-            }
-            Some(Ok(Err(error))) if error.code == -32601 => {
-                self.observe(menu.owner, QuestionObservation::MethodNotFound);
-                Err(QuestionFailure::Message(language.text("This connection did not handle native questions. Try /account list for account status.", "此连接未处理原生问答。可用 /account list 查看账号状态。").into()))
-            }
-            Some(_) => {
-                self.observe(menu.owner, QuestionObservation::Rejected);
-                Err(QuestionFailure::Message(language.text("Account question closed or connection lost. Reopen with /account manage.", "账号问答已关闭或连接已断开。可用 /account manage 重新打开。").into()))
-            }
-            None => {
-                if !menu.cancellation.is_cancelled() {
-                    self.observe(menu.owner, QuestionObservation::NoAnswer);
+    }
+
+    pub(super) async fn run_attached(
+        &self,
+        menu: &ActiveMenu,
+        inventory: FrozenAccountInventory,
+        manager: Arc<AccountManager>,
+        outgoing: &OutgoingMessageSender,
+        language: NativeAccountLanguage,
+    ) -> Result<(), String> {
+        let MenuKind::Attached(thread) = &menu.kind else {
+            return Err("Expected an attached account menu".into());
+        };
+        let thread = Arc::clone(thread);
+        let turn_id = menu.turn_id.clone();
+        let cancellation = menu.cancellation.clone();
+        let watcher = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(/*millis*/ 500)) => {}
                 }
-                Err(QuestionFailure::Message(
-                    language
-                        .text(
-                            "No answer received. Reopen with /account manage when ready.",
-                            "未收到回复。准备好后可用 /account manage 重新打开。",
+                if thread
+                    .current_turn_environment_selections(&turn_id)
+                    .await
+                    .is_none()
+                {
+                    cancellation.cancel();
+                    break;
+                }
+            }
+        });
+        let anchor = menu_anchor(language);
+        let result = if menu.cancellation.is_cancelled() {
+            Ok(())
+        } else {
+            self.item(outgoing, menu, menu.thread_id, anchor.clone())
+                .await
+        };
+        let result = if result.is_ok() {
+            self.run_pages(menu, &anchor, inventory, manager, outgoing, language)
+                .await
+        } else {
+            result
+        };
+        watcher.abort();
+        result
+    }
+
+    async fn run_pages(
+        &self,
+        menu: &ActiveMenu,
+        anchor: &ThreadItem,
+        inventory: FrozenAccountInventory,
+        manager: Arc<AccountManager>,
+        outgoing: &OutgoingMessageSender,
+        mut language: NativeAccountLanguage,
+    ) -> Result<(), String> {
+        let context = match &menu.kind {
+            MenuKind::Synthetic => crate::account_management::AccountOperationContext::NativeMenu(
+                menu.cancellation.clone(),
+            ),
+            MenuKind::Attached(thread) => {
+                crate::account_management::AccountOperationContext::AttachedMenu {
+                    cancellation: menu.cancellation.clone(),
+                    thread: Arc::clone(thread),
+                    turn_id: menu.turn_id.clone(),
+                }
+            }
+        };
+        let mut session = NativeMenuSession::new(inventory);
+        session.bind_targets(&manager);
+        let deadline = Instant::now() + self.limits.session;
+        let mut result = Ok(());
+        for _ in 0..40 {
+            if menu.cancellation.is_cancelled() || Instant::now() >= deadline {
+                break;
+            }
+            if let MenuKind::Attached(thread) = &menu.kind
+                && thread
+                    .current_turn_environment_selections(&menu.turn_id)
+                    .await
+                    .is_none()
+            {
+                menu.cancellation.cancel();
+                break;
+            }
+            let question = session.question(language);
+            let answer = self
+                .ask(outgoing, menu, anchor, question, deadline, language)
+                .await;
+            if menu.cancellation.is_cancelled() || Instant::now() >= deadline {
+                break;
+            }
+            if let MenuKind::Attached(thread) = &menu.kind
+                && thread
+                    .current_turn_environment_selections(&menu.turn_id)
+                    .await
+                    .is_none()
+            {
+                menu.cancellation.cancel();
+                break;
+            }
+            match answer {
+                Ok(MenuAnswer::Action(MenuAction::Language)) => {
+                    language = language.other();
+                    let preferences = crate::account_management::ManagerPreferences {
+                        language: match language {
+                            NativeAccountLanguage::English => {
+                                crate::account_management::ManagerLanguage::English
+                            }
+                            NativeAccountLanguage::Chinese => {
+                                crate::account_management::ManagerLanguage::SimplifiedChinese
+                            }
+                        },
+                    };
+                    if let Err(error) = manager.save_preferences(preferences) {
+                        session.error(error, language);
+                    } else {
+                        session.page = MenuPage::Home;
+                    }
+                }
+                Ok(answer) => {
+                    let operation_deadline =
+                        deadline.min(Instant::now() + Duration::from_secs(/*secs*/ 20));
+                    let outcome = tokio::select! {
+                        biased;
+                        _ = menu.cancellation.cancelled() => break,
+                        result = tokio::time::timeout_at(operation_deadline, session.handle(answer, &manager, language, &context)) => result,
+                    };
+                    match outcome {
+                        Ok(Ok(true)) => {}
+                        Ok(Ok(false)) => break,
+                        Ok(Err(error)) => {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(/*secs*/ 5),
+                                session.reload(&manager),
+                            )
+                            .await;
+                            session.error(error, language);
+                        }
+                        Err(_) => {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(/*secs*/ 5),
+                                session.reload(&manager),
+                            )
+                            .await;
+                            session.error(anyhow::anyhow!("Operation timed out; its outcome is unconfirmed. Check current state before retrying."), language);
+                        }
+                    }
+                }
+                Err(QuestionFailure::Message(message)) => {
+                    // One short error receipt replaces the old full-page chat dump.
+                    result = self
+                        .item(
+                            outgoing,
+                            menu,
+                            menu.thread_id,
+                            ThreadItem::AgentMessage {
+                                id: Uuid::now_v7().to_string(),
+                                text: message,
+                                phase: None,
+                                memory_citation: None,
+                                delivery: None,
+                                questions: None,
+                            },
                         )
-                        .into(),
-                ))
+                        .await;
+                    break;
+                }
+                Err(QuestionFailure::Delivery(error)) => {
+                    result = Err(error);
+                    break;
+                }
             }
         }
+        session.close(&manager).await;
+        result
     }
 }
 
-pub(super) fn parse_answer(
-    value: serde_json::Value,
-    question_id: &str,
-    choices: &[(String, MenuAction)],
-) -> Result<MenuAction, ()> {
-    let response: ToolRequestUserInputResponse = serde_json::from_value(value).map_err(|_| ())?;
-    if response.answers.is_empty() {
-        return Ok(MenuAction::Close);
+fn menu_anchor(language: NativeAccountLanguage) -> ThreadItem {
+    ThreadItem::AgentMessage {
+        id: Uuid::now_v7().to_string(),
+        text: language.text("Account controls", "账号管理").into(),
+        phase: None,
+        memory_citation: None,
+        delivery: None,
+        questions: None,
     }
-    if response.answers.len() != 1 {
-        return Err(());
-    }
-    let answer = response.answers.get(question_id).ok_or(())?;
-    if answer.answers.is_empty() {
-        return Ok(MenuAction::Close);
-    }
-    let [label] = answer.answers.as_slice() else {
-        return Err(());
-    };
-    choices
-        .iter()
-        .find(|(known, _)| known == label)
-        .map(|(_, action)| *action)
-        .ok_or(())
 }
