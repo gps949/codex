@@ -11,6 +11,7 @@
     <script src="/lifecycle.js" defer></script>
     <script src="/primary.js" defer></script>
     <script src="/warmup.js" defer></script>
+    <script src="/decision.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -99,6 +100,7 @@
       </section>
       <div id="dashboard" hidden>
         <section id="host-login" class="panel" hidden></section>
+        <section id="decision-assistance" class="panel"></section>
         <section class="selection panel" aria-labelledby="selection-title">
           <div>
             <h2 id="selection-title">Current selection</h2>
@@ -390,8 +392,10 @@
           <h2 id="dialog-title" tabindex="-1"></h2>
           <p id="dialog-description" class="muted"></p>
         </header>
-        <fieldset id="dialog-fields"><div id="dialog-body"></div></fieldset>
-        <p id="dialog-result" class="message" role="status" hidden></p>
+        <div class="dialog-scroll">
+          <fieldset id="dialog-fields"><div id="dialog-body"></div></fieldset>
+          <p id="dialog-result" class="message" role="status" hidden></p>
+        </div>
         <div class="dialog-footer">
           <button id="dialog-cancel" type="button">Cancel</button
           ><button id="dialog-submit" class="primary" type="submit">

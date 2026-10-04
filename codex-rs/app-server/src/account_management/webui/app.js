@@ -263,21 +263,29 @@
     }
     if (!response.ok) {
       const secretOperation =
-        payload?.type === "apiAdd" || payload?.type === "apiReplaceKey";
+        payload?.type === "apiAdd" ||
+        payload?.type === "apiReplaceKey" ||
+        payload?.type === "decisionSave" ||
+        payload?.type === "decisionProbe";
+      const decisionError =
+        payload?.type === "decisionSave" || payload?.type === "decisionProbe"
+          ? window.AccountManagerDecision.safeError(data.error)
+          : null;
       const error = new Error(
-        secretOperation
-          ? t(
-              "The API credential operation failed (HTTP {status}). Check account status and the provider settings. Re-enter the key to try again.",
-              { status: response.status },
-            )
-          : url.pathname === "/api/session"
+        decisionError ||
+          (secretOperation
             ? t(
-                "Pairing was denied. Open the current pairing URL printed by the manager.",
+                "The API credential operation failed (HTTP {status}). Check account status and the provider settings. Re-enter the key to try again.",
+                { status: response.status },
               )
-            : data.error ||
-              t("The account manager returned HTTP {status}.", {
-                status: response.status,
-              }),
+            : url.pathname === "/api/session"
+              ? t(
+                  "Pairing was denied. Open the current pairing URL printed by the manager.",
+                )
+              : data.error ||
+                t("The account manager returned HTTP {status}.", {
+                  status: response.status,
+                })),
       );
       error.status = response.status;
       if (response.status === 401 || response.status === 403) setPaired(false);
@@ -419,6 +427,17 @@
   function renderInventory() {
     const inventory = state.inventory;
     const focused = document.activeElement?.dataset.focusKey;
+    window.AccountManagerDecision.render(inventory.decisionAdvisor, {
+      element,
+      field,
+      button,
+      openDialog,
+      perform,
+      operation,
+      setBusy,
+      showResult,
+      busy: state.busy,
+    });
     window.AccountManagerPrimary.render(
       inventory.primaryLogin,
       confirmOperation,

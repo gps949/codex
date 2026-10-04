@@ -500,8 +500,14 @@ dialog {
 dialog::backdrop {
   background: #152b4a80;
 }
+#action-form {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 42px);
+}
 .dialog-header {
   padding: 24px 24px 0;
+  flex-shrink: 0;
 }
 .dialog-header p {
   margin-top: 7px;
@@ -516,10 +522,17 @@ fieldset {
 #dialog-fields {
   padding: 22px 24px;
 }
+.dialog-scroll {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
 #dialog-result {
   margin: 0 24px 20px;
+  flex-shrink: 0;
 }
 .dialog-footer {
+  flex-shrink: 0;
   justify-content: flex-end;
   padding: 16px 24px;
   border-top: 1px solid var(--line);

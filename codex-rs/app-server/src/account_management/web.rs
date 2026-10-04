@@ -115,6 +115,7 @@ pub async fn serve(
 fn router(state: WebState) -> Router {
     let api = Router::new()
         .route("/inventory", get(inventory))
+        .route("/decision-advisor", get(decision_advisor))
         .route("/preferences", get(preferences).post(save_preferences))
         .route("/operation", post(operation))
         .route("/heartbeat", post(heartbeat))
@@ -128,6 +129,15 @@ fn router(state: WebState) -> Router {
         .route(
             "/",
             get(|| async { Html(include_str!("webui/index.html")) }),
+        )
+        .route(
+            "/decision.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/decision.js"),
+                )
+            }),
         )
         .route(
             "/app.js",
@@ -345,13 +355,21 @@ async fn save_preferences(
     }
 }
 
+async fn decision_advisor(State(state): State<WebState>) -> Response {
+    match state.manager.decision_advisor_view().await {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => api_error(error),
+    }
+}
+
 async fn operation(
     State(state): State<WebState>,
     Json(operation): Json<AccountManagerOperation>,
 ) -> Response {
     let result = match operation {
         operation @ (AccountManagerOperation::Refresh { .. }
-        | AccountManagerOperation::Credits { .. }) => {
+        | AccountManagerOperation::Credits { .. }
+        | AccountManagerOperation::DecisionProbe { .. }) => {
             tokio::select! {
                 result = state.manager.execute(operation) => result,
                 _ = state.lifecycle.shutdown().cancelled_owned() => {
