@@ -12,6 +12,7 @@ use super::LegacyApplyPatchExecCommandWarning;
 use super::LegacyModelMismatchWarning;
 use super::LegacyUnifiedExecProcessLimitWarning;
 use super::RecommendedPluginsInstructions;
+use super::SkillSuggestions;
 use super::SubagentNotification;
 use super::TurnAborted;
 use super::UserGoalUpdate;
@@ -25,6 +26,7 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     AdditionalContextUserFragment::matches_text,
     AgentMessageBoardNotification::matches_text,
     codex_skills_extension::is_skill_prompt_fragment,
+    SkillSuggestions::matches_text,
     UserShellCommand::matches_text,
     TurnAborted::matches_text,
     SubagentNotification::matches_text,

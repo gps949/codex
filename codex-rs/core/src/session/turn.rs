@@ -1365,6 +1365,17 @@ async fn build_skills_and_plugins(
     };
     injection_items.extend(plugin_items);
     injection_items.extend(extension_injection_items);
+    if let Some(suggestion) = super::skill_suggestions::suggest(
+        turn_context,
+        user_input,
+        &injection_items,
+        &mentioned_skills,
+        cancellation_token,
+    )
+    .await
+    {
+        injection_items.push(suggestion);
+    }
     Some((injection_items, explicitly_enabled_connectors))
 }
 

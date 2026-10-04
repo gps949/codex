@@ -98,6 +98,7 @@ mod guardian_cached_score;
 mod guardian_checkpoint_migration;
 // Uses the same command-approval harness as guardian_review below.
 mod canonical_plugin_connectors;
+mod decision_advisor;
 mod gateway_auth;
 #[cfg(not(target_os = "windows"))]
 mod guardian_context_budget;
@@ -206,6 +207,7 @@ mod search_tool;
 mod settings_commits;
 mod settings_constraints;
 mod shell_snapshot;
+mod skill_advisor;
 mod skill_approval;
 mod skills;
 mod skills_extension;
@@ -256,5 +258,3 @@ mod worktree_trust;
 
 #[path = "guardian_sender_messages_tests.rs"]
 mod guardian_sender_messages;
-
-mod decision_advisor;
