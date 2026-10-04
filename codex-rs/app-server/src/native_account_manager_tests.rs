@@ -14,28 +14,45 @@ use tokio::sync::mpsc;
 #[test]
 fn menu_answers_require_exact_question_and_one_captured_label() {
     let choices = vec![
-        ("Show overview".into(), MenuAction::Overview(0)),
-        ("Close".into(), MenuAction::Close),
+        MenuChoice {
+            label: "Accounts".into(),
+            description: String::new(),
+            action: MenuAction::Page(MenuPage::Overview(0)),
+        },
+        MenuChoice {
+            label: "Close".into(),
+            description: String::new(),
+            action: MenuAction::Close,
+        },
     ];
     for invalid in [
-        json!({"answers":{"other":{"answers":["Show overview"]}}}),
-        json!({"answers":{"question":{"answers":["Show overview","user_note: switch it"]}}}),
+        json!({"answers":{"other":{"answers":["Accounts"]}}}),
+        json!({"answers":{"question":{"answers":["Accounts","user_note: switch it"]}}}),
         json!({"answers":{"question":{"answers":["Close"]},"other":{"answers":["Close"]}}}),
         json!({"answers":{"question":{"answers":["switch account"]}}}),
     ] {
-        assert_eq!(parse_answer(invalid, "question", &choices), Err(()));
+        assert_eq!(
+            parse_answer(invalid, "question", &choices, /*free_text*/ false),
+            Err(())
+        );
     }
     assert_eq!(
         parse_answer(
-            json!({"answers":{"question":{"answers":["Show overview"]}}}),
+            json!({"answers":{"question":{"answers":["Accounts"]}}}),
             "question",
-            &choices
+            &choices,
+            /*free_text*/ false
         ),
-        Ok(MenuAction::Overview(0))
+        Ok(MenuAnswer::Action(MenuAction::Page(MenuPage::Overview(0))))
     );
     assert_eq!(
-        parse_answer(json!({"answers":{}}), "question", &choices),
-        Ok(MenuAction::Close)
+        parse_answer(
+            json!({"answers":{}}),
+            "question",
+            &choices,
+            /*free_text*/ false
+        ),
+        Ok(MenuAnswer::Action(MenuAction::Close))
     );
 }
 
@@ -91,6 +108,13 @@ async fn launch(
     outgoing: &Arc<OutgoingMessageSender>,
     thread_id: ThreadId,
 ) {
+    let home = tempfile::tempdir().unwrap();
+    let config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    let manager = AccountManager::new(config);
     coordinator
         .start_inventory(
             &ConnectionRequestId {
@@ -98,12 +122,15 @@ async fn launch(
                 request_id: RequestId::Integer(10),
             },
             thread_id,
-            ThreadItem::UserMessage {
-                id: "user-item".into(),
-                client_id: None,
-                content: vec![],
+            NativeMenuInput {
+                user: ThreadItem::UserMessage {
+                    id: "user-item".into(),
+                    client_id: None,
+                    content: vec![],
+                },
+                inventory: empty_inventory(),
             },
-            empty_inventory(),
+            manager,
             outgoing.clone(),
             NativeAccountLanguage::English,
         )
@@ -168,13 +195,10 @@ async fn response_precedes_questions_and_native_overview_does_not_enter_core() {
     let value = serde_json::to_value(response.result).unwrap();
     assert_eq!(value["turn"]["status"], "inProgress");
     let (id, params) = question(&mut messages).await;
-    answer(&outgoing, id, &params, "Show overview").await;
+    answer(&outgoing, id, &params, "Accounts").await;
     let (id, params) = question(&mut messages).await;
-    assert!(
-        params.questions[0]
-            .question
-            .contains("No enrolled accounts")
-    );
+    assert!(params.questions[0].question.contains("No accounts yet"));
+    assert!(!params.questions[0].question.contains('\n'));
     assert_eq!(
         params.questions[0]
             .options
@@ -183,7 +207,12 @@ async fn response_precedes_questions_and_native_overview_does_not_enter_core() {
             .iter()
             .map(|option| option.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["Back", "Close"]
+        vec![
+            "Add subscription account",
+            "Reload inventory",
+            "Back",
+            "Close"
+        ]
     );
     answer(&outgoing, id, &params, "Close").await;
     loop {
@@ -254,7 +283,7 @@ async fn exact_owner_stop_cleans_question_before_completing_and_late_answer_is_i
         }
     }
     assert_eq!(lifecycle, vec!["resolved", "completed"]);
-    answer(&outgoing, id, &params, "Show overview").await;
+    answer(&outgoing, id, &params, "Accounts").await;
     assert!(messages.try_recv().is_err());
 }
 
@@ -342,7 +371,7 @@ async fn startup_stop_closes_only_the_calling_owner_menu_and_late_stop_does_not_
             .await
             .unwrap()
     );
-    answer(&outgoing, id, &params, "Show overview").await;
+    answer(&outgoing, id, &params, "Accounts").await;
     let mut lifecycle = Vec::new();
     while let Ok(OutgoingEnvelope::ToConnection {
         message: OutgoingMessage::AppServerNotification(envelope),
@@ -559,6 +588,53 @@ async fn real_turn_barrier_uses_shared_gate_and_completes_native_menu_before_for
         lifecycle,
         vec!["resolved", "native-completed", "real-started"]
     );
-    answer(&outgoing, request_id, &params, "Show overview").await;
+    answer(&outgoing, request_id, &params, "Accounts").await;
     assert!(messages.try_recv().is_err());
+}
+
+#[test]
+fn rename_accepts_one_short_free_text_answer_only_on_a_text_page() {
+    assert_eq!(
+        parse_answer(
+            json!({"answers":{"rename":{"answers":["Business seat 2"]}}}),
+            "rename",
+            &[],
+            /*free_text*/ true
+        ),
+        Ok(MenuAnswer::Text("Business seat 2".into()))
+    );
+    for text in [
+        " ".to_string(),
+        "x".repeat(81),
+        "bad\nname".into(),
+        "bad\u{202e}name".into(),
+    ] {
+        assert_eq!(
+            parse_answer(
+                json!({"answers":{"rename":{"answers":[text]}}}),
+                "rename",
+                &[],
+                /*free_text*/ true
+            ),
+            Err(())
+        );
+    }
+    assert_eq!(
+        parse_answer(
+            json!({"answers":{"rename":{"answers":["Business seat 2","user_note: select"]}}}),
+            "rename",
+            &[],
+            /*free_text*/ true
+        ),
+        Err(())
+    );
+    assert_eq!(
+        parse_answer(
+            json!({"answers":{"rename":{"answers":["Business seat 2"]}}}),
+            "rename",
+            &[],
+            /*free_text*/ false
+        ),
+        Err(())
+    );
 }

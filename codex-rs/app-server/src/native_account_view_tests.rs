@@ -1,6 +1,8 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+const NOW: i64 = 1_700_000_000;
+
 fn fixture() -> FrozenAccountInventory {
     FrozenAccountInventory {
         accounts: vec![FrozenAccount {
@@ -8,9 +10,11 @@ fn fixture() -> FrozenAccountInventory {
             label: "Alpha 中文".into(),
             current: true,
             state: "coolingDown".into(),
+            login_state: "signedIn".into(),
+            disabled: false,
             detail: AccountDetail::Subscription {
                 plan: "Business".into(),
-                email: "alpha@example.test".into(),
+                email: Some("alpha@example.test".into()),
                 primary: Some(ManagedRateLimitWindow {
                     used_percent: 9.5,
                     resets_at: None,
@@ -28,106 +32,200 @@ fn fixture() -> FrozenAccountInventory {
         }],
         total: 1,
         paused: false,
-        observed_at: 1_700_000_000,
+        settings: serde_json::json!({}),
+        primary: None,
+        fallback: codex_login::ApiAccountFallback::default(),
     }
 }
 
-#[test]
-fn native_chinese_overview_retains_account_data_and_explicit_cache_guidance() {
-    let question = fixture().question(MenuPage::Overview(0), NativeAccountLanguage::Chinese);
-    insta::assert_snapshot!(question.text, @r"
-    账号概览 · 1/1
-    缓存快照；实际额度可能已变化。
-
-    1. Alpha 中文 · 当前 · 等待重置
-       主额度 (5 小时): 10% 已用 · 2 天前记录
-       次额度: 已过期 (100% 缓存) · 刚刚记录
-
-    本地快照创建时间: 11-14 22:13 UTC
-    ");
-    assert_eq!(
-        question.choices,
-        vec![
-            ("账号详情".into(), MenuAction::Detail(0)),
-            ("关闭".into(), MenuAction::Close)
-        ]
-    );
+fn render(question: MenuQuestion) -> String {
+    format!(
+        "{}\n{}",
+        question.text,
+        question
+            .choices
+            .into_iter()
+            .map(|choice| format!("{}\n{}", choice.label, choice.description))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    )
 }
 
 #[test]
-fn native_api_detail_keeps_model_identity_and_separates_subscription_quota() {
+fn native_chinese_overview_moves_quota_and_cache_age_out_of_heading() {
+    let question =
+        fixture().question_at(MenuPage::Overview(0), NativeAccountLanguage::Chinese, NOW);
+    assert_eq!(question.text, "选择账号 · 1/1");
+    assert_eq!(
+        question.choices[0].action,
+        MenuAction::Page(MenuPage::Detail(0))
+    );
+    insta::assert_snapshot!("mobile_chinese_account_choices", render(question));
+}
+
+#[test]
+fn quota_details_preserve_individual_samples_and_expiry_in_regular_descriptions() {
+    let question = fixture().question_at(MenuPage::Usage(0), NativeAccountLanguage::English, NOW);
+    assert!(!question.text.contains('\n'));
+    assert!(question.choices[0].description.contains("2 d old"));
+    assert!(
+        question.choices[1]
+            .description
+            .contains("Stale (100% cached)")
+    );
+    assert!(
+        question.choices[2]
+            .description
+            .contains("alpha@example.test")
+    );
+    insta::assert_snapshot!("mobile_subscription_details", render(question));
+}
+
+#[test]
+fn native_api_detail_explains_paid_use_without_subscription_quota() {
     let mut inventory = fixture();
     inventory.accounts[0].detail = AccountDetail::Api {
-        model: "provider/model-中文".into(),
+        account: codex_login::ApiAccount {
+            id: "api-1".into(),
+            label: "API".into(),
+            base_url: "https://api.example.test/v1".into(),
+            model: "provider/model-中文".into(),
+            disabled: false,
+            context_window: 32_768,
+            images: false,
+        },
         has_key: true,
     };
     inventory.accounts[0].state = "manual".into();
-    insta::assert_snapshot!(inventory.question(MenuPage::Detail(0), NativeAccountLanguage::English).text, @r"
-    Account details · 1/1
-    Alpha 中文
-    ID: slot-1
-    State: Manual API
-    API · provider/model-中文
-    Key configured
-    Subscription quota does not apply. API use may incur charges.
-
-    Read-only snapshot. Reopen the menu to load current local data.
-    ");
+    insta::assert_snapshot!(
+        "mobile_api_details",
+        render(inventory.question_at(MenuPage::Usage(0), NativeAccountLanguage::English, NOW))
+    );
+    let actions = inventory.question_at(MenuPage::Actions(0), NativeAccountLanguage::English, NOW);
+    assert_eq!(
+        actions.choices[0].action,
+        MenuAction::Prepare(MenuOperation::ApiUse(0))
+    );
+    assert!(actions.choices[0].description.contains("billed"));
 }
 
 #[test]
-fn page_actions_capture_first_detail_row_and_wrap_without_ambiguous_labels() {
+fn phone_pages_keep_short_headings_and_bounded_unique_choices() {
     let mut inventory = fixture();
-    for _ in 0..6 {
+    for _ in 0..127 {
         inventory.accounts.push(fixture().accounts.remove(0));
     }
     inventory.total = inventory.accounts.len();
-    let page = inventory.question(MenuPage::Overview(1), NativeAccountLanguage::English);
-    assert_eq!(
-        page.choices,
-        vec![
-            ("Account details".into(), MenuAction::Detail(5)),
-            ("Next page".into(), MenuAction::Overview(0)),
-            ("Close".into(), MenuAction::Close)
-        ]
-    );
-    let detail = inventory.question(MenuPage::Detail(6), NativeAccountLanguage::English);
-    assert_eq!(
-        detail.choices,
-        vec![
-            ("Overview".into(), MenuAction::Overview(1)),
-            ("Next account".into(), MenuAction::Detail(0)),
-            ("Close".into(), MenuAction::Close)
-        ]
-    );
+    for page in [
+        MenuPage::Home,
+        MenuPage::Overview(0),
+        MenuPage::Overview(31),
+        MenuPage::Detail(0),
+        MenuPage::Usage(0),
+        MenuPage::Actions(0),
+        MenuPage::More(0),
+        MenuPage::Membership(0),
+        MenuPage::ChoosePage { first: 0, end: 32 },
+        MenuPage::ChoosePage { first: 31, end: 32 },
+        MenuPage::Primary,
+        MenuPage::Settings(0),
+        MenuPage::Settings(1),
+        MenuPage::Settings(2),
+    ] {
+        let question = inventory.question_at(page, NativeAccountLanguage::English, NOW);
+        assert!(!question.text.contains('\n'));
+        assert!(question.text.chars().count() <= 56);
+        assert!((2..=5).contains(&question.choices.len()));
+        let unique = question
+            .choices
+            .iter()
+            .map(|choice| &choice.label)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), question.choices.len());
+        assert!(
+            question
+                .choices
+                .iter()
+                .all(|choice| choice.label.chars().count() <= 56
+                    && choice.description.chars().count() <= 640)
+        );
+    }
 }
 
 #[test]
-fn unknown_and_non_finite_quota_are_not_misrepresented_as_available() {
+fn all_captured_accounts_are_reachable_with_short_page_choices() {
+    let mut inventory = fixture();
+    inventory.accounts = (0..128).map(|_| fixture().accounts.remove(0)).collect();
+    inventory.total = 128;
+    let mut page = MenuPage::ChoosePage {
+        first: 0,
+        end: inventory.pages(),
+    };
+    let mut steps = 0;
+    loop {
+        steps += 1;
+        assert!(steps <= 8);
+        let question = inventory.question_at(page, NativeAccountLanguage::English, NOW);
+        let choice = question
+            .choices
+            .iter()
+            .filter(|choice| {
+                matches!(
+                    choice.action,
+                    MenuAction::Page(MenuPage::ChoosePage { .. } | MenuPage::Overview(_))
+                )
+            })
+            .rfind(|choice| choice.label != "Back")
+            .unwrap();
+        let MenuAction::Page(next) = choice.action else {
+            unreachable!();
+        };
+        if let MenuPage::Overview(last) = next {
+            assert_eq!(last, 31);
+            let overview = inventory.question_at(next, NativeAccountLanguage::English, NOW);
+            assert!(
+                overview
+                    .choices
+                    .iter()
+                    .any(|choice| choice.action == MenuAction::Page(MenuPage::Detail(127)))
+            );
+            break;
+        }
+        page = next;
+    }
+}
+
+#[test]
+fn non_finite_and_unknown_quota_are_kept_unknown_in_descriptions() {
     let mut inventory = fixture();
     let AccountDetail::Subscription {
-        primary, secondary, ..
+        primary,
+        secondary,
+        primary_observed_at,
+        ..
     } = &mut inventory.accounts[0].detail
     else {
         panic!("subscription fixture");
     };
-    *primary = Some(ManagedRateLimitWindow {
-        used_percent: f64::NAN,
-        resets_at: None,
-        window_minutes: None,
-    });
+    primary.as_mut().unwrap().used_percent = f64::NAN;
     *secondary = None;
-    let question = inventory.question(MenuPage::Overview(0), NativeAccountLanguage::English);
-    assert!(question.text.contains("Primary: Unknown · 2 d old"));
+    *primary_observed_at = None;
+    let question =
+        inventory.question_at(MenuPage::Overview(0), NativeAccountLanguage::English, NOW);
     assert!(
-        question
-            .text
-            .contains("Secondary: Unknown · recorded just now")
+        question.choices[0]
+            .description
+            .contains("Primary (5h): Unknown · age unknown")
+    );
+    assert!(
+        question.choices[0]
+            .description
+            .contains("Secondary: Unknown · just now")
     );
 }
 
 #[test]
-fn small_positive_and_nearly_exhausted_quota_do_not_round_to_zero_or_full() {
+fn small_positive_and_nearly_exhausted_quota_are_not_rounded_to_empty_or_full() {
     let mut inventory = fixture();
     let AccountDetail::Subscription {
         primary, secondary, ..
@@ -137,134 +235,238 @@ fn small_positive_and_nearly_exhausted_quota_do_not_round_to_zero_or_full() {
     };
     primary.as_mut().unwrap().used_percent = 0.25;
     secondary.as_mut().unwrap().used_percent = 99.9;
-    secondary.as_mut().unwrap().resets_at = Some(inventory.observed_at + 60);
-    let question = inventory.question(MenuPage::Overview(0), NativeAccountLanguage::English);
-    assert!(question.text.contains("Primary (5h): <1% used"));
-    assert!(question.text.contains("Secondary: >99% used"));
+    secondary.as_mut().unwrap().resets_at = Some(NOW + 60);
+    let question =
+        inventory.question_at(MenuPage::Overview(0), NativeAccountLanguage::English, NOW);
+    assert!(
+        question.choices[0]
+            .description
+            .contains("Primary (5h): <1% used")
+    );
+    assert!(
+        question.choices[0]
+            .description
+            .contains("Secondary: >99% used")
+    );
 }
 
 #[test]
-fn last_captured_account_is_reachable_within_the_session_step_cap() {
+fn display_shortening_never_changes_the_exact_captured_account_id() {
     let mut inventory = fixture();
-    inventory.accounts = (0..128).map(|_| fixture().accounts.remove(0)).collect();
-    inventory.total = inventory.accounts.len();
-    let mut page = MenuPage::Home;
-    let mut steps = 0;
-    loop {
-        steps += 1;
-        assert!(
-            steps <= 12,
-            "last account must be accessible before the session closes"
-        );
-        let question = inventory.question(page, NativeAccountLanguage::English);
-        assert!((2..=3).contains(&question.choices.len()));
-        let unique = question
+    let exact = format!("slot-{}", "x".repeat(140));
+    inventory.accounts[0].id = exact.clone();
+    inventory.accounts[0].label = "name\n\u{202e}duplicate".into();
+    let question =
+        inventory.question_at(MenuPage::Overview(0), NativeAccountLanguage::English, NOW);
+    assert!(!question.choices[0].label.contains('\n'));
+    assert!(!question.choices[0].label.contains('\u{202e}'));
+    assert_eq!(inventory.accounts[0].id, exact);
+}
+
+#[test]
+fn explicit_paid_confirmation_names_the_account_and_does_not_execute() {
+    let inventory = fixture();
+    let mut session = actions::NativeMenuSession::new(inventory);
+    session
+        .prepare(MenuOperation::PrimaryUse(0), NativeAccountLanguage::Chinese)
+        .unwrap();
+    let question = session.question(NativeAccountLanguage::Chinese);
+    assert_eq!(question.choices[0].action, MenuAction::Apply);
+    assert_eq!(
+        question.choices[1].action,
+        MenuAction::Page(MenuPage::Detail(0))
+    );
+    insta::assert_snapshot!("mobile_host_confirmation", render(question));
+}
+
+#[test]
+fn native_host_summary_distinguishes_stored_source_from_runtime_resolution() {
+    let mut inventory = fixture();
+    inventory.primary = Some(crate::account_management::PrimaryLoginView {
+        source: "root".into(),
+        profile_id: None,
+        label: "Host-managed workload identity".into(),
+        email: None,
+        ready: false,
+        message: None,
+        status: "runtimeResolutionRequired".into(),
+        revision: 3,
+        runtime: None,
+    });
+    let question = inventory.question_at(MenuPage::Home, NativeAccountLanguage::Chinese, NOW);
+    let host = question
+        .choices
+        .iter()
+        .find(|choice| choice.action == MenuAction::Page(MenuPage::Primary))
+        .unwrap();
+    assert!(host.description.contains("由运行中的主机确认"));
+    assert!(!host.description.contains("尚不可用"));
+    assert!(!host.description.contains("已连接中继"));
+    insta::assert_snapshot!("mobile_host_resolution", &host.description);
+}
+
+#[test]
+fn unset_settings_show_effective_enabled_values_and_the_default_wait_budget() {
+    let inventory = fixture();
+    let first = inventory.question_at(MenuPage::Settings(0), NativeAccountLanguage::English, NOW);
+    let second = inventory.question_at(MenuPage::Settings(1), NativeAccountLanguage::English, NOW);
+    for question in [&first, &second] {
+        for choice in question.choices.iter().filter(|choice| {
+            matches!(
+                choice.action,
+                MenuAction::Prepare(MenuOperation::Setting(1 | 2 | 5))
+            )
+        }) {
+            assert!(
+                choice
+                    .description
+                    .contains("Currently on; confirm to turn off")
+            );
+        }
+    }
+    assert!(second.choices[0].description.contains("360"));
+    insta::assert_snapshot!(
+        "mobile_effective_pool_settings",
+        format!("{}\n\n{}", render(first), render(second))
+    );
+}
+
+#[test]
+fn incomplete_subscription_login_offers_completion_before_backend_actions() {
+    let mut inventory = fixture();
+    inventory.accounts[0].login_state = "pending".into();
+    inventory.accounts[0].state = "needsLogin".into();
+    let question = inventory.question_at(MenuPage::Actions(0), NativeAccountLanguage::English, NOW);
+    assert_eq!(
+        question
             .choices
             .iter()
-            .map(|(label, _)| label)
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique.len(), question.choices.len());
-        let action = match page {
-            MenuPage::Home => MenuAction::Overview(0),
-            MenuPage::Overview(25) => MenuAction::Detail(125),
-            MenuPage::Overview(_) => MenuAction::ChoosePage { first: 0, end: 26 },
-            MenuPage::ChoosePage { .. } => question
-                .choices
-                .iter()
-                .map(|(_, action)| *action)
-                .rfind(|action| {
-                    matches!(
-                        action,
-                        MenuAction::ChoosePage { .. } | MenuAction::Overview(25)
-                    )
-                })
-                .unwrap(),
-            MenuPage::Detail(127) => break,
-            MenuPage::Detail(index) => MenuAction::Detail(index + 1),
-        };
-        assert!(
+            .map(|choice| choice.action)
+            .collect::<Vec<_>>(),
+        vec![
+            MenuAction::Prepare(MenuOperation::Relogin(0)),
+            MenuAction::Page(MenuPage::More(0)),
+            MenuAction::Page(MenuPage::Detail(0)),
+        ]
+    );
+    insta::assert_snapshot!("mobile_pending_login_actions", render(question));
+}
+
+#[test]
+fn unavailable_api_actions_offer_guidance_without_paid_choices() {
+    let mut inventory = fixture();
+    inventory.accounts[0].detail = AccountDetail::Api {
+        account: codex_login::ApiAccount {
+            id: "slot-1".into(),
+            label: "API".into(),
+            base_url: "https://api.example.test/v1".into(),
+            model: "paid/model".into(),
+            disabled: false,
+            context_window: 32_768,
+            images: false,
+        },
+        has_key: false,
+    };
+    let mut rendered = Vec::new();
+    for disabled in [false, true] {
+        inventory.accounts[0].disabled = disabled;
+        let question =
+            inventory.question_at(MenuPage::Actions(0), NativeAccountLanguage::English, NOW);
+        assert_eq!(
             question
                 .choices
                 .iter()
-                .any(|(_, captured)| *captured == action)
+                .map(|choice| choice.action)
+                .collect::<Vec<_>>(),
+            vec![
+                MenuAction::Page(MenuPage::Membership(0)),
+                MenuAction::Page(MenuPage::Detail(0)),
+            ]
         );
-        page = match action {
-            MenuAction::Overview(index) => MenuPage::Overview(index),
-            MenuAction::Detail(index) => MenuPage::Detail(index),
-            MenuAction::ChoosePage { first, end } => MenuPage::ChoosePage { first, end },
-            MenuAction::Home | MenuAction::Language | MenuAction::Close => {
-                panic!("expected a navigation action")
-            }
-        };
+        rendered.push(render(question));
     }
-    assert_eq!(steps, 11);
+    insta::assert_snapshot!("mobile_missing_api_key_actions", rendered.join("\n\n"));
 }
 
 #[test]
-fn detail_shows_each_window_own_sample_time_and_known_duration() {
-    insta::assert_snapshot!(fixture().question(MenuPage::Detail(0), NativeAccountLanguage::English).text, @r"
-    Account details · 1/1
-    Alpha 中文
-    ID: slot-1
-    State: Cooling down
-    Subscription: Business
-    Email: alpha@example.test
-    Primary (5h): 10% used
-      Observed: 11-12 22:13 UTC · 2 d old
-    Secondary: Stale (100% cached) · Reset 11-14 22:13 UTC
-      Observed: 11-14 22:13 UTC · recorded just now
-    Reset credits (cached): 2
-
-    Read-only snapshot. Reopen the menu to load current local data.
-    ");
+fn legacy_root_membership_actions_explain_that_root_login_is_retained() {
+    let mut inventory = fixture();
+    inventory.accounts[0].id = "legacy-root".into();
+    let question =
+        inventory.question_at(MenuPage::Membership(0), NativeAccountLanguage::English, NOW);
+    assert_eq!(
+        question
+            .choices
+            .iter()
+            .map(|choice| choice.action)
+            .collect::<Vec<_>>(),
+        vec![
+            MenuAction::Prepare(MenuOperation::Disable(0)),
+            MenuAction::Prepare(MenuOperation::ClearLabel(0)),
+            MenuAction::Prepare(MenuOperation::RemoveKeep(0)),
+            MenuAction::Page(MenuPage::Actions(0)),
+        ]
+    );
+    insta::assert_snapshot!("mobile_legacy_root_actions", render(question));
 }
 
 #[test]
-fn unknown_window_sample_time_does_not_inherit_recent_aggregate_metadata() {
+fn quota_display_ages_across_page_changes_without_rebinding_the_frozen_target() {
     let mut inventory = fixture();
     let AccountDetail::Subscription {
+        primary,
         primary_observed_at,
         ..
     } = &mut inventory.accounts[0].detail
     else {
         panic!("subscription fixture");
     };
-    *primary_observed_at = None;
-    let question = inventory.question(MenuPage::Overview(0), NativeAccountLanguage::English);
+    primary.as_mut().unwrap().resets_at = Some(NOW + 30);
+    *primary_observed_at = Some(NOW);
+    let initial = inventory.question_at(MenuPage::Overview(0), NativeAccountLanguage::English, NOW);
     assert!(
-        question
-            .text
-            .contains("Primary (5h): 10% used · age unknown")
+        initial.choices[0]
+            .description
+            .contains("10% used · just now")
     );
-    assert!(
-        question
-            .text
-            .contains("Secondary: Stale (100% cached) · recorded just now")
-    );
+    let later = inventory.question_at(MenuPage::Usage(0), NativeAccountLanguage::English, NOW + 61);
+    assert!(later.choices[0].description.contains("Stale (10% cached)"));
+    assert!(later.choices[0].description.contains("1 m old"));
+    assert!(later.choices[2].description.contains("ID: slot-1"));
+    assert_eq!(inventory.accounts[0].id, "slot-1");
 }
 
 #[test]
-fn native_page_range_selector_has_short_unique_options_and_accessible_last_page() {
+fn host_runtime_heartbeat_expires_while_the_same_inventory_is_open() {
     let mut inventory = fixture();
-    inventory.accounts = (0..128).map(|_| fixture().accounts.remove(0)).collect();
-    inventory.total = inventory.accounts.len();
-    let range = inventory.question(
-        MenuPage::ChoosePage { first: 0, end: 26 },
-        NativeAccountLanguage::English,
+    inventory.primary = Some(crate::account_management::PrimaryLoginView {
+        source: "root".into(),
+        profile_id: None,
+        label: "Root login".into(),
+        email: None,
+        ready: true,
+        message: None,
+        status: "storedReady".into(),
+        revision: 3,
+        runtime: Some(crate::account_management::PrimaryRuntimeView {
+            source_revision: 3,
+            email: Some("host@example.test".into()),
+            profile_id: None,
+            remote_status: "connected".into(),
+            observed_at: NOW,
+        }),
+    });
+    let initial = inventory.question_at(MenuPage::Home, NativeAccountLanguage::English, NOW);
+    assert!(
+        initial.choices[2]
+            .description
+            .contains("Connected to relay")
     );
-    let last = inventory.question(
-        MenuPage::ChoosePage { first: 25, end: 26 },
-        NativeAccountLanguage::English,
+    let later = inventory.question_at(MenuPage::Home, NativeAccountLanguage::English, NOW + 11);
+    assert!(
+        later.choices[2]
+            .description
+            .contains("No recent running-host confirmation")
     );
-    insta::assert_snapshot!(format!("{}\n{}\n\n{}\n{}", range.text,
-        range.choices.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>().join(" | "),
-        last.text, last.choices.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>().join(" | ")), @r"
-    Choose a page · 1–26
-    Select a page range, then a page. All captured accounts are reachable.
-    Pages 1–13 | Pages 14–26 | Back
-
-    Choose a page · 26–26
-    Select a page range, then a page. All captured accounts are reachable.
-    Page 26 · 126–128 | Back
-    ");
+    assert!(!later.choices[2].description.contains("Connected to relay"));
 }
