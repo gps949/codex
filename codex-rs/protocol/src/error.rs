@@ -696,19 +696,19 @@ pub struct UsageLimitReachedError {
     pub rate_limit_reached_type: Option<RateLimitReachedType>,
 }
 
+#[path = "usage_limit_scope.rs"]
+mod usage_limit_scope;
+
 impl std::fmt::Display for UsageLimitReachedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Reserve is a fallback for exhausted ordinary usage, so keep the standard
-        // promo/plan recovery copy below instead of suggesting another model.
-        if let Some(limit_name) = self
-            .rate_limits
-            .as_ref()
-            .and_then(|snapshot| snapshot.limit_name.as_deref())
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            && !limit_name.eq_ignore_ascii_case("codex")
-            && !limit_name.eq_ignore_ascii_case("gpt-reserve")
-        {
+        if self.is_model_specific() {
+            let limit_name = self
+                .rate_limits
+                .as_ref()
+                .and_then(|snapshot| snapshot.limit_name.as_deref())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or("this model");
             return write!(
                 f,
                 "You’ve hit your usage limit for {limit_name}. Switch to another model now,{}",
@@ -716,7 +716,11 @@ impl std::fmt::Display for UsageLimitReachedError {
             );
         }
 
-        if let Some(rate_limit_reached_type) = self.rate_limit_reached_type {
+        if let Some(rate_limit_reached_type) = self.rate_limit_reached_type.or_else(|| {
+            self.rate_limits
+                .as_ref()
+                .and_then(|snapshot| snapshot.rate_limit_reached_type)
+        }) {
             match rate_limit_reached_type {
                 RateLimitReachedType::WorkspaceOwnerCreditsDepleted => {
                     return write!(
