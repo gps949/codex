@@ -46,7 +46,7 @@ fn write_mobile_pool(home: &Path) -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mobile_account_read_rechecks_owner_after_final_pool_identity_load() -> Result<()> {
+async fn mobile_account_read_rechecks_owner_during_account_discovery() -> Result<()> {
     let home = TempDir::new()?;
     let backend = wiremock::MockServer::start().await;
     create_config_toml(home.path(), Some(&backend.uri()))?;
@@ -57,35 +57,39 @@ async fn mobile_account_read_rechecks_owner_after_final_pool_identity_load() -> 
         serde_json::from_slice(&std::fs::read(&standby_auth_path)?)?;
     standby_auth["last_refresh"] = json!(chrono::Utc::now() - chrono::Duration::days(30));
     let standby_auth = serde_json::to_vec(&standby_auth)?;
+    let expected_standby_auth = standby_auth.clone();
+    let entered = Arc::new(Notify::new());
+    let request_entered = Arc::clone(&entered);
+    let discovery_standby_auth_path = standby_auth_path.clone();
     Mock::given(method("GET"))
         .and(path_regex("^/(backend-api/wham|api/codex)/accounts/check$"))
         .respond_with(move |request: &wiremock::Request| {
             let account_id = request.headers["chatgpt-account-id"].to_str().unwrap();
-            if account_id == "account-backup" {
-                // Routing completes before the second pool read. Only that final read
-                // sees the aged standby credentials and waits for their refresh.
-                std::fs::write(&standby_auth_path, &standby_auth).unwrap();
-            }
-            ResponseTemplate::new(/*status_code*/ 200).set_body_json(json!({
+            let mut response = ResponseTemplate::new(/*status_code*/ 200).set_body_json(json!({
                 "accounts": [{"id": account_id, "workspace_backend_origin": "https://chatgpt.com",
                     "account_routing_override": "NO_CONSTRAINT"}]
-            }))
+            }));
+            if account_id == "account-backup" {
+                // Keep discovery in flight while CLI selection changes. The final pool
+                // view must still read standby identity without refreshing its tokens.
+                std::fs::write(&discovery_standby_auth_path, &standby_auth).unwrap();
+                request_entered.notify_one();
+                response = response.set_delay(Duration::from_secs(/*secs*/ 3));
+            }
+            response
         })
         .mount(&backend)
         .await;
-    let entered = Arc::new(Notify::new());
-    let request_entered = Arc::clone(&entered);
     Mock::given(method("POST"))
         .and(path("/oauth/refresh"))
         .and(body_partial_json(
             json!({"refresh_token": "refresh-selected-acct"}),
         ))
-        .respond_with(move |_: &wiremock::Request| {
-            request_entered.notify_one();
+        .respond_with(
             ResponseTemplate::new(/*status_code*/ 200)
-                .set_delay(Duration::from_secs(/*secs*/ 3))
-                .set_body_json(json!({"access_token": "access-selected-refreshed"}))
-        })
+                .set_body_json(json!({"access_token": "access-selected-refreshed"})),
+        )
+        .expect(0)
         .mount(&backend)
         .await;
     let refresh_url = format!("{}/oauth/refresh", backend.uri());
@@ -148,19 +152,36 @@ async fn mobile_account_read_rechecks_owner_after_final_pool_identity_load() -> 
         .await?;
     let fresh: GetAccountResponse =
         timeout(DEFAULT_READ_TIMEOUT, app.read_response(fresh_id)).await??;
+    let pool = fresh.account_pool.expect("fresh account pool");
+    assert_eq!(pool.active_profile_id.as_deref(), Some("third"));
+    let standby = pool
+        .accounts
+        .iter()
+        .find(|account| account.profile_id == "selected-acct")
+        .expect("persisted standby identity");
     assert_eq!(
-        fresh
-            .account_pool
-            .as_ref()
-            .unwrap()
-            .active_profile_id
-            .as_deref(),
-        Some("third")
+        (
+            standby.email.as_deref(),
+            standby.plan_type,
+            standby.is_active
+        ),
+        (
+            Some("selected-acct@example.com"),
+            Some(AccountPlanType::Pro),
+            false,
+        )
     );
     assert_eq!(
-        fresh.workspace_routing.unwrap().chatgpt_account_id,
-        "account-third"
+        fresh.workspace_routing,
+        Some(codex_app_server_protocol::WorkspaceRouting {
+            chatgpt_account_id: "account-third".into(),
+            backend_origin: "https://chatgpt.com".into(),
+            account_routing_override:
+                codex_app_server_protocol::AccountRoutingOverride::NoConstraint,
+        })
     );
+    assert_eq!(std::fs::read(standby_auth_path)?, expected_standby_auth);
+    backend.verify().await;
     Ok(())
 }
 

@@ -390,7 +390,7 @@ async fn account_pool_read_fetches_quota_before_first_model_request() -> Result<
     Ok(())
 }
 
-#[test_case::test_case("/account"; "account")]
+#[test_case::test_case("/account list"; "account")]
 #[test_case::test_case("/status pool 1"; "status_pool")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_pool_mobile_query_does_not_add_model_history(command: &str) -> Result<()> {
