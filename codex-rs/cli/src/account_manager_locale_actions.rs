@@ -2,8 +2,72 @@
 
 pub(super) fn chinese(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Saved source: {}" => "保存的登录来源：{}",
+        "Resolved by running host" => "由运行中的宿主解析",
+        "External host sign-in is resolved by the running host. Stored root credentials are not its current identity." => {
+            "外部主登录由运行中的宿主解析；保存的根登录凭据不代表其当前身份。"
+        }
+        "Host-managed workload identity is resolved by the running host." => {
+            "工作负载身份由运行中的宿主解析。"
+        }
+        "Stored credentials: {}" => "保存的凭据：{}",
+        "Available" => "可用",
+        "Needs attention" => "需要处理",
+        "The phone must use the matching account and workspace. A new owner may require pairing again." => {
+            "手机需使用对应账号和工作区；主登录身份改变后可能需要重新配对。"
+        }
+        "{} · {} · {}" => "{} · {} · {}",
+        "Signed in" => "已登录",
+        "Disabled inference accounts can still be used for host sign-in." => {
+            "推理中停用的账号仍可用作主登录。"
+        }
+        "[number] Choose host account  [R] Root login  [X] Sign out host  [Enter] Back" => {
+            "[编号] 选择主登录账号  [R] 根目录登录  [X] 退出主登录  [回车] 返回"
+        }
+        "Host sign-in action" => "主登录操作",
+        "Use root login for host sign-in? Type APPLY" => "将根目录登录用作主登录？输入 APPLY 确认",
+        "Sign out host and disconnect Remote Control? Type SIGNOUT" => {
+            "退出主登录并断开远程控制？输入 SIGNOUT 确认"
+        }
+        "Choose a listed account number" => "请选择列表中的账号编号",
+        "Account: {}" => "账号：{}",
+        "Observed host identity: {}" => "主机实际观测身份：{}",
+        "Remote service: {}" => "远程服务：{}",
+        "Not reported" => "未报告",
+        "Connecting" => "正在连接",
+        "Connected to relay" => "已连接远程中继",
+        "Remote disabled by account requirements" => "账号策略禁止 Remote",
+        "Host authentication denied by requirements" => "主登录认证被账号策略拒绝",
+        "Connection needs attention" => "连接需要处理",
+        "No recent host confirmation for this selection. Stored credentials do not confirm Remote Control is connected." => {
+            "主机尚未近期确认此选择；已保存凭据不代表远程控制已连接。"
+        }
+        "Standby warmup" => "备用账号预热",
+        "Warmup uses a small generating request. Viewing this page and refreshing quota do not start warmup." => {
+            "预热会产生少量生成请求。查看本页与刷新额度不会启动预热。"
+        }
+        "Latest evidence: {}" => "最新证据：{}",
+        "Last attempt: {}" => "上次尝试：{}",
+        "Next eligible check: {}" => "下次最早可检查时间：{}",
+        "Consecutive failures: {}" => "连续失败次数：{}",
+        "No recent warmup attempt recorded. A quota window may also start during normal use." => {
+            "暂无近期预热记录；正常使用也可能启动额度窗口。"
+        }
+        "A completed request or reset timestamp alone does not confirm a quota window started; positive current usage does." => {
+            "仅请求完成或重置时间不能确认窗口已启动；当前正用量才能提供证据。"
+        }
+        "Current quota confirms the window is active" => "当前额度证实窗口正在运行",
+        "Warmup request is running" => "预热请求正在运行",
+        "Request sent; window start unconfirmed" => "请求已发出，窗口启动待确认",
+        "Request completed; window start unconfirmed" => "请求已完成，窗口启动待确认",
+        "Login is needed before warmup" => "预热前需完成登录",
+        "Deferred until the next eligible check" => "已延后，等待下次可检查时间",
+        "Request failed; waiting before retry" => "请求失败，等待重试",
+        "A retry is eligible when the scheduler runs" => "调度器运行时可再次尝试",
+        "Earlier evidence has expired" => "此前记录已过期",
+        "No confirmed warmup evidence" => "暂无已确认的预热证据",
         "Use this account for host sign-in? Type APPLY" => {
-            "将此账号用作主登录？输入 APPLY 确认，推理选择不变；远程连接可能需要重连或配对。"
+            "将此账号用作主登录？输入 APPLY 确认，推理选择不变；已启用的远程服务会重连，手机可能需重新配对。"
         }
         "Use this account for host sign-in?" => {
             "将此账号用作主登录？推理选择不变，远程连接可能需要重连或配对。"
@@ -37,8 +101,8 @@ pub(super) fn chinese(english: &str) -> Option<&'static str> {
         "Cached observation: {} minutes ago" => "缓存观测：{} 分钟前",
         "{}: Not checked. R refreshes quota." => "{}：尚未检查。按 R 刷新额度。",
         "Last check: {}" => "上次检查：{}",
-        "[U] Use  [H] Host sign-in  [R] Refresh  [T] Retry after external reset  [C] Reset credits  [L] Relogin  [E] Edit  [N] Automatic name  [D] Enable/disable  [X] Remove  [Enter] Back" => {
-            "[U] 推理使用  [H] 主登录  [R] 刷新  [T] 外部重置后重试  [C] 重置券  [L] 重新登录  [E] 编辑  [N] 自动名称  [D] 启用/停用  [X] 移除  [回车] 返回"
+        "[U] Use  [H] Host sign-in  [R] Refresh  [T] Retry after external reset  [C] Reset credits  [W] Warmup details  [L] Relogin  [E] Edit  [N] Automatic name  [D] Enable/disable  [X] Remove  [Enter] Back" => {
+            "[U] 推理使用  [H] 主登录  [R] 刷新  [T] 外部重置后重试  [C] 重置券  [W] 预热详情  [L] 重新登录  [E] 编辑  [N] 自动名称  [D] 启用/停用  [X] 移除  [回车] 返回"
         }
         "Action" => "操作",
         "Label" => "账号名称",

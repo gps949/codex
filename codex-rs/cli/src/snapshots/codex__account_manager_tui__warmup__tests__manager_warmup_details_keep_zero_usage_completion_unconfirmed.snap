@@ -1,0 +1,19 @@
+---
+source: cli/src/account_manager_warmup_tests.rs
+assertion_line: 35
+expression: "format!(\"English:\\n{}\\nChinese:\\n{}\", render(&account, Locale::English),\nrender(&account, Locale::SimplifiedChinese),)"
+---
+English:
+Standby warmup
+Warmup uses a small generating request. Viewing this page and refreshing quota do not start warmup.
+Latest evidence: Request completed; window start unconfirmed
+Last attempt: 2027-01-15 08:00 UTC
+Next eligible check: 2027-01-15 13:00 UTC
+A completed request or reset timestamp alone does not confirm a quota window started; positive current usage does.
+Chinese:
+备用账号预热
+预热会产生少量生成请求。查看本页与刷新额度不会启动预热。
+最新证据：请求已完成，窗口启动待确认
+上次尝试：2027-01-15 08:00 UTC
+下次最早可检查时间：2027-01-15 13:00 UTC
+仅请求完成或重置时间不能确认窗口已启动；当前正用量才能提供证据。

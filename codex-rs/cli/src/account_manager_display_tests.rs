@@ -42,6 +42,7 @@ fn inventory() -> AccountManagerInventory {
         },
         reset_credit_count: credits,
         refresh: None,
+        warmup: None,
     })
     .collect();
     AccountManagerInventory {
@@ -161,6 +162,20 @@ fn manager_language_switch_updates_menu_and_guidance() {
         chinese.main_menu()
     );
     insta::assert_snapshot!(output);
+}
+
+#[test]
+fn manager_all_disabled_guidance_points_to_enable_not_quota_refresh() {
+    let mut inventory = inventory();
+    for account in &mut inventory.accounts {
+        account.disabled = true;
+        account.availability = "disabled".into();
+    }
+    insta::assert_snapshot!(format!(
+        "English:\n{}\nChinese:\n{}",
+        render(&inventory, /*columns*/ 100, Locale::English),
+        render(&inventory, /*columns*/ 100, Locale::SimplifiedChinese),
+    ));
 }
 
 #[test]

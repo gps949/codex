@@ -149,7 +149,7 @@ pub(super) async fn account_actions(
         );
     }
     println!("{}", locale.text(
-        "[U] Use  [H] Host sign-in  [R] Refresh  [T] Retry after external reset  [C] Reset credits  [L] Relogin  [E] Edit  [N] Automatic name  [D] Enable/disable  [X] Remove  [Enter] Back"
+        "[U] Use  [H] Host sign-in  [R] Refresh  [T] Retry after external reset  [C] Reset credits  [W] Warmup details  [L] Relogin  [E] Edit  [N] Automatic name  [D] Enable/disable  [X] Remove  [Enter] Back"
     ));
     let id = account.profile_id.clone();
     Ok(
@@ -222,6 +222,17 @@ pub(super) async fn account_actions(
             }
             "c" => {
                 credits::redeem(manager, account, pending, locale).await?;
+                None
+            }
+            "w" => {
+                let columns =
+                    crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns));
+                for line in super::warmup::render(account, locale).lines() {
+                    for wrapped in textwrap::wrap(line, columns.max(20)) {
+                        println!("{wrapped}");
+                    }
+                }
+                prompt(locale, "Enter to return", "").await?;
                 None
             }
             _ => None,

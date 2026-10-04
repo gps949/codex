@@ -15,8 +15,12 @@ mod credits;
 mod input;
 #[path = "account_manager_locale.rs"]
 mod locale;
+#[path = "account_manager_primary.rs"]
+mod primary;
 #[path = "account_manager_settings.rs"]
 mod settings;
+#[path = "account_manager_warmup.rs"]
+mod warmup;
 use input::prompt;
 pub(crate) use locale::Locale;
 
@@ -41,7 +45,19 @@ pub(crate) async fn run(manager: Arc<AccountManager>, mut locale: Locale) -> any
         }
         if input.eq_ignore_ascii_case("g") {
             locale = locale.toggle();
-            notice.clear();
+            notice = match manager.save_preferences(
+                codex_app_server::account_management::ManagerPreferences {
+                    language: locale.preference(),
+                },
+            ) {
+                Ok(()) => locale
+                    .text("Language saved for browser and terminal managers.")
+                    .into(),
+                Err(error) => locale.format(
+                    "Language changed for this session; saving failed: {}",
+                    &[&clean(&error.to_string())],
+                ),
+            };
             continue;
         }
         let next = async {
@@ -72,6 +88,7 @@ pub(crate) async fn run(manager: Arc<AccountManager>, mut locale: Locale) -> any
                     }
                 }
                 "s" => settings::choose(&inventory.settings, locale).await?,
+                "h" => primary::choose(&inventory, locale).await?,
                 "p" => {
                     actions::api_actions(&manager, locale).await?;
                     None

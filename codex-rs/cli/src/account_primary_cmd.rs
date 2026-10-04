@@ -4,8 +4,6 @@ use clap::Args;
 use clap::Subcommand;
 use codex_core::config::ConfigBuilder;
 use codex_login::AccountProfileStore;
-use codex_login::PrimaryLoginRuntime;
-use codex_login::PrimaryLoginSource;
 use codex_login::PrimaryLoginStore;
 use codex_utils_cli::CliConfigOverrides;
 
@@ -52,11 +50,11 @@ pub(crate) async fn run(
                 .await?;
             println!("Host sign-in source saved. Inference selection was not changed.");
             println!(
-                "Remote Control follows this account and workspace; reconnect or pair again if the owner changed."
+                "Running hosts apply this selection automatically. An enabled Remote service reconnects; a disabled service stays disabled."
             );
         }
         PrimaryAction::Root => {
-            store.use_root()?;
+            store.select_root(&config.auth_config()).await?;
             println!(
                 "Host sign-in now uses the root login. Pool inference selection was not changed."
             );
@@ -66,36 +64,50 @@ pub(crate) async fn run(
             println!("Host signed out. Subscription pool credentials were retained.");
         }
     }
-    let state = store.load()?;
-    let runtime = PrimaryLoginRuntime::start(config.auth_config()).await?;
-    let auth = runtime.auth_manager().auth_cached();
-    match state.source {
-        PrimaryLoginSource::RootLogin => println!("Source: Root login"),
-        PrimaryLoginSource::Profile { profile_id, .. } => {
-            println!("Source: Pool profile {profile_id}")
-        }
-        PrimaryLoginSource::SignedOut => println!("Source: Signed out"),
+    let view = codex_login::observe_primary_login(&config.auth_config());
+    println!("Saved source: {}", view.label);
+    if let Some(email) = &view.email {
+        println!("Account: {email}");
     }
-    if let Some(auth) = &auth {
-        println!(
-            "Account: {}",
-            auth.get_account_email()
-                .unwrap_or_else(|| "Unknown email".into())
-        );
-    }
-    let ready = auth
-        .as_ref()
-        .is_some_and(|auth| auth.uses_codex_backend() && auth.get_account_id().is_some());
     println!(
-        "Remote authentication: {}",
-        if ready {
-            "Ready"
-        } else {
-            "Host sign-in required"
+        "Host authentication: {}",
+        match view.status {
+            codex_login::PrimaryLoginStatus::StoredReady => "Stored sign-in available",
+            codex_login::PrimaryLoginStatus::NeedsLogin => "Sign-in required",
+            codex_login::PrimaryLoginStatus::RuntimeResolutionRequired =>
+                "Resolved by running host",
+            codex_login::PrimaryLoginStatus::Invalid => "Saved source unavailable",
+            codex_login::PrimaryLoginStatus::SignedOut => "Signed out",
         }
     );
+    if let Some(message) = &view.message {
+        println!("{message}");
+    }
+    if let Some(runtime) =
+        codex_login::PrimaryRuntimeStatusStore::read_current(&config.codex_home, view.revision)
+    {
+        println!(
+            "Observed host: {}",
+            runtime.email.as_deref().unwrap_or("Not reported")
+        );
+        println!(
+            "Remote service: {}",
+            match runtime.remote_status {
+                codex_login::PrimaryRemoteStatus::Disabled => "Disabled",
+                codex_login::PrimaryRemoteStatus::Connecting => "Connecting",
+                codex_login::PrimaryRemoteStatus::Connected => "Connected to relay",
+                codex_login::PrimaryRemoteStatus::Errored => "Connection needs attention",
+                codex_login::PrimaryRemoteStatus::RequirementsDisabled =>
+                    "Disabled by account requirements",
+                codex_login::PrimaryRemoteStatus::AuthenticationDenied =>
+                    "Host authentication denied by requirements",
+            }
+        );
+    } else {
+        println!("Remote service: Not reported by a recent running host.");
+    }
     println!(
-        "This is the host login source. Remote connection availability and device pairing are separate."
+        "Host sign-in and inference selection are independent. Devices may need pairing for a new owner."
     );
     Ok(())
 }

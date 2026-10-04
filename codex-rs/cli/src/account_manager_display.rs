@@ -78,6 +78,8 @@ pub(super) fn render(
                     "O resumes subscription selection."
                 } else if inventory.accounts.is_empty() {
                     "A adds your first subscription account."
+                } else if inventory.accounts.iter().all(|account| account.disabled) {
+                    "Choose an account number, then D to enable it."
                 } else if ready == 0
                     && inventory
                         .accounts
@@ -106,7 +108,7 @@ pub(super) fn render(
         ));
         rows.push(
             locale
-                .text("Host sign-in and inference selection are independent.")
+                .text("H manages host sign-in. It is independent from inference selection.")
                 .into(),
         );
     }

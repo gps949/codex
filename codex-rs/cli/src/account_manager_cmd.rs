@@ -11,7 +11,7 @@ pub(crate) struct AccountManageArgs {
     /// Use the task-independent terminal manager instead of a browser.
     #[arg(long, conflicts_with = "listen")]
     tui: bool,
-    /// Interface language: en or zh-CN. The terminal defaults to English.
+    /// Initial interface language: en or zh-CN. Otherwise use the saved manager choice.
     #[arg(long, value_enum)]
     lang: Option<crate::account_manager_tui::Locale>,
     #[arg(long, default_value = "127.0.0.1:0")]
@@ -34,9 +34,10 @@ pub(crate) async fn run(
         .await?;
     let manager = AccountManager::new(config);
     if args.tui {
-        let result =
-            crate::account_manager_tui::run(Arc::clone(&manager), args.lang.unwrap_or_default())
-                .await;
+        let locale = args.lang.unwrap_or_else(|| {
+            crate::account_manager_tui::Locale::from_preference(manager.preferences().language)
+        });
+        let result = crate::account_manager_tui::run(Arc::clone(&manager), locale).await;
         manager.shutdown_logins().await;
         return result;
     }

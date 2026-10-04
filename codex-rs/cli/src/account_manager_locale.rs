@@ -15,6 +15,25 @@ pub(crate) enum Locale {
 }
 
 impl Locale {
+    pub(crate) fn from_preference(
+        language: codex_app_server::account_management::ManagerLanguage,
+    ) -> Self {
+        match language {
+            codex_app_server::account_management::ManagerLanguage::English => Self::English,
+            codex_app_server::account_management::ManagerLanguage::SimplifiedChinese => {
+                Self::SimplifiedChinese
+            }
+        }
+    }
+
+    pub(super) fn preference(self) -> codex_app_server::account_management::ManagerLanguage {
+        match self {
+            Self::English => codex_app_server::account_management::ManagerLanguage::English,
+            Self::SimplifiedChinese => {
+                codex_app_server::account_management::ManagerLanguage::SimplifiedChinese
+            }
+        }
+    }
     pub(super) fn toggle(self) -> Self {
         match self {
             Self::English => Self::SimplifiedChinese,
@@ -74,12 +93,18 @@ impl Locale {
     }
 
     pub(super) fn main_menu(self) -> &'static str {
-        self.text("[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions\n[C] Cancel login  [number] Account actions  [G] Language  [Q] Quit")
+        self.text("[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions\n[H] Host sign-in  [C] Cancel login  [number] Account actions  [G] Language / 中文  [Q] Quit")
     }
 }
 
 fn chinese(english: &str) -> Option<&'static str> {
     let translated = match english {
+        "Language saved for browser and terminal managers." => {
+            "已保存语言，浏览器和终端管理界面共用此设置。"
+        }
+        "Language changed for this session; saving failed: {}" => {
+            "本次界面已切换语言，但保存失败：{}"
+        }
         "Host sign-in / Remote Control" => "主登录 / 远程控制",
         "Root login" => "根目录登录",
         "Signed out" => "已退出登录",
@@ -96,6 +121,9 @@ fn chinese(english: &str) -> Option<&'static str> {
             "此档案正在用作主登录。移除前请另选主登录，或运行 codex account primary logout。"
         }
         "Host sign-in and inference selection are independent." => "主登录与推理账号选择相互独立。",
+        "H manages host sign-in. It is independent from inference selection." => {
+            "按 H 管理主登录；主登录与推理账号选择相互独立。"
+        }
         "Codex Accounts" => "Codex 账号管理",
         "Automatic subscriptions" => "自动选择订阅账号",
         "API target unavailable" => "API 目标账号不可用",
@@ -117,6 +145,7 @@ fn chinese(english: &str) -> Option<&'static str> {
         }
         "O resumes subscription selection." => "按 O 恢复订阅账号选择。",
         "A adds your first subscription account." => "按 A 添加第一个订阅账号。",
+        "Choose an account number, then D to enable it." => "输入账号编号，再按 D 启用账号。",
         "Choose an account number, then L to finish login." => "输入账号编号，再按 L 完成登录。",
         "R checks for restored quota without spending a reset credit." => {
             "按 R 检查额度是否恢复，不消耗重置券。"
@@ -152,8 +181,8 @@ fn chinese(english: &str) -> Option<&'static str> {
         "Login number (Enter returns)" => "登录任务编号（回车返回）",
         "Choose a listed login number" => "请选择列表中的登录任务编号",
         "Choose an account number or a listed action." => "请输入账号编号或菜单中的操作字母。",
-        "[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions\n[C] Cancel login  [number] Account actions  [G] Language  [Q] Quit" => {
-            "[R] 刷新额度  [A] 添加账号  [S] 设置  [P] API 账号  [O] 自动选择订阅\n[C] 取消登录  [编号] 账号操作  [G] 语言 / Language  [Q] 退出"
+        "[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions\n[H] Host sign-in  [C] Cancel login  [number] Account actions  [G] Language / 中文  [Q] Quit" => {
+            "[R] 刷新额度  [A] 添加账号  [S] 设置  [P] API 账号  [O] 自动选择订阅\n[H] 主登录  [C] 取消登录  [编号] 账号操作  [G] 语言 / Language  [Q] 退出"
         }
         "Login {} · {}" => "登录任务 {} · {}",
         "Open: {}" => "打开：{}",
