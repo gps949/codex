@@ -185,5 +185,15 @@ mod primary_login_handover;
 pub use primary_login_handover::PrimaryLoginHandover;
 pub use primary_login_handover::PrimaryLoginTransitionObserver;
 
+mod primary_login_status;
+pub use primary_login_status::PrimaryLoginObservation;
+pub use primary_login_status::PrimaryLoginStatus;
+pub use primary_login_status::observe_primary_login;
+
+mod primary_runtime_status;
+pub use primary_runtime_status::PrimaryRemoteStatus;
+pub use primary_runtime_status::PrimaryRuntimeSnapshot;
+pub use primary_runtime_status::PrimaryRuntimeStatusStore;
+
 mod primary_login_policy;
 pub use primary_login_policy::PrimaryLoginPolicyFailure;
