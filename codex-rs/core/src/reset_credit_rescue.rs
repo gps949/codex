@@ -5,6 +5,10 @@
 //! free account is always preferred) and only when waiting for the earliest
 //! natural reset would take longer than the user-configured threshold.
 
+#[cfg(test)]
+#[path = "reset_credit_operation.rs"]
+mod operation;
+
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
