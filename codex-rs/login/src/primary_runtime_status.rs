@@ -371,3 +371,7 @@ fn validate_snapshot(snapshot: &PrimaryRuntimeSnapshot) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "primary_runtime_status_tests.rs"]
+mod tests;

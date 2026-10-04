@@ -261,3 +261,7 @@ fn apply_oauth_observation(
     view.email = tokens.id_token.email.clone();
     view.status = PrimaryLoginStatus::StoredReady;
 }
+
+#[cfg(test)]
+#[path = "primary_login_status_tests.rs"]
+mod tests;
