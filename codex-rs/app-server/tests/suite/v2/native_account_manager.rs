@@ -188,6 +188,34 @@ impl NativeFixture {
             .await
     }
 
+    async fn choose(
+        &mut self,
+        request_id: RequestId,
+        params: &ToolRequestUserInputParams,
+        label: &str,
+    ) -> Result<(RequestId, ToolRequestUserInputParams)> {
+        assert!(
+            params.questions[0]
+                .options
+                .as_ref()
+                .is_some_and(|options| options.iter().any(|option| option.label == label)),
+            "captured option {label}"
+        );
+        self.answer(request_id, &params.questions[0].id, vec![label.into()])
+            .await?;
+        self.read_question().await
+    }
+
+    async fn account_actions(
+        &mut self,
+    ) -> Result<(TurnStartResponse, RequestId, ToolRequestUserInputParams)> {
+        let (turn, id, question) = self.open_menu().await?;
+        let (id, question) = self.choose(id, &question, "Accounts").await?;
+        let (id, question) = self.choose(id, &question, "1. Work fixture").await?;
+        let (id, question) = self.choose(id, &question, "Account actions").await?;
+        Ok((turn, id, question))
+    }
+
     async fn finish_menu(
         &mut self,
         turn_id: &str,
@@ -277,29 +305,49 @@ async fn native_account_manager_overview_details_and_close_keep_accounts_and_inf
             .any(|option| option.label == "Close")
     );
     fixture
-        .answer(
-            request_id.clone(),
-            &question.id,
-            vec!["Show overview".into()],
-        )
+        .answer(request_id.clone(), &question.id, vec!["Accounts".into()])
         .await?;
     let (overview_id, overview) = fixture.read_question().await?;
     assert_ne!(overview_id, request_id);
     assert_ne!(overview.questions[0].id, question.id);
-    assert!(overview.questions[0].question.contains("Work fixture"));
+    assert!(!overview.questions[0].question.contains('\n'));
+    assert!(
+        overview.questions[0]
+            .options
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|option| option.label == "1. Work fixture")
+    );
     fixture
         .answer(
             overview_id,
             &overview.questions[0].id,
-            vec!["Account details".into()],
+            vec!["1. Work fixture".into()],
+        )
+        .await?;
+    let (details_id, details) = fixture.read_question().await?;
+    assert_eq!(details.questions[0].question, "Work fixture");
+    fixture
+        .answer(
+            details_id,
+            &details.questions[0].id,
+            vec!["Quota and identity".into()],
         )
         .await?;
     let (details_id, details) = fixture.read_question().await?;
     assert!(
         details.questions[0]
-            .question
-            .contains("native-fixture@example.com")
+            .options
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|option| option.description.contains("native-fixture@example.com"))
     );
+    fixture
+        .answer(details_id, &details.questions[0].id, vec!["Back".into()])
+        .await?;
+    let (details_id, details) = fixture.read_question().await?;
     fixture
         .answer(
             details_id.clone(),
@@ -546,3 +594,6 @@ async fn native_account_menu_finishes_before_inline_review_and_startup_stop() ->
     }
     Ok(())
 }
+
+#[path = "native_account_manager_actions.rs"]
+mod actions;
