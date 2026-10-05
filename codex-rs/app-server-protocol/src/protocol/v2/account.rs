@@ -330,6 +330,11 @@ pub type NullableGetAccountRateLimitsParams = Option<GetAccountRateLimitsParams>
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct GetAccountRateLimitsResponse {
+    /// Opaque binding to the exact execution seat that supplied this usage read.
+    /// Clients must preserve it when confirming a reset; a missing key cannot authorize spending.
+    pub reset_owner_key: Option<String>,
+    /// An unresolved reset for this seat. Reuse its immutable request and credit identifiers.
+    pub pending_reset_credit: Option<PendingAccountRateLimitResetCredit>,
     /// Backend permission for ordinary included usage, validated against the active account.
     /// Null means unavailable; clients must not infer recovery from percentages or reset times.
     pub ordinary_usage_allowed: Option<bool>,
@@ -402,12 +407,25 @@ pub enum RateLimitResetCreditStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ConsumeAccountRateLimitResetCreditParams {
+    /// Expected execution-seat binding captured from the usage read shown for confirmation.
+    #[ts(optional = nullable)]
+    pub expected_owner_key: Option<String>,
     /// Identifies one logical reset attempt. A UUID is recommended; reuse the same value when
     /// retrying that attempt.
     pub idempotency_key: String,
-    /// Opaque reset-credit identifier to redeem. When omitted, the backend selects the next
-    /// available credit.
+    /// Opaque reset-credit identifier to redeem. When omitted, the host selects the earliest
+    /// expiring eligible credit, or preserves the original credit for a known retry.
     #[ts(optional = nullable)]
+    pub credit_id: Option<String>,
+}
+
+/// Nonsecret recovery metadata for one unresolved, owner-bound reset operation.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct PendingAccountRateLimitResetCredit {
+    pub owner_key: String,
+    pub idempotency_key: String,
     pub credit_id: Option<String>,
 }
 

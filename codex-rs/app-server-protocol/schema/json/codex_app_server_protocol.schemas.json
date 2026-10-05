@@ -11004,7 +11004,14 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
           "creditId": {
-            "description": "Opaque reset-credit identifier to redeem. When omitted, the backend selects the next available credit.",
+            "description": "Opaque reset-credit identifier to redeem. When omitted, the host selects the earliest expiring eligible credit, or preserves the original credit for a known retry.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedOwnerKey": {
+            "description": "Expected execution-seat binding captured from the usage read shown for confirmation.",
             "type": [
               "string",
               "null"
@@ -13164,6 +13171,17 @@
               "null"
             ]
           },
+          "pendingResetCredit": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/PendingAccountRateLimitResetCredit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An unresolved reset for this seat. Reuse its immutable request and credit identifiers."
+          },
           "rateLimitResetCredits": {
             "anyOf": [
               {
@@ -13192,6 +13210,13 @@
             "description": "Multi-bucket view keyed by metered `limit_id` (for example, `codex`).",
             "type": [
               "object",
+              "null"
+            ]
+          },
+          "resetOwnerKey": {
+            "description": "Opaque binding to the exact execution seat that supplied this usage read. Clients must preserve it when confirming a reset; a missing key cannot authorize spending.",
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -16621,6 +16646,28 @@
       },
       "PathUri": {
         "type": "string"
+      },
+      "PendingAccountRateLimitResetCredit": {
+        "description": "Nonsecret recovery metadata for one unresolved, owner-bound reset operation.",
+        "properties": {
+          "creditId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "ownerKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotencyKey",
+          "ownerKey"
+        ],
+        "type": "object"
       },
       "PermissionProfileListParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",

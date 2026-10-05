@@ -621,7 +621,14 @@
     "ConsumeAccountRateLimitResetCreditParams": {
       "properties": {
         "creditId": {
-          "description": "Opaque reset-credit identifier to redeem. When omitted, the backend selects the next available credit.",
+          "description": "Opaque reset-credit identifier to redeem. When omitted, the host selects the earliest expiring eligible credit, or preserves the original credit for a known retry.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedOwnerKey": {
+          "description": "Expected execution-seat binding captured from the usage read shown for confirmation.",
           "type": [
             "string",
             "null"

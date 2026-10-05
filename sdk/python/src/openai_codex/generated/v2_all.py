@@ -1217,7 +1217,14 @@ class ConsumeAccountRateLimitResetCreditParams(BaseModel):
         str | None,
         Field(
             alias="creditId",
-            description="Opaque reset-credit identifier to redeem. When omitted, the backend selects the next available credit.",
+            description="Opaque reset-credit identifier to redeem. When omitted, the host selects the earliest expiring eligible credit, or preserves the original credit for a known retry.",
+        ),
+    ] = None
+    expected_owner_key: Annotated[
+        str | None,
+        Field(
+            alias="expectedOwnerKey",
+            description="Expected execution-seat binding captured from the usage read shown for confirmation.",
         ),
     ] = None
     idempotency_key: Annotated[
@@ -3165,6 +3172,15 @@ class PathUri(RootModel[str]):
         populate_by_name=True,
     )
     root: str
+
+
+class PendingAccountRateLimitResetCredit(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    credit_id: Annotated[str | None, Field(alias="creditId")] = None
+    idempotency_key: Annotated[str, Field(alias="idempotencyKey")]
+    owner_key: Annotated[str, Field(alias="ownerKey")]
 
 
 class PermissionProfileListParams(BaseModel):
@@ -10954,6 +10970,13 @@ class GetAccountRateLimitsResponse(BaseModel):
             description="Backend permission for ordinary included usage, validated against the active account. Null means unavailable; clients must not infer recovery from percentages or reset times.",
         ),
     ] = None
+    pending_reset_credit: Annotated[
+        PendingAccountRateLimitResetCredit | None,
+        Field(
+            alias="pendingResetCredit",
+            description="An unresolved reset for this seat. Reuse its immutable request and credit identifiers.",
+        ),
+    ] = None
     rate_limit_reset_credits: Annotated[
         RateLimitResetCreditsSummary | None, Field(alias="rateLimitResetCredits")
     ] = None
@@ -10976,6 +10999,13 @@ class GetAccountRateLimitsResponse(BaseModel):
         Field(
             alias="rateLimitsByLimitId",
             description="Multi-bucket view keyed by metered `limit_id` (for example, `codex`).",
+        ),
+    ] = None
+    reset_owner_key: Annotated[
+        str | None,
+        Field(
+            alias="resetOwnerKey",
+            description="Opaque binding to the exact execution seat that supplied this usage read. Clients must preserve it when confirming a reset; a missing key cannot authorize spending.",
         ),
     ] = None
 

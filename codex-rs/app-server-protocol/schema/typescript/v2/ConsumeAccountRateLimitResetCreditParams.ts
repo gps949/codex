@@ -4,12 +4,16 @@
 
 export type ConsumeAccountRateLimitResetCreditParams = {
 /**
+ * Expected execution-seat binding captured from the usage read shown for confirmation.
+ */
+expectedOwnerKey?: string | null,
+/**
  * Identifies one logical reset attempt. A UUID is recommended; reuse the same value when
  * retrying that attempt.
  */
 idempotencyKey: string,
 /**
- * Opaque reset-credit identifier to redeem. When omitted, the backend selects the next
- * available credit.
+ * Opaque reset-credit identifier to redeem. When omitted, the host selects the earliest
+ * expiring eligible credit, or preserves the original credit for a known retry.
  */
 creditId?: string | null, };
