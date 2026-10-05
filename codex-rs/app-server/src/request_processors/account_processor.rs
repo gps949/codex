@@ -1625,7 +1625,16 @@ impl AccountRequestProcessor {
             .rate_limit_upsell
             .filter(|_| matches_active_account);
 
+        let reset_owner_key =
+            crate::reset_credit_journal::owner_key(&self.config.chatgpt_base_url, &auth).ok();
+        let pending_reset_credit = reset_owner_key.as_deref().and_then(|owner| {
+            crate::reset_credit_journal::ManualResetCreditJournal::load(&self.config.codex_home)
+                .ok()
+                .and_then(|journal| journal.pending_for_owner(owner))
+        });
         let mut response = GetAccountRateLimitsResponse {
+            reset_owner_key,
+            pending_reset_credit,
             ordinary_usage_allowed: response
                 .ordinary_usage_allowed
                 .filter(|_| matches_active_account),

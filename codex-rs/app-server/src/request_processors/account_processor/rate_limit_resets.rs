@@ -1,9 +1,6 @@
 use super::*;
-use sha2::Digest;
-
-#[path = "manual_reset_credit_journal.rs"]
-mod manual_reset_credit_journal;
-use manual_reset_credit_journal::ManualResetCreditJournal;
+use crate::reset_credit_journal;
+use crate::reset_credit_journal::ManualResetCreditJournal;
 
 const RATE_LIMIT_RESET_REQUEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 10);
 const RATE_LIMIT_RESET_DETAILS_REQUEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
@@ -90,7 +87,7 @@ impl AccountRequestProcessor {
         if params.idempotency_key.is_empty() {
             return Err(invalid_request("idempotencyKey must not be empty"));
         }
-        if params.idempotency_key.len() > manual_reset_credit_journal::MAX_IDEMPOTENCY_KEY_BYTES {
+        if params.idempotency_key.len() > reset_credit_journal::MAX_IDEMPOTENCY_KEY_BYTES {
             return Err(invalid_request("idempotencyKey must not exceed 128 bytes"));
         }
         if params.credit_id.as_deref().is_some_and(str::is_empty) {
@@ -99,12 +96,33 @@ impl AccountRequestProcessor {
         if params
             .credit_id
             .as_ref()
-            .is_some_and(|id| id.len() > manual_reset_credit_journal::MAX_CREDIT_ID_BYTES)
+            .is_some_and(|id| id.len() > reset_credit_journal::MAX_CREDIT_ID_BYTES)
         {
             return Err(invalid_request("creditId must not exceed 256 bytes"));
         }
+        if params
+            .expected_owner_key
+            .as_deref()
+            .is_some_and(|owner| !reset_credit_journal::valid_owner_key(owner))
+        {
+            return Err(invalid_request(
+                "expectedOwnerKey must be a valid reset owner key",
+            ));
+        }
 
-        let (client, auth, profile) = self.rate_limit_reset_backend_client().await?;
+        let (client, auth, profile, owner_generation) =
+            self.rate_limit_reset_backend_client().await?;
+        let owner_digest = reset_credit_journal::owner_key(&self.config.chatgpt_base_url, &auth)
+            .map_err(invalid_request)?;
+        if params
+            .expected_owner_key
+            .as_deref()
+            .is_some_and(|owner| owner != owner_digest)
+        {
+            return Err(invalid_request(
+                "account changed since reset confirmation; return to the original account to retry",
+            ));
+        }
         let request_timeout = RATE_LIMIT_RESET_REQUEST_TIMEOUT;
         #[cfg(debug_assertions)]
         let request_timeout = std::env::var(RATE_LIMIT_RESET_REQUEST_TIMEOUT_ENV_VAR)
@@ -130,29 +148,6 @@ impl AccountRequestProcessor {
         .map_err(|error| {
             internal_error(format!("failed to lock reset credit spending: {error}"))
         })?;
-        let account_id = auth
-            .get_account_id()
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| {
-                invalid_request("account identity required to bind rate limit reset retries")
-            })?;
-        let user_id = auth
-            .get_chatgpt_user_id()
-            .filter(|id| !id.trim().is_empty())
-            .ok_or_else(|| {
-                invalid_request("account identity required to bind rate limit reset retries")
-            })?;
-        let mut owner = sha2::Sha256::new();
-        owner.update(b"codex-manual-reset-credit-owner-v1\0");
-        for value in [
-            self.config.chatgpt_base_url.trim_end_matches('/'),
-            account_id.as_str(),
-            user_id.as_str(),
-        ] {
-            owner.update((value.len() as u64).to_be_bytes());
-            owner.update(value.as_bytes());
-        }
-        let owner_digest = format!("{:x}", owner.finalize());
         let mut journal =
             ManualResetCreditJournal::load(&self.config.codex_home).map_err(internal_error)?;
         let known_credit = journal
@@ -163,6 +158,14 @@ impl AccountRequestProcessor {
             )
             .map_err(invalid_request)?
             .map(str::to_owned);
+        let terminal = journal
+            .terminal_outcome(&owner_digest, &params.idempotency_key)
+            .map_err(invalid_request)?;
+        if terminal.is_none() {
+            journal
+                .check_pending(&owner_digest, &params.idempotency_key)
+                .map_err(invalid_request)?;
+        }
         let inventory = if known_credit.is_some() {
             None
         } else {
@@ -246,16 +249,28 @@ impl AccountRequestProcessor {
                 .map_err(|error| internal_error(error.to_string()))?
         } else {
             self.auth_manager.reload().await;
-            if !self.auth_manager.auth_cached().is_some_and(|current| {
-                current.get_account_id() == auth.get_account_id()
-                    && current.get_chatgpt_user_id() == auth.get_chatgpt_user_id()
-            }) {
+            if self
+                .auth_manager
+                .auth_change_state_receiver()
+                .borrow()
+                .owner_generation
+                != owner_generation
+                || !self.auth_manager.auth_cached().is_some_and(|current| {
+                    current.get_account_id() == auth.get_account_id()
+                        && current.get_chatgpt_user_id() == auth.get_chatgpt_user_id()
+                })
+            {
                 return Err(invalid_request(
                     "account changed before reset; refresh before retrying",
                 ));
             }
             None
         };
+        if let Some(outcome) = terminal {
+            return Ok(Some(
+                ConsumeAccountRateLimitResetCreditResponse { outcome }.into(),
+            ));
+        }
         if credit.is_some_and(|credit| !eligible_reset_credit(credit)) {
             return Err(invalid_request(
                 "reset credit expired before spending; refresh available credits",
@@ -285,6 +300,11 @@ impl AccountRequestProcessor {
                 ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed
             }
         };
+        journal
+            .complete(&owner_digest, &params.idempotency_key, outcome)
+            .map_err(|_| {
+                internal_error("reset response could not be saved; retry the original operation")
+            })?;
         if let (Some(profile), Some(pool), Some(probe)) = (profile.as_ref(), pool.as_ref(), probe)
             && profile.still_owned().await
         {
@@ -334,10 +354,16 @@ impl AccountRequestProcessor {
             BackendClient,
             codex_login::CodexAuth,
             Option<ResetProfileIdentity>,
+            u64,
         ),
         JSONRPCErrorError,
     > {
         let pool = self.get_account_pool_response().await?;
+        let owner_generation = self
+            .auth_manager
+            .auth_change_state_receiver()
+            .borrow()
+            .owner_generation;
         let Some((auth, http_client_factory)) =
             self.auth_manager.auth_with_http_client_factory().await
         else {
@@ -417,6 +443,7 @@ impl AccountRequestProcessor {
             ),
             auth,
             profile,
+            owner_generation,
         ))
     }
 }

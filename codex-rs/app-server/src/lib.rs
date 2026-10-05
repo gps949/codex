@@ -142,6 +142,7 @@ mod plugin_config_reload;
 mod primary_login_remote;
 mod request_processors;
 mod request_serialization;
+mod reset_credit_journal;
 mod server_request_error;
 mod skills_watcher;
 mod thread_state;
