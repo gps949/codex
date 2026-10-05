@@ -249,6 +249,7 @@ mod reasoning_replay;
 mod recap;
 mod reconnect;
 mod replay_filter;
+pub(crate) mod reset_credit_operation;
 mod resize_reflow;
 mod resume_config;
 mod right_click_paste;
@@ -528,6 +529,7 @@ pub(crate) struct App {
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) chat_widget: ChatWidget,
+    reset_credit_operations: reset_credit_operation::ResetCreditOperationState,
     workspace_command_runner: Option<WorkspaceCommandRunner>,
     /// Legacy bootstrap and server-setting inputs; local preferences live in `local_settings`.
     pub(crate) config: Config,

@@ -782,6 +782,7 @@ See the Codex keymap documentation for supported actions and examples."
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
             chat_widget,
+            reset_credit_operations: Default::default(),
             workspace_command_runner: Some(workspace_command_runner),
             config,
             local_settings,
@@ -888,6 +889,7 @@ See the Codex keymap documentation for supported actions and examples."
             #[cfg(test)]
             _test_codex_home: None,
         };
+        app.restore_reset_credit_operations();
         if !tui.is_terminal_focused() {
             app.recap.note_focus_lost(Instant::now());
         }
