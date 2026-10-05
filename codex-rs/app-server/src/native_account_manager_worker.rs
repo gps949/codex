@@ -6,6 +6,7 @@ mod questions;
 pub(super) use questions::parse_answer;
 
 use super::*;
+use crate::native_account_view::actions::MenuOutcome;
 
 enum QuestionFailure {
     Message(String),
@@ -21,7 +22,7 @@ impl NativeAccountManager {
         target: NativeMenuTarget,
         manager: Arc<AccountManager>,
         outgoing: Arc<OutgoingMessageSender>,
-        language: NativeAccountLanguage,
+        options: NativeMenuOptions,
     ) -> Result<(), String> {
         let thread_id = target.thread_id;
         let turn_id = target.turn_id.as_str();
@@ -86,7 +87,7 @@ impl NativeAccountManager {
                     FrozenAccountInventory::from_inventory(inventory),
                     manager,
                     outgoing.as_ref(),
-                    language,
+                    options,
                 )
                 .await;
             finished_tx.send_replace(Some(result));
@@ -147,10 +148,11 @@ impl NativeAccountManager {
         input: NativeMenuInput,
         manager: Arc<AccountManager>,
         outgoing: &OutgoingMessageSender,
-        language: NativeAccountLanguage,
+        options: NativeMenuOptions,
         mut turn: Turn,
     ) -> Result<(), String> {
         let NativeMenuInput { user, inventory } = input;
+        let language = options.language;
         let mut result = self
             .notify(
                 outgoing,
@@ -173,7 +175,7 @@ impl NativeAccountManager {
         turn.items = vec![anchor.clone()];
         if result.is_ok() && !menu.cancellation.is_cancelled() {
             result = self
-                .run_pages(menu, &anchor, inventory, manager, outgoing, language)
+                .run_pages(menu, &anchor, inventory, manager, outgoing, options)
                 .await;
         }
         turn.status = if result.is_err() {
@@ -219,7 +221,7 @@ impl NativeAccountManager {
         inventory: FrozenAccountInventory,
         manager: Arc<AccountManager>,
         outgoing: &OutgoingMessageSender,
-        language: NativeAccountLanguage,
+        options: NativeMenuOptions,
     ) -> Result<(), String> {
         let MenuKind::Attached(thread) = &menu.kind else {
             return Err("Expected an attached account menu".into());
@@ -243,7 +245,7 @@ impl NativeAccountManager {
                 }
             }
         });
-        let anchor = menu_anchor(language);
+        let anchor = menu_anchor(options.language);
         let result = if menu.cancellation.is_cancelled() {
             Ok(())
         } else {
@@ -251,7 +253,7 @@ impl NativeAccountManager {
                 .await
         };
         let result = if result.is_ok() {
-            self.run_pages(menu, &anchor, inventory, manager, outgoing, language)
+            self.run_pages(menu, &anchor, inventory, manager, outgoing, options)
                 .await
         } else {
             result
@@ -267,7 +269,7 @@ impl NativeAccountManager {
         inventory: FrozenAccountInventory,
         manager: Arc<AccountManager>,
         outgoing: &OutgoingMessageSender,
-        mut language: NativeAccountLanguage,
+        options: NativeMenuOptions,
     ) -> Result<(), String> {
         let context = match &menu.kind {
             MenuKind::Synthetic => crate::account_management::AccountOperationContext::NativeMenu(
@@ -281,11 +283,12 @@ impl NativeAccountManager {
                 }
             }
         };
-        let mut session = NativeMenuSession::new(inventory);
+        let mut language = options.language;
+        let mut session = NativeMenuSession::new(inventory, options.entry);
         session.bind_targets(&manager);
         let deadline = Instant::now() + self.limits.session;
         let mut result = Ok(());
-        for _ in 0..40 {
+        for _ in 0..256 {
             if menu.cancellation.is_cancelled() || Instant::now() >= deadline {
                 break;
             }
@@ -329,8 +332,6 @@ impl NativeAccountManager {
                     };
                     if let Err(error) = manager.save_preferences(preferences) {
                         session.error(error, language);
-                    } else {
-                        session.page = MenuPage::Home;
                     }
                 }
                 Ok(answer) => {
@@ -342,8 +343,28 @@ impl NativeAccountManager {
                         result = tokio::time::timeout_at(operation_deadline, session.handle(answer, &manager, language, &context)) => result,
                     };
                     match outcome {
-                        Ok(Ok(true)) => {}
-                        Ok(Ok(false)) => break,
+                        Ok(Ok(MenuOutcome::Continue)) => {}
+                        Ok(Ok(MenuOutcome::Close)) => break,
+                        Ok(Ok(MenuOutcome::Completed(message))) => {
+                            if context.ensure_current().await.is_ok() {
+                                result = self
+                                    .item(
+                                        outgoing,
+                                        menu,
+                                        menu.thread_id,
+                                        ThreadItem::AgentMessage {
+                                            id: Uuid::now_v7().to_string(),
+                                            text: message,
+                                            phase: None,
+                                            memory_citation: None,
+                                            delivery: None,
+                                            questions: None,
+                                        },
+                                    )
+                                    .await;
+                            }
+                            break;
+                        }
                         Ok(Err(error)) => {
                             let _ = tokio::time::timeout(
                                 Duration::from_secs(/*secs*/ 5),

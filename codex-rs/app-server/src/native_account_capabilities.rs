@@ -136,7 +136,7 @@ impl NativeAccountCapabilities {
             language.text("Client", "客户端"), self.client_name, self.client_version,
             language.text("Native questions", "原生问答"),
             language.text("Open: /account or /account manage [en|zh-CN]", "打开：/account 或 /account manage [en|zh-CN]"),
-            language.text("Menu descriptions show account data. Changes and credit use require explicit confirmation.", "菜单说明显示账号信息；修改与用券需要明确确认。"),
+            language.text("Account choices apply directly. Paid use, retries, removals and credits require explicit confirmation.", "账号选择直接生效；付费使用、重试、移除与用券需要明确确认。"),
             language.text("A response confirms the protocol round trip; mobile rendering still needs a device check.", "收到回复可确认协议往返成功；手机界面效果仍需实机确认。"))
     }
 }

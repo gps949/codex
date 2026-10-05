@@ -26,7 +26,7 @@ fn diagnostic_uses_only_known_bounded_fields_and_records_connection_observations
     MIME types: text/x-dil;profile=mcp-app, text/html;profile=mcp-app
 
     Open: /account or /account manage [en|zh-CN]
-    Menu descriptions show account data. Changes and credit use require explicit confirmation.
+    Account choices apply directly. Paid use, retries, removals and credits require explicit confirmation.
     A response confirms the protocol round trip; mobile rendering still needs a device check.
     ");
 }

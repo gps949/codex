@@ -7,8 +7,8 @@ use crate::native_account_capabilities::QuestionObservation;
 use crate::native_account_view::FrozenAccountInventory;
 use crate::native_account_view::MenuAction;
 use crate::native_account_view::MenuChoice;
-use crate::native_account_view::MenuPage;
 use crate::native_account_view::MenuQuestion;
+use crate::native_account_view::NativeMenuEntry;
 use crate::native_account_view::actions::MenuAnswer;
 use crate::native_account_view::actions::NativeMenuSession;
 use crate::outgoing_message::ConnectionId;
@@ -47,6 +47,12 @@ mod worker;
 pub(crate) struct NativeMenuTarget {
     pub(crate) thread_id: ThreadId,
     pub(crate) turn_id: String,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct NativeMenuOptions {
+    pub(crate) entry: NativeMenuEntry,
+    pub(crate) language: NativeAccountLanguage,
 }
 
 struct NativeMenuInput {
@@ -137,7 +143,7 @@ impl NativeAccountManager {
         params: &TurnStartParams,
         manager: Arc<AccountManager>,
         outgoing: Arc<OutgoingMessageSender>,
-        language: NativeAccountLanguage,
+        options: NativeMenuOptions,
     ) -> Result<(), String> {
         let thread_id = ThreadId::from_string(&params.thread_id)
             .map_err(|_| "Invalid thread ID".to_string())?;
@@ -182,7 +188,7 @@ impl NativeAccountManager {
             NativeMenuInput { user, inventory },
             manager,
             outgoing,
-            language,
+            options,
         )
         .await
     }
@@ -194,7 +200,7 @@ impl NativeAccountManager {
         input: NativeMenuInput,
         manager: Arc<AccountManager>,
         outgoing: Arc<OutgoingMessageSender>,
-        language: NativeAccountLanguage,
+        options: NativeMenuOptions,
     ) -> Result<(), String> {
         let owner = request_id.connection_id;
         let (finished_tx, finished) = watch::channel(/*init*/ None);
@@ -244,7 +250,7 @@ impl NativeAccountManager {
         let coordinator = self.clone();
         tokio::spawn(async move {
             let result = coordinator
-                .run(&menu, input, manager, outgoing.as_ref(), language, turn)
+                .run(&menu, input, manager, outgoing.as_ref(), options, turn)
                 .await;
             finished_tx.send_replace(Some(result.clone()));
             if result.is_ok() {

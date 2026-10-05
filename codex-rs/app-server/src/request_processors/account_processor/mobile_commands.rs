@@ -6,6 +6,7 @@ use crate::mobile_account_bridge::NativeMenuCommand;
 use crate::mobile_account_bridge::native_menu_command;
 use crate::mobile_account_status as view;
 use crate::native_account_capabilities::NativeAccountLanguage;
+use crate::native_account_manager::NativeMenuOptions;
 use crate::request_processors::config_processor::ConfigRequestProcessor;
 use crate::request_serialization::RequestSerializationAccess;
 use crate::request_serialization::RequestSerializationQueueKey;
@@ -41,7 +42,7 @@ impl AccountRequestProcessor {
             .await
             .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
         super::super::thread_input::ensure_direct_input_allowed(thread.as_ref()).await?;
-        if let Some(language) = self.native_menu_language(&params.input, client_name)? {
+        if let Some(options) = self.native_menu_options(&params.input, client_name)? {
             self.native_account_manager
                 .start(
                     &request_id,
@@ -49,7 +50,7 @@ impl AccountRequestProcessor {
                     &params,
                     Arc::clone(&self.native_account_inventory),
                     Arc::clone(&self.outgoing),
-                    language,
+                    options,
                 )
                 .await
                 .map_err(invalid_request)?;
@@ -103,17 +104,20 @@ impl AccountRequestProcessor {
         )))
     }
 
-    fn native_menu_language(
+    fn native_menu_options(
         &self,
         input: &[V2UserInput],
         client_name: Option<&str>,
-    ) -> Result<Option<NativeAccountLanguage>, JSONRPCErrorError> {
+    ) -> Result<Option<NativeMenuOptions>, JSONRPCErrorError> {
         match native_menu_command(input, client_name) {
             NativeMenuCommand::Other => Ok(None),
             NativeMenuCommand::Invalid => Err(invalid_request("Usage: /account manage [en|zh-CN]")),
-            NativeMenuCommand::Language(language) => Ok(Some(language)),
-            NativeMenuCommand::SavedLanguage => Ok(Some(
-                match self.native_account_inventory.preferences().language {
+            NativeMenuCommand::Language { entry, language } => {
+                Ok(Some(NativeMenuOptions { entry, language }))
+            }
+            NativeMenuCommand::SavedLanguage(entry) => Ok(Some(NativeMenuOptions {
+                entry,
+                language: match self.native_account_inventory.preferences().language {
                     crate::account_management::ManagerLanguage::English => {
                         NativeAccountLanguage::English
                     }
@@ -121,7 +125,7 @@ impl AccountRequestProcessor {
                         NativeAccountLanguage::Chinese
                     }
                 },
-            )),
+            })),
         }
     }
 
@@ -132,7 +136,7 @@ impl AccountRequestProcessor {
         params: &TurnSteerParams,
         client_name: Option<&str>,
     ) -> Result<bool, JSONRPCErrorError> {
-        let Some(language) = self.native_menu_language(&params.input, client_name)? else {
+        let Some(options) = self.native_menu_options(&params.input, client_name)? else {
             return Ok(false);
         };
         let thread_id = ThreadId::from_string(&params.thread_id)
@@ -153,7 +157,7 @@ impl AccountRequestProcessor {
                 },
                 Arc::clone(&self.native_account_inventory),
                 Arc::clone(&self.outgoing),
-                language,
+                options,
             )
             .await
             .map_err(invalid_request)?;

@@ -198,6 +198,9 @@ fn native_status_quota_overlay_uses_bucket_identity_and_preserves_payload() {
     other.limit_id = None;
     other.limit_name = Some("Other model".into());
     let mut response = GetAccountRateLimitsResponse {
+        reset_owner_key: None,
+        pending_reset_credit: None,
+
         ordinary_usage_allowed: Some(false),
         rate_limits: snapshot.clone(),
         rate_limits_by_limit_id: Some(HashMap::from([
@@ -231,6 +234,9 @@ fn native_status_quota_title_uses_profile_id_when_active_flags_are_stale() {
     }))
     .unwrap();
     let mut response = GetAccountRateLimitsResponse {
+        reset_owner_key: None,
+        pending_reset_credit: None,
+
         ordinary_usage_allowed: None,
         rate_limits: snapshot,
         rate_limits_by_limit_id: None,
@@ -595,14 +601,21 @@ fn native_menu_only_captures_exact_remote_commands_and_optional_language() {
     };
     assert_eq!(
         super::native_menu_command(&input("/account"), Some("codex_chatgpt_ios_remote")),
-        NativeMenuCommand::SavedLanguage
+        NativeMenuCommand::SavedLanguage(crate::native_account_view::NativeMenuEntry::Quick)
+    );
+    assert_eq!(
+        super::native_menu_command(&input("/account manage"), Some("codex_chatgpt_ios_remote")),
+        NativeMenuCommand::SavedLanguage(crate::native_account_view::NativeMenuEntry::Manage)
     );
     assert_eq!(
         super::native_menu_command(
             &input("/account manage zh-CN"),
             Some("codex_chatgpt_ios_remote")
         ),
-        NativeMenuCommand::Language(NativeAccountLanguage::Chinese)
+        NativeMenuCommand::Language {
+            entry: crate::native_account_view::NativeMenuEntry::Manage,
+            language: NativeAccountLanguage::Chinese
+        }
     );
     assert_eq!(
         super::native_menu_command(

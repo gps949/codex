@@ -79,8 +79,11 @@ pub(crate) fn mobile_slash_command(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NativeMenuCommand {
     Other,
-    SavedLanguage,
-    Language(crate::native_account_capabilities::NativeAccountLanguage),
+    SavedLanguage(crate::native_account_view::NativeMenuEntry),
+    Language {
+        entry: crate::native_account_view::NativeMenuEntry,
+        language: crate::native_account_capabilities::NativeAccountLanguage,
+    },
     Invalid,
 }
 
@@ -103,12 +106,19 @@ pub(crate) fn native_menu_command(
         return NativeMenuCommand::Other;
     }
     match words.next() {
-        None => NativeMenuCommand::SavedLanguage,
+        None => {
+            NativeMenuCommand::SavedLanguage(crate::native_account_view::NativeMenuEntry::Quick)
+        }
         Some("manage") => match (words.next(), words.next()) {
-            (None, None) => NativeMenuCommand::SavedLanguage,
+            (None, None) => NativeMenuCommand::SavedLanguage(
+                crate::native_account_view::NativeMenuEntry::Manage,
+            ),
             (Some(value), None) => {
                 crate::native_account_capabilities::NativeAccountLanguage::parse(value)
-                    .map(NativeMenuCommand::Language)
+                    .map(|language| NativeMenuCommand::Language {
+                        entry: crate::native_account_view::NativeMenuEntry::Manage,
+                        language,
+                    })
                     .unwrap_or(NativeMenuCommand::Invalid)
             }
             _ => NativeMenuCommand::Invalid,
@@ -593,6 +603,9 @@ mod tests {
             accounts: vec![],
         };
         let mut response = GetAccountRateLimitsResponse {
+            reset_owner_key: None,
+            pending_reset_credit: None,
+
             ordinary_usage_allowed: None,
             rate_limits: codex_app_server_protocol::RateLimitSnapshot {
                 limit_id: Some("codex".to_string()),
@@ -650,6 +663,9 @@ mod tests {
         other.limit_id = Some("other".to_string());
         other.limit_name = Some("Other model".to_string());
         let mut response = GetAccountRateLimitsResponse {
+            reset_owner_key: None,
+            pending_reset_credit: None,
+
             ordinary_usage_allowed: None,
             rate_limits: snapshot.clone(),
             rate_limits_by_limit_id: Some(HashMap::from([

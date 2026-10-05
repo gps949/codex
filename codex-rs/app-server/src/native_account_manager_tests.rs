@@ -1,6 +1,7 @@
 use super::worker::parse_answer;
 use super::*;
 use crate::account_management::AccountManagerInventory;
+use crate::native_account_view::MenuPage;
 use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessage;
 use codex_analytics::AnalyticsEventsClient;
@@ -134,7 +135,10 @@ async fn launch(
             },
             manager,
             outgoing.clone(),
-            NativeAccountLanguage::English,
+            NativeMenuOptions {
+                entry: NativeMenuEntry::Manage,
+                language: NativeAccountLanguage::English,
+            },
         )
         .await
         .unwrap();
