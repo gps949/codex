@@ -25,12 +25,13 @@ pub async fn load_account_pool_for_management(
     {
         let mut config = auth_config.clone();
         config.codex_home = record.profile.credential_home.clone();
-        let manager = AuthManager::shared_managed_profile_from_auth_config(config).await;
+        let manager = AuthManager::shared_managed_profile_from_auth_config(config.clone()).await;
         // Loading cached credentials never refreshes OAuth for unrelated or parked accounts.
-        if manager
-            .auth_cached()
-            .is_some_and(|auth| auth.is_chatgpt_auth())
-        {
+        if manager.auth_cached().is_some_and(|auth| {
+            auth.is_chatgpt_auth()
+                && config.allows_auth(&auth)
+                && manager.refresh_failure_for_auth(&auth).is_none()
+        }) {
             pool.register(record.profile.clone(), manager)?;
         }
     }

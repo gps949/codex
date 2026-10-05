@@ -23,12 +23,18 @@ impl AccountManager {
                 .find(|saved| saved.profile_id == record.profile.id);
             let mut auth_config = self.config.auth_config();
             auth_config.codex_home = record.profile.credential_home.clone();
-            let auth = if record.state == AccountProfileState::PendingLogin {
-                None
+            let (auth, auth_available) = if record.state == AccountProfileState::PendingLogin {
+                (None, false)
             } else {
-                AuthManager::shared_managed_profile_from_auth_config(auth_config)
-                    .await
-                    .auth_cached()
+                let manager =
+                    AuthManager::shared_managed_profile_from_auth_config(auth_config.clone()).await;
+                let auth = manager.auth_cached();
+                let available = auth.as_ref().is_some_and(|auth| {
+                    auth.is_chatgpt_auth()
+                        && auth_config.allows_auth(auth)
+                        && manager.refresh_failure_for_auth(auth).is_none()
+                });
+                (auth, available)
             };
             let email = auth
                 .as_ref()
@@ -38,13 +44,7 @@ impl AccountManager {
                 .filter(|until| *until > Utc::now());
             let login_state = match record.state {
                 AccountProfileState::PendingLogin => "pending",
-                AccountProfileState::Ready
-                    if auth
-                        .as_ref()
-                        .is_some_and(codex_login::CodexAuth::is_chatgpt_auth) =>
-                {
-                    "signedIn"
-                }
+                AccountProfileState::Ready if auth_available => "signedIn",
                 AccountProfileState::Ready => "needsLogin",
             };
             let availability = if record.profile.disabled {
@@ -111,10 +111,7 @@ impl AccountManager {
         }
         accounts.sort_by_key(|account| (account.priority, account.profile_id.clone()));
         let login_jobs = self.login_progress().await;
-        let config = codex_core::config::ConfigBuilder::default()
-            .codex_home(self.config.codex_home.to_path_buf())
-            .build()
-            .await?;
+        let settings = self.current_pool_settings().await?;
         let (api_accounts, api_state) = self.api_inventory()?;
         Ok(AccountManagerInventory {
             host_now: Utc::now().timestamp(),
@@ -131,7 +128,7 @@ impl AccountManager {
                 .flatten()
                 .map(|id| id.to_string()),
             accounts,
-            settings: serde_json::to_value(config.account_pool)?,
+            settings: serde_json::to_value(settings)?,
             login_jobs,
             api_accounts,
             api_selection: api_state.selection,
