@@ -250,7 +250,7 @@ async fn get_account_rate_limits_returns_snapshot(
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
 
     let expected = GetAccountRateLimitsResponse {
-        reset_owner_key: None,
+        reset_owner_key: Some(expected_reset_owner(&server_url, "account-123", "user-123")),
         pending_reset_credit: None,
 
         ordinary_usage_allowed: Some(true),
@@ -453,6 +453,8 @@ async fn get_account_rate_limits_filters_banner_by_identity(
         "primary": {"usedPercent": 42, "windowDurationMins": 60, "resetsAt": 2000000000}
     });
     let expected: GetAccountRateLimitsResponse = serde_json::from_value(json!({
+        "resetOwnerKey": expected_reset_owner(&server.uri(), "workspace-a", "user-a"),
+        "pendingResetCredit": null,
         "ordinaryUsageAllowed": if permitted { Some(true) } else { None },
         "accountId": account, "rateLimitUpsell": if permitted { Some(banner) } else { None },
         "rateLimits": snapshot, "rateLimitsByLimitId": {"codex": snapshot},
@@ -751,4 +753,15 @@ async fn login_with_api_key(mcp: &mut TestAppServer, api_key: &str) -> Result<()
 fn write_chatgpt_base_url(codex_home: &Path, base_url: &str) -> std::io::Result<()> {
     let config_toml = codex_home.join("config.toml");
     std::fs::write(config_toml, format!("chatgpt_base_url = \"{base_url}\"\n"))
+}
+
+pub(super) fn expected_reset_owner(base_url: &str, account_id: &str, user_id: &str) -> String {
+    use sha2::Digest;
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"codex-manual-reset-credit-owner-v1\0");
+    for value in [base_url.trim_end_matches('/'), account_id, user_id] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
 }

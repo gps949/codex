@@ -1499,12 +1499,31 @@ impl AccountRequestProcessor {
         let requested_user_id = auth.get_chatgpt_user_id();
         let owner_changes = self.auth_manager.auth_change_state_receiver();
         let requested_owner_generation = owner_changes.borrow().owner_generation;
+        // Quota and reset-credit reads must remain available after the pool exhausts.
+        // Bind that read to the last explicit selection, without reactivating its quota.
+        let selection_store =
+            codex_login::AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf());
+        let exhausted_selection =
+            if account_pool.enabled && account_pool.active_profile_id.is_none() {
+                selection_store
+                    .try_load()
+                    .map_err(|error| internal_error(error.to_string()))?
+                    .map(|state| (state.active_profile_id, state.selection_revision))
+            } else {
+                None
+            };
+        let quota_profile_id = account_pool.active_profile_id.as_deref().or_else(|| {
+            exhausted_selection
+                .as_ref()
+                .and_then(|(id, _)| id.as_ref())
+                .map(codex_login::AccountProfileId::as_str)
+        });
         let snapshot_auth_matches = requested_token.as_ref().is_some_and(|token| {
             self.execution_account_pool
                 .auth_managers()
                 .iter()
                 .any(|(id, manager)| {
-                    Some(id.as_str()) == account_pool.active_profile_id.as_deref()
+                    Some(id.as_str()) == quota_profile_id
                         && manager
                             .auth_cached()
                             .and_then(|auth| auth.get_token().ok())
@@ -1600,7 +1619,18 @@ impl AccountRequestProcessor {
                 .as_ref()
                 .zip(requested_user_id.as_ref())
                 .is_none_or(|(actual, expected)| actual == expected);
+        let exhausted_selection_matches = match exhausted_selection {
+            Some(expected) => {
+                selection_store
+                    .try_load()
+                    .map_err(|error| internal_error(error.to_string()))?
+                    .map(|state| (state.active_profile_id, state.selection_revision))
+                    == Some(expected)
+            }
+            None => true,
+        };
         if !matches_request_owner
+            || !exhausted_selection_matches
             || !backend_matches_request
             || owner_changes.borrow().owner_generation != requested_owner_generation
             || account_pool.enabled

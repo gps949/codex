@@ -3,6 +3,7 @@
 use super::*;
 use app_test_support::ChatGptIdTokenClaims;
 use app_test_support::encode_id_token;
+use codex_app_server_protocol::AccountLoginCompletedNotification;
 use codex_app_server_protocol::ChatgptAuthTokensRefreshResponse;
 use codex_app_server_protocol::ServerRequest;
 use pretty_assertions::assert_eq;
@@ -91,7 +92,15 @@ async fn login(app: &mut TestAppServer, user: &str, account: &str, revision: &st
             Some("pro".to_string()),
         )
         .await?;
-    wait_for_response(app, id).await
+    wait_for_response(app, id).await?;
+    // The RPC responds before the independent host owner is synchronized for Remote.
+    let completed: AccountLoginCompletedNotification = timeout(
+        DEFAULT_TIMEOUT,
+        app.read_notification("account/login/completed"),
+    )
+    .await??;
+    assert!(completed.success, "{completed:?}");
+    Ok(())
 }
 
 async fn open_relay(app: &mut TestAppServer, listener: &TcpListener) -> Result<RelayClient> {

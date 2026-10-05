@@ -54,9 +54,10 @@ async fn identity_is_rechecked_after_backend_response(
     let request_entered = Arc::clone(&entered);
     let response_release = Arc::clone(&release);
     let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let backend_url = format!("http://{}", listener.local_addr()?);
     std::fs::write(
         home.path().join("config.toml"),
-        format!("chatgpt_base_url = \"http://{}\"\n", listener.local_addr()?),
+        format!("chatgpt_base_url = {backend_url:?}\n"),
     )?;
     let expected_authorization = format!("Bearer {old_token}");
     let router = Router::new().route(
@@ -133,6 +134,8 @@ async fn identity_is_rechecked_after_backend_response(
         "primary": {"usedPercent": 42, "windowDurationMins": 60, "resetsAt": 2000000000}
     });
     let expected: GetAccountRateLimitsResponse = serde_json::from_value(json!({
+        "resetOwnerKey": super::rate_limits::expected_reset_owner(&backend_url, "workspace-a", "user-a"),
+        "pendingResetCredit": null,
         "ordinaryUsageAllowed": if verified { Some(true) } else { None },
         "accountId": "workspace-a",
         "rateLimits": snapshot, "rateLimitsByLimitId": {"codex": snapshot}
