@@ -20,8 +20,7 @@ async fn enabling_a_new_service_requires_its_own_token_without_saving() -> anyho
     }))?).await;
     assert!(
         result
-            .err()
-            .expect("missing token is rejected")
+            .expect_err("missing token is rejected")
             .to_string()
             .contains("Enter a token")
     );

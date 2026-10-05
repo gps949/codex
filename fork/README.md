@@ -242,3 +242,5 @@ Account profiles and credentials stay on the host under `CODEX_HOME`; credential
 The [Jev/Clef decision-model research](DECISION_MODELS.md) explains potential tool-selection and reasoning-effort improvements, their cost, and what needs measurement. They default to off; choose one in the manager, with no simultaneous calls. They do not replace account identity, quota, or scheduling rules.
 
 Cross-workspace concurrent routing, automatic migration of old opaque compacted history, and real Personal/Business/mobile acceptance still need further work. Automated fixture coverage and release archive checks do not establish those real-account behaviors.
+
+[Automatic model selection design](MODEL_ROUTING_DESIGN.md) describes a proposed on/off mode and 0–100 preference for main tasks and subagents. Automatic model selection is not implemented in this release.

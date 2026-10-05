@@ -42,7 +42,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Prettier on fork-owned files
-        run: npx --yes prettier@3.5.3 --check FORK_MAINTENANCE.md fork/README.md fork/README.zh-CN.md fork/ACCOUNT_MANAGER.md fork/ACCOUNT_MANAGER.zh-CN.md fork/DECISION_MODELS.md fork/DECISION_MODELS.zh-CN.md .github/workflows/fork-ci.yml .github/workflows/fork-release.yml .github/workflows/upstream-sync-check.yml codex-rs/app-server/src/account_management/webui
+        run: npx --yes prettier@3.5.3 --check FORK_MAINTENANCE.md fork/README.md fork/README.zh-CN.md fork/ACCOUNT_MANAGER.md fork/ACCOUNT_MANAGER.zh-CN.md fork/DECISION_MODELS.md fork/DECISION_MODELS.zh-CN.md fork/MODEL_ROUTING_DESIGN.md fork/MODEL_ROUTING_DESIGN.zh-CN.md .github/workflows/fork-ci.yml .github/workflows/fork-release.yml .github/workflows/upstream-sync-check.yml codex-rs/app-server/src/account_management/webui
 
       - name: Account manager browser lifecycle
         run: node codex-rs/app-server/src/account_management/web_lifecycle_browser_tests.cjs
@@ -103,7 +103,7 @@ jobs:
               package(=codex-app-server-protocol) or
               (package(=codex-models-manager) and test(warmup)) or
               (package(=codex-core) and (test(account_failover) or test(failover) or test(account_transition) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration) or test(account_window_warmup) or test(execution_auth) or test(account_pool_strategy) or test(account_pool_recovery) or test(account_pool_metadata_recovery) or test(account_recovered_reentry) or test(reset_credit) or test(captured_maintenance) or test(model_specific_limit) or test(durable_) or test(api_account_execution) or test(credit_expiry) or test(decision_advisor) or test(skill_advisor) or test(skill_suggestion) or test(tool_search) or test(search_tool))) or
-              (package(=codex-tui) and (test(account) or test(warmup) or test(selection_row_layout) or test(chatwidget::tests::usage))) or
+              (package(=codex-tui) and (test(account) or test(warmup) or test(selection_row_layout) or test(reset_credit) or test(chatwidget::tests::usage))) or
               (package(=codex-cli) and ((kind(test) and (binary(=account_selection) or binary(=account_manager_names) or binary(=account_primary) or binary(=account_manager_preferences) or binary(=decision_advisor))) or (kind(bin) and binary(=codex) and (test(doctor::updates) or test(quota_observations) or test(account_cmd::quota_display) or test(account_cmd::display) or test(account_selector) or test(account_primary) or test(account_manager))))) or
               (package(=codex-app-server-transport) and (test(host_policy_retry) or test(primary_login_handover))) or
               (package(=codex-app-server) and (test(account_pool) or test(mobile_account) or test(mobile_quota) or test(pool_warnings) or test(pool_warning) or test(guarded_pool_notification) or test(status_overlay) or test(workspace_routing) or test(rate_limit_reset) or test(rate_limits_identity) or test(native_status) or test(mobile_warmup) or test(get_account_rate_limits) or test(login_survives_same_owner_token_refresh) or test(account_management) or test(native_account) or test(primary_login) or test(host_login) or test(remote_control) or test(outgoing_owned_request) or test(user_verification_ownership)))
