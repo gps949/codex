@@ -33,6 +33,9 @@ impl FrozenAccountInventory {
         let back = |page| nav("Back", "返回", String::new(), page);
         let close = || choice(language.text("Close", "关闭"), "", MenuAction::Close);
         match page {
+            MenuPage::Quick(_) | MenuPage::QuickOptions(_) | MenuPage::Strategy(_) => {
+                self.quick_question(page, language, now)
+            }
             MenuPage::Home => MenuQuestion::new(
                 language.text("Manage accounts", "管理账号"),
                 vec![
@@ -155,6 +158,7 @@ impl FrozenAccountInventory {
                         MenuPage::ChoosePage {
                             first: 0,
                             end: self.pages(),
+                            origin: MenuOrigin::Overview(page),
                         },
                     ),
                     read(
@@ -178,9 +182,17 @@ impl FrozenAccountInventory {
                     back(MenuPage::Home),
                 ],
             ),
-            MenuPage::ChoosePage { first, end } => {
-                let first = first.min(self.pages() - 1);
-                let end = end.min(self.pages()).max(first + 1);
+            MenuPage::ChoosePage { first, end, origin } => {
+                let (pages, stride) = match origin {
+                    MenuOrigin::Quick(_) => (self.quick_pages(), QUICK_PAGE_SIZE),
+                    MenuOrigin::Overview(_) | MenuOrigin::Settings(_) => (self.pages(), PAGE_SIZE),
+                };
+                let list_page = |page| match origin {
+                    MenuOrigin::Quick(_) => MenuPage::Quick(page),
+                    MenuOrigin::Overview(_) | MenuOrigin::Settings(_) => MenuPage::Overview(page),
+                };
+                let first = first.min(pages - 1);
+                let end = end.min(pages).max(first + 1);
                 let mut choices = Vec::new();
                 if end - first <= 3 {
                     for page in first..end {
@@ -188,10 +200,14 @@ impl FrozenAccountInventory {
                             &format!("{} {}", language.text("Page", "第"), page + 1),
                             format!(
                                 "{}–{}",
-                                page * PAGE_SIZE + 1,
-                                ((page + 1) * PAGE_SIZE).min(self.accounts.len())
+                                page * stride + 1,
+                                ((page + 1) * stride).min(match origin {
+                                    MenuOrigin::Quick(_) => self.quick_indices().len(),
+                                    MenuOrigin::Overview(_) | MenuOrigin::Settings(_) =>
+                                        self.accounts.len(),
+                                })
                             ),
-                            MenuAction::Page(MenuPage::Overview(page)),
+                            MenuAction::Page(list_page(page)),
                         ));
                     }
                 } else {
@@ -200,11 +216,11 @@ impl FrozenAccountInventory {
                         choices.push(choice(
                             &format!("{} {}–{}", language.text("Pages", "页码"), first + 1, end),
                             "",
-                            MenuAction::Page(MenuPage::ChoosePage { first, end }),
+                            MenuAction::Page(MenuPage::ChoosePage { first, end, origin }),
                         ));
                     }
                 }
-                choices.push(back(MenuPage::Overview(first)));
+                choices.push(back(origin.page()));
                 MenuQuestion::new(language.text("Choose a page", "选择页码"), choices)
             }
             MenuPage::Detail(index)
@@ -312,10 +328,10 @@ impl FrozenAccountInventory {
                     }
                 );
                 let choices = match page {
-                    0 => vec![action("Rotation strategy", "轮换策略", match settings.effective_rotation_strategy() {
-                            codex_config::AccountPoolRotationStrategy::FillFirst => language.text("Currently fill first; confirm to use earliest reset", "当前顺序用完；确认后使用最早重置优先"),
-                            codex_config::AccountPoolRotationStrategy::EarliestReset => language.text("Currently earliest reset; confirm to use fill first", "当前最早重置优先；确认后顺序用完"),
-                        }, MenuOperation::Setting(0)),
+                    0 => vec![nav("Rotation strategy", "轮换策略", match settings.effective_rotation_strategy() {
+                            codex_config::AccountPoolRotationStrategy::FillFirst => language.text("By priority", "按优先级"),
+                            codex_config::AccountPoolRotationStrategy::EarliestReset => language.text("By reset time", "按重置时间"),
+                        }.into(), MenuPage::Strategy(MenuOrigin::Settings(0))),
                         toggle("Window warmup", "窗口预热", settings.effective_window_warmup(), 1), toggle("Resume after reset", "重置后接续", settings.resume_after_reset.unwrap_or(true), 2),
                         nav("More settings", "更多设置", "".into(), MenuPage::Settings(1)), back(MenuPage::Home)],
                     1 => vec![action("Reset wait budget", "等待重置时长", &wait_description, MenuOperation::Setting(3)),
@@ -324,42 +340,47 @@ impl FrozenAccountInventory {
                             codex_config::AutoResetCredits::WhenPoolExhausted => language.text("Currently after pool exhaustion; confirm to never redeem automatically", "当前订阅池耗尽后用券；确认后不再自动兑换"),
                         }, MenuOperation::Setting(4)),
                         toggle("Return to preferred", "回到首选账号", settings.effective_return_to_preferred(), 5), nav("Pool actions", "账号池操作", "".into(), MenuPage::Settings(2)), back(MenuPage::Settings(0))],
-                    _ => vec![action("Use subscriptions automatically", "自动使用订阅池", language.text("Exit manual API selection; preserve quota cooldowns", "退出手动 API 选择；保留额度冷却"), MenuOperation::Automatic),
+                    _ => vec![choice(language.text("Use subscriptions automatically", "自动使用订阅池"), language.text("Exit manual API selection; preserve quota cooldowns", "退出手动 API 选择；保留额度冷却"), MenuAction::Automatic),
                         action("Add subscription account", "添加订阅账号", language.text("Start browser verification on this host", "开始主机上的浏览器验证流程"), MenuOperation::Add),
                         nav("Refresh pool in batches", "分批刷新账号池", language.text("Check at most four accounts per confirmation", "每次最多查询 4 个账号").into(), MenuPage::Refresh(0)),
                         action("Disable paid fallback", "关闭付费兜底", language.text("Keep third-party API available for manual selection only", "第三方 API 仅保留手动选择"), MenuOperation::FallbackOff), back(MenuPage::Settings(1))],
                 };
                 MenuQuestion::new(language.text("Pool settings", "账号池设置"), choices)
             }
-            MenuPage::Refresh(first) => MenuQuestion::new(
-                language.text("Refresh quota batch", "分批刷新额度"),
-                vec![
-                    read(
-                        "Check this batch",
-                        "查询本批",
-                        language.text(
-                            "At most four subscription accounts; API targets are skipped",
-                            "最多查询 4 个订阅账号；跳过 API",
-                        ),
-                        MenuOperation::Refresh(first),
+            MenuPage::Refresh(first) => {
+                let first = first.min(self.accounts.len().saturating_sub(1));
+                let mut choices = vec![read(
+                    "Check this batch",
+                    "查询本批",
+                    language.text(
+                        "At most four subscription accounts; API targets are skipped",
+                        "最多查询 4 个订阅账号；跳过 API",
                     ),
-                    nav(
+                    MenuOperation::Refresh(first),
+                )];
+                if self.accounts.len() > PAGE_SIZE {
+                    let next = if first + PAGE_SIZE < self.accounts.len() {
+                        first + PAGE_SIZE
+                    } else {
+                        0
+                    };
+                    choices.push(nav(
                         "Next batch",
                         "下一批",
                         format!(
                             "{}–{}",
-                            first + PAGE_SIZE + 1,
-                            (first + 2 * PAGE_SIZE).min(self.accounts.len())
+                            next + 1,
+                            (next + PAGE_SIZE).min(self.accounts.len())
                         ),
-                        MenuPage::Refresh(if first + PAGE_SIZE < self.accounts.len() {
-                            first + PAGE_SIZE
-                        } else {
-                            0
-                        }),
-                    ),
-                    back(MenuPage::Settings(2)),
-                ],
-            ),
+                        MenuPage::Refresh(next),
+                    ));
+                }
+                choices.push(back(MenuPage::Settings(2)));
+                MenuQuestion::new(
+                    language.text("Refresh quota batch", "分批刷新额度"),
+                    choices,
+                )
+            }
             MenuPage::Credits(_, _) | MenuPage::Confirm | MenuPage::Result | MenuPage::Login => {
                 unreachable!("session-owned page")
             }

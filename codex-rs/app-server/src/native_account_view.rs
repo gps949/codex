@@ -12,11 +12,37 @@ pub(crate) mod actions;
 mod details;
 #[path = "native_account_pages.rs"]
 mod pages;
+#[path = "native_account_quick.rs"]
+mod quick;
 #[path = "native_account_view_quota.rs"]
 mod quota_details;
 
 pub(crate) const PAGE_SIZE: usize = 4;
+const QUICK_PAGE_SIZE: usize = 2;
 const MAX_ACCOUNTS: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeMenuEntry {
+    Quick,
+    Manage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MenuOrigin {
+    Quick(usize),
+    Overview(usize),
+    Settings(usize),
+}
+
+impl MenuOrigin {
+    fn page(self) -> MenuPage {
+        match self {
+            Self::Quick(page) => MenuPage::Quick(page),
+            Self::Overview(page) => MenuPage::Overview(page),
+            Self::Settings(page) => MenuPage::Settings(page),
+        }
+    }
+}
 
 pub(crate) struct FrozenAccountInventory {
     accounts: Vec<FrozenAccount>,
@@ -56,19 +82,27 @@ enum AccountDetail {
     Api {
         account: codex_login::ApiAccount,
         has_key: bool,
+        credential_revision: Option<String>,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MenuPage {
     Home,
+    Quick(usize),
+    QuickOptions(usize),
+    Strategy(MenuOrigin),
     Overview(usize),
     Detail(usize),
     Usage(usize),
     Actions(usize),
     More(usize),
     Membership(usize),
-    ChoosePage { first: usize, end: usize },
+    ChoosePage {
+        first: usize,
+        end: usize,
+        origin: MenuOrigin,
+    },
     Browse(usize),
     Settings(usize),
     Primary,
@@ -83,10 +117,9 @@ pub(crate) enum MenuPage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MenuOperation {
     Reload,
-    Automatic,
     Refresh(usize),
+    RefreshQuick(usize),
     RefreshAccount(usize),
-    Use(usize),
     Retry(usize),
     Disable(usize),
     Enable(usize),
@@ -100,6 +133,7 @@ pub(crate) enum MenuOperation {
     PrimaryLogout,
     Credits(usize),
     Redeem(usize, usize),
+    RetryPendingCredit(usize),
     ApiUse(usize),
     ApiRemove(usize),
     ApiFallback(usize),
@@ -114,6 +148,9 @@ pub(crate) enum MenuAction {
     Page(MenuPage),
     Prepare(MenuOperation),
     Execute(MenuOperation),
+    SelectSubscription(usize),
+    Automatic,
+    SetStrategy(codex_config::AccountPoolRotationStrategy),
     Apply,
     Language,
     Close,
@@ -164,7 +201,7 @@ fn bounded_description(value: &str) -> String {
 }
 
 impl FrozenAccountInventory {
-    pub(crate) fn from_inventory(inventory: AccountManagerInventory) -> Self {
+    pub(crate) fn from_inventory(mut inventory: AccountManagerInventory) -> Self {
         let api_active = match &inventory.api_selection {
             codex_login::ApiAccountSelection::Subscription => None,
             codex_login::ApiAccountSelection::Manual { profile_id } => Some(profile_id),
@@ -173,10 +210,18 @@ impl FrozenAccountInventory {
             .accounts
             .len()
             .saturating_add(inventory.api_accounts.len());
+        inventory.accounts.sort_by_key(|account| {
+            api_active.is_some()
+                || inventory.active_profile_id.as_ref() != Some(&account.profile_id)
+        });
+        inventory
+            .api_accounts
+            .sort_by_key(|view| api_active != Some(&view.account.id));
+        let subscription_limit = MAX_ACCOUNTS - usize::from(api_active.is_some());
         let mut accounts = inventory
             .accounts
             .into_iter()
-            .take(MAX_ACCOUNTS)
+            .take(subscription_limit)
             .map(|account| FrozenAccount {
                 current: api_active.is_none()
                     && inventory.active_profile_id.as_ref() == Some(&account.profile_id),
@@ -220,6 +265,7 @@ impl FrozenAccountInventory {
                     detail: AccountDetail::Api {
                         account: view.account,
                         has_key: view.has_key,
+                        credential_revision: view.credential_revision,
                     },
                 }),
         );

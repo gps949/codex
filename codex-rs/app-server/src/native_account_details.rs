@@ -55,7 +55,7 @@ impl FrozenAccountInventory {
                                     choices.push(nav("Quota check and status", "查询结果与状态", status, page));
                                 }
                             }
-                            AccountDetail::Api { account, has_key } => choices.push(nav("API details", "API 详情", format!("{}\n{}\n{}\n{}", account.model, account.base_url,
+                            AccountDetail::Api { account, has_key, .. } => choices.push(nav("API details", "API 详情", format!("{}\n{}\n{}\n{}", account.model, account.base_url,
                                 if *has_key { language.text("Key configured", "已配置密钥") } else { language.text("Key missing", "缺少密钥") }, language.text("Provider charges apply; no subscription quota", "使用由提供商计费，不适用订阅额度")), page)),
                         }
                         choices.push(back(MenuPage::Detail(index)));
@@ -67,14 +67,14 @@ impl FrozenAccountInventory {
                             AccountDetail::Subscription { .. } => {
                                 let signed_in = account.login_state == "signedIn";
                                 if !signed_in { choices.push(action("Finish sign-in", "完成登录", language.text("Complete browser verification before checking quota or credits", "完成浏览器验证后才能查询额度或重置券"), MenuOperation::Relogin(index))); }
-                                if !account.disabled && signed_in && matches!(account.state.as_str(), "ready" | "paused") { choices.push(action("Use this account", "使用此账号", language.text("Applies to subsequent inference requests; failover stays enabled", "应用于后续推理请求；仍可自动切换"), MenuOperation::Use(index))); }
+                                if !account.disabled && signed_in && matches!(account.state.as_str(), "ready" | "paused") { choices.push(choice(language.text("Use this account", "使用此账号"), language.text("Applies to subsequent inference requests; failover stays enabled", "应用于后续推理请求；仍可自动切换"), MenuAction::SelectSubscription(index))); }
                                 if !account.disabled && signed_in { choices.push(read("Refresh quota", "刷新额度", language.text("Check backend quota; no generating request or credit redemption", "查询后端额度；不会发起推理或兑换券"), MenuOperation::RefreshAccount(index))); }
                                 if !account.disabled && signed_in && account.state == "coolingDown" { choices.push(action("Retry after external reset", "外部重置后重试", language.text("Clear local cooldown for one probe; no credit is used", "清除本地冷却以尝试一次；不会用券"), MenuOperation::Retry(index))); }
                                 if !account.disabled && signed_in { choices.push(read("Reset credits", "重置券", language.text("Load available credits; using one needs a separate confirmation", "查看可用券；使用需单独确认"), MenuOperation::Credits(index))); }
                                 choices.push(nav("More actions", "更多操作", "".into(), MenuPage::More(index)));
                             }
-                            AccountDetail::Api { has_key, .. } => {
-                                if !account.disabled && *has_key {
+                            AccountDetail::Api { has_key, credential_revision, .. } => {
+                                if !account.disabled && *has_key && credential_revision.is_some() {
                                     choices.push(action("Use paid API", "使用付费 API", language.text("Select this provider manually; subsequent usage may be billed", "手动选择此提供商；后续使用可能产生费用"), MenuOperation::ApiUse(index)));
                                     choices.push(action("Enable paid fallback", "启用付费兜底", language.text("Opt in for this provider after subscription exhaustion", "明确允许订阅耗尽后使用此提供商"), MenuOperation::ApiFallback(index)));
                                 }
