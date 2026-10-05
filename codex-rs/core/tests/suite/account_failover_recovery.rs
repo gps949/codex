@@ -518,6 +518,27 @@ async fn run_reset_credit_case(
     reset_timing: ResetTiming,
     consume_response: ResponseTemplate,
 ) -> anyhow::Result<(usize, usize)> {
+    run_reset_credit_case_with_history(
+        mode,
+        reset_timing,
+        consume_response,
+        ManualResetHistory::Clear,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum ManualResetHistory {
+    Clear,
+    Pending,
+}
+
+async fn run_reset_credit_case_with_history(
+    mode: AutoResetCredits,
+    reset_timing: ResetTiming,
+    consume_response: ResponseTemplate,
+    history: ManualResetHistory,
+) -> anyhow::Result<(usize, usize)> {
     let server = MockServer::start().await;
     mount_denied_pool_usage(&server, "backup-acct", "access-backup").await;
     let mut error = json!({"type": "usage_limit_reached", "message": "single profile exhausted"});
@@ -540,7 +561,15 @@ async fn run_reset_credit_case(
     let backend_base_url = format!("{}/backend-api", server.uri());
     let mut builder = test_codex()
         .without_auth()
-        .with_pre_build_hook(write_backup_only_account_pool_fixture)
+        .with_pre_build_hook(move |home| {
+            write_backup_only_account_pool_fixture(home);
+            if matches!(history, ManualResetHistory::Pending) {
+                std::fs::write(home.join(".manual-rate-limit-reset-credits.json"), serde_json::to_vec(&json!({
+                    "version":2, "operations":[{"ownerDigest":"a".repeat(64),"idempotencyKey":"original-manual-request",
+                        "creditId":"synthetic-manual-credit", "phase":{"state":"pending"}}]
+                })).expect("serialize synthetic pending reset")).expect("write synthetic pending reset");
+            }
+        })
         .with_config(move |config| {
             config.chatgpt_base_url = backend_base_url;
             config.account_pool.auto_reset_credits = Some(mode);
@@ -1428,5 +1457,21 @@ async fn unknown_backend_reset_does_not_treat_reprobe_as_free_recovery() -> anyh
             expected
         );
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_reset_credit_pending_prevents_an_exhausted_turn_from_spending_a_second_credit()
+-> anyhow::Result<()> {
+    assert_eq!(
+        run_reset_credit_case_with_history(
+            AutoResetCredits::WhenPoolExhausted,
+            ResetTiming::Known { minutes: 240 },
+            ResponseTemplate::new(200).set_body_json(json!({"code":"reset","windows_reset":2})),
+            ManualResetHistory::Pending,
+        )
+        .await?,
+        (0, 0)
+    );
     Ok(())
 }

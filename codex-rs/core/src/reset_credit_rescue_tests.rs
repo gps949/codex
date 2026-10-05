@@ -349,6 +349,38 @@ async fn corrupt_pending_reset_operation_blocks_automatic_spending() -> anyhow::
 }
 
 #[tokio::test]
+async fn unconfirmed_manual_reset_blocks_a_new_automatic_consume_post() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(/*s*/ 500))
+        .expect(/*r*/ 0)
+        .mount(&server)
+        .await;
+    let fixture =
+        exhausted_credit_fixture(format!("{}/backend-api", server.uri()), /*count*/ 2).await?;
+    let bytes = serde_json::to_vec(&json!({"version":2,"operations":[{
+        "ownerDigest":"a".repeat(64),"idempotencyKey":"manual-original","creditId":"manual-credit","phase":{"state":"pending"}
+    }]}))?;
+    let path = fixture
+        .config
+        .codex_home
+        .join(".manual-rate-limit-reset-credits.json");
+    std::fs::write(&path, &bytes)?;
+    assert!(
+        try_reset_credit_rescue(
+            &fixture.execution,
+            &fixture.failed,
+            &fixture.config,
+            &CancellationToken::new()
+        )
+        .await
+        .is_none()
+    );
+    assert_eq!(std::fs::read(path)?, bytes);
+    Ok(())
+}
+
+#[tokio::test]
 async fn cancellation_after_a_consume_post_retains_the_ambiguous_request_id() -> anyhow::Result<()>
 {
     let server = MockServer::start().await;

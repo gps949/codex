@@ -80,3 +80,30 @@ fn confirmed_recovery_requires_a_new_quota_epoch_before_another_operation() -> a
     assert_eq!(next.request_id(), "replacement");
     Ok(())
 }
+
+#[test]
+fn manual_unknown_history_blocks_new_automatic_spending_but_keeps_the_original_replay()
+-> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let pending =
+        ResetCreditOperation::prepare(home.path(), scope(/*epoch*/ None), "original-request")?;
+    let path = pending.path;
+    let original = std::fs::read(&path)?;
+    std::fs::write(
+        home.path().join(".manual-rate-limit-reset-credits.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1, "operations": [{"ownerDigest": "a".repeat(64), "creditId": "manual-credit", "idempotencyKey": "manual-request"}]
+        }))?,
+    )?;
+    let resumed =
+        ResetCreditOperation::prepare(home.path(), scope(Some(456)), "replacement-request")?;
+    assert_eq!(
+        (resumed.request_id(), std::fs::read(&path)?),
+        ("original-request", original)
+    );
+    resumed.complete(ResetCreditCompletion::NoCredit)?;
+    let completed = std::fs::read(&path)?;
+    assert!(ResetCreditOperation::prepare(home.path(), scope(Some(456)), "new-request").is_err());
+    assert_eq!(std::fs::read(path)?, completed);
+    Ok(())
+}

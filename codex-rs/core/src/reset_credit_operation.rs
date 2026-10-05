@@ -281,6 +281,12 @@ impl ResetCreditOperation {
                 } => {}
             }
         }
+        // An existing owner-bound pending operation above reuses its original request.
+        // Only new spending is paused by an unresolved manual operation.
+        anyhow::ensure!(
+            !codex_login::automatic_reset_spending_blocked(codex_home)?,
+            "Manual reset remains unconfirmed; no new automatic credit was spent"
+        );
         anyhow::ensure!(
             !proposed_request_id.is_empty() && proposed_request_id.len() <= 128,
             "Reset operation ID is invalid"
