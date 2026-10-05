@@ -218,27 +218,21 @@ impl App {
         &mut self,
         app_server: &AppServerSession,
         request_id: u64,
-        idempotency_key: String,
-        credit_id: Option<String>,
+        operation: super::reset_credit_operation::ResetCreditOperation,
     ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 RATE_LIMIT_RESET_REQUEST_TIMEOUT,
-                consume_rate_limit_reset_credit_request(
-                    request_handle,
-                    idempotency_key.clone(),
-                    credit_id.clone(),
-                ),
+                consume_rate_limit_reset_credit_request(request_handle, operation.clone()),
             )
             .await
             .map_err(|_| "account/rateLimitResetCredit/consume timed out in TUI".to_string())
             .and_then(|result| result.map_err(|err| err.to_string()));
             app_event_tx.send(AppEvent::RateLimitResetCreditConsumed {
                 request_id,
-                idempotency_key,
-                credit_id,
+                operation,
                 result,
             });
         });
@@ -988,16 +982,16 @@ pub(super) async fn fetch_thread_usage(
 
 pub(super) async fn consume_rate_limit_reset_credit_request(
     request_handle: AppServerRequestHandle,
-    idempotency_key: String,
-    credit_id: Option<String>,
+    operation: super::reset_credit_operation::ResetCreditOperation,
 ) -> Result<ConsumeAccountRateLimitResetCreditResponse> {
     let request_id = RequestId::String(format!("consume-rate-limit-reset-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::ConsumeAccountRateLimitResetCredit {
             request_id,
             params: ConsumeAccountRateLimitResetCreditParams {
-                idempotency_key,
-                credit_id,
+                idempotency_key: operation.idempotency_key,
+                credit_id: operation.credit_id,
+                expected_owner_key: Some(operation.owner_key),
             },
         })
         .await

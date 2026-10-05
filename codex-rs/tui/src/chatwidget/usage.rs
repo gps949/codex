@@ -1,8 +1,10 @@
+use crate::app::reset_credit_operation::ResetCreditOperation;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditOutcome;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::RateLimitResetCreditsSummary;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
@@ -10,8 +12,9 @@ use super::reset_credits::reset_credit_options;
 use super::*;
 
 const USAGE_MENU_VIEW_ID: &str = "usage-menu";
-const RATE_LIMIT_RESET_VIEW_ID: &str = "rate-limit-reset";
-const RATE_LIMIT_RESET_CONFIRMATION_VIEW_ID: &str = "rate-limit-reset-confirmation";
+pub(super) const RATE_LIMIT_RESET_VIEW_ID: &str = "rate-limit-reset";
+pub(super) const RATE_LIMIT_RESET_CONFIRMATION_VIEW_ID: &str = "rate-limit-reset-confirmation";
+static NEXT_RESET_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 impl ChatWidget {
     pub(super) fn open_usage_menu(&mut self) {
@@ -32,12 +35,18 @@ impl ChatWidget {
     fn usage_menu_params(&self) -> SelectionViewParams {
         let reset_eligible = self.has_chatgpt_account;
         let (reset_action_enabled, reset_description) =
-            match (reset_eligible, self.available_rate_limit_reset_credits) {
-                (true, Some(available_count)) if available_count > 0 => {
-                    (true, format!("{available_count} available"))
+            if self.pending_rate_limit_reset_operation.is_some()
+                || self.rate_limit_reset_persistence_error.is_some()
+            {
+                (true, "Review pending reset".to_string())
+            } else {
+                match (reset_eligible, self.available_rate_limit_reset_credits) {
+                    (true, Some(available_count)) if available_count > 0 => {
+                        (true, format!("{available_count} available"))
+                    }
+                    (true, None) => (true, "Check availability".to_string()),
+                    (true, Some(_)) | (false, _) => (false, "None available".to_string()),
                 }
-                (true, None) => (true, "Check availability".to_string()),
-                (true, Some(_)) | (false, _) => (false, "None available".to_string()),
             };
 
         SelectionViewParams {
@@ -97,7 +106,7 @@ impl ChatWidget {
 
     pub(crate) fn show_rate_limit_reset_loading_popup(&mut self) -> u64 {
         self.clear_pending_rate_limit_reset_hint();
-        self.pending_rate_limit_reset_idempotency_key = None;
+        self.rate_limit_reset_draft = None;
         self.rate_limit_reset_picker_request_id = None;
         let request_id = self.take_next_rate_limit_reset_request_id();
         self.pending_rate_limit_reset_request_id = Some(request_id);
@@ -120,18 +129,35 @@ impl ChatWidget {
         &mut self,
         request_id: u64,
         snapshots: Vec<RateLimitSnapshot>,
+        owner_key: Option<String>,
         result: Result<RateLimitResetCreditsSummary, String>,
     ) -> bool {
         if self.pending_rate_limit_reset_request_id != Some(request_id) {
             return false;
         }
         self.pending_rate_limit_reset_request_id = None;
+        self.set_reset_credit_owner(owner_key);
         for snapshot in snapshots {
             self.on_rate_limit_snapshot(Some(snapshot));
         }
 
         let mut shows_picker = false;
         let params = match result {
+            Ok(_) if self.rate_limit_reset_persistence_error.is_some() => {
+                Self::reset_refresh_params(
+                    self.rate_limit_reset_persistence_error
+                        .as_deref()
+                        .unwrap_or_default(),
+                )
+            }
+            Ok(_) if self.pending_rate_limit_reset_operation.is_some() => {
+                self.pending_reset_credit_params()
+            }
+            Ok(_) if self.rate_limit_reset_owner_key.is_none() => {
+                Self::rate_limit_reset_message_params(
+                    "This server cannot verify the reset's account. Upgrade Codex and refresh usage before using a reset.",
+                )
+            }
             Ok(response) => {
                 let available_count = response.available_count;
                 let params = if available_count > 0 {
@@ -164,6 +190,11 @@ impl ChatWidget {
         picker_request_id: u64,
         reset_credits: &RateLimitResetCreditsSummary,
     ) -> SelectionViewParams {
+        let Some(owner_key) = self.rate_limit_reset_owner_key.as_ref() else {
+            return Self::rate_limit_reset_message_params(
+                "This server cannot verify the reset's account. Upgrade Codex and refresh usage before using a reset.",
+            );
+        };
         let confirmation_gate = Arc::new(AtomicBool::new(true));
         let options = reset_credit_options(reset_credits, self.clock_format);
         if options.is_empty() {
@@ -175,6 +206,7 @@ impl ChatWidget {
             .into_iter()
             .map(|option| {
                 let confirmation_gate = confirmation_gate.clone();
+                let owner_key = owner_key.clone();
                 let credit_id = option.credit_id;
                 let reset_title = option.name.clone();
                 let reset_detail = option.detail;
@@ -189,6 +221,7 @@ impl ChatWidget {
                         if confirmation_gate.swap(false, Ordering::AcqRel) {
                             tx.send(AppEvent::OpenRateLimitResetConfirmation {
                                 picker_request_id,
+                                owner_key: owner_key.clone(),
                                 confirmation_gate: confirmation_gate.clone(),
                                 credit_id: credit_id.clone(),
                                 reset_title: reset_title.clone(),
@@ -221,9 +254,12 @@ impl ChatWidget {
         }
     }
 
+    // Keep the captured owner explicit beside the existing backend confirmation copy.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn show_rate_limit_reset_confirmation(
         &mut self,
         picker_request_id: u64,
+        owner_key: String,
         confirmation_gate: Arc<AtomicBool>,
         credit_id: Option<String>,
         reset_title: String,
@@ -231,6 +267,8 @@ impl ChatWidget {
         reset_description: String,
     ) -> bool {
         if self.rate_limit_reset_picker_request_id != Some(picker_request_id)
+            || self.rate_limit_reset_owner_key.as_deref() != Some(owner_key.as_str())
+            || self.pending_rate_limit_reset_operation.is_some()
             || self
                 .bottom_pane
                 .selected_index_for_active_view(RATE_LIMIT_RESET_VIEW_ID)
@@ -239,8 +277,12 @@ impl ChatWidget {
             confirmation_gate.store(true, Ordering::Release);
             return false;
         }
-        let idempotency_key = Uuid::new_v4().to_string();
-        self.pending_rate_limit_reset_idempotency_key = Some(idempotency_key.clone());
+        let operation = ResetCreditOperation {
+            owner_key,
+            idempotency_key: Uuid::new_v4().to_string(),
+            credit_id,
+        };
+        self.rate_limit_reset_draft = Some(operation.clone());
         let no_confirmation_gate = confirmation_gate.clone();
         let subtitle = reset_detail.map_or_else(
             || reset_title.clone(),
@@ -257,8 +299,7 @@ impl ChatWidget {
                     description: Some(reset_description),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::ConsumeRateLimitResetCredit {
-                            idempotency_key: idempotency_key.clone(),
-                            credit_id: credit_id.clone(),
+                            operation: operation.clone(),
                         });
                     })],
                     dismiss_on_select: true,
@@ -285,15 +326,18 @@ impl ChatWidget {
 
     pub(crate) fn start_rate_limit_reset_consumption(
         &mut self,
-        idempotency_key: &str,
+        operation: &ResetCreditOperation,
     ) -> Option<u64> {
-        if self.pending_rate_limit_reset_idempotency_key.as_deref() != Some(idempotency_key) {
+        if !self.reset_credit_operation_can_start(operation) {
             return None;
         }
-        Some(self.show_rate_limit_reset_consuming_popup())
+        self.pending_rate_limit_reset_operation = Some(operation.clone());
+        let request_id = self.show_rate_limit_reset_consuming_popup();
+        self.rate_limit_reset_active_operation = Some((request_id, operation.clone()));
+        Some(request_id)
     }
 
-    fn rate_limit_reset_message_params(message: &str) -> SelectionViewParams {
+    pub(super) fn rate_limit_reset_message_params(message: &str) -> SelectionViewParams {
         SelectionViewParams {
             view_id: Some(RATE_LIMIT_RESET_VIEW_ID),
             title: Some("Usage limit resets".to_string()),
@@ -307,7 +351,7 @@ impl ChatWidget {
         }
     }
 
-    fn reset_refresh_params(message: &str) -> SelectionViewParams {
+    pub(super) fn reset_refresh_params(message: &str) -> SelectionViewParams {
         SelectionViewParams {
             view_id: Some(RATE_LIMIT_RESET_VIEW_ID),
             title: Some("Usage limit resets".to_string()),
@@ -333,7 +377,7 @@ impl ChatWidget {
 
     pub(crate) fn show_rate_limit_reset_consuming_popup(&mut self) -> u64 {
         self.clear_pending_rate_limit_reset_hint();
-        self.pending_rate_limit_reset_idempotency_key = None;
+        self.rate_limit_reset_draft = None;
         self.rate_limit_reset_picker_request_id = None;
         let request_id = self.take_next_rate_limit_reset_request_id();
         self.pending_rate_limit_reset_request_id = Some(request_id);
@@ -360,11 +404,14 @@ impl ChatWidget {
     pub(crate) fn finish_rate_limit_reset_consume(
         &mut self,
         request_id: u64,
-        idempotency_key: String,
-        credit_id: Option<String>,
+        operation: ResetCreditOperation,
         result: Result<ConsumeAccountRateLimitResetCreditResponse, String>,
     ) -> bool {
-        if self.pending_rate_limit_reset_request_id != Some(request_id) {
+        if self.pending_rate_limit_reset_request_id != Some(request_id)
+            || self.rate_limit_reset_active_operation.as_ref()
+                != Some(&(request_id, operation.clone()))
+            || !self.reset_credit_owner_matches(&operation)
+        {
             return false;
         }
 
@@ -376,17 +423,22 @@ impl ChatWidget {
                         | ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed
                 ) =>
             {
+                self.pending_rate_limit_reset_operation = None;
                 self.available_rate_limit_reset_credits = None;
                 self.replace_rate_limit_reset_popup(Self::rate_limit_reset_success_loading_params());
                 true
             }
             Ok(response) => {
                 self.pending_rate_limit_reset_request_id = None;
+                self.rate_limit_reset_active_operation = None;
+                self.pending_rate_limit_reset_operation = None;
                 let message = match response.outcome {
                     ConsumeAccountRateLimitResetCreditOutcome::NothingToReset => {
                         "Your usage does not need a reset right now."
                     }
-                    ConsumeAccountRateLimitResetCreditOutcome::NoCredit if credit_id.is_some() => {
+                    ConsumeAccountRateLimitResetCreditOutcome::NoCredit
+                        if operation.credit_id.is_some() =>
+                    {
                         self.available_rate_limit_reset_credits = None;
                         self.replace_rate_limit_reset_popup(Self::reset_refresh_params(
                             "That reset is no longer available. Refresh to see your current resets.",
@@ -405,31 +457,9 @@ impl ChatWidget {
             }
             Err(_) => {
                 self.pending_rate_limit_reset_request_id = None;
-                self.pending_rate_limit_reset_idempotency_key = Some(idempotency_key.clone());
-                self.replace_rate_limit_reset_popup(SelectionViewParams {
-                    view_id: Some(RATE_LIMIT_RESET_VIEW_ID),
-                    title: Some("Usage limit resets".to_string()),
-                    subtitle: Some("Couldn't reset usage. Please try again.".to_string()),
-                    items: vec![
-                        SelectionItem {
-                            name: "Try again".to_string(),
-                            actions: vec![Box::new(move |tx| {
-                                tx.send(AppEvent::ConsumeRateLimitResetCredit {
-                                    idempotency_key: idempotency_key.clone(),
-                                    credit_id: credit_id.clone(),
-                                });
-                            })],
-                            dismiss_on_select: true,
-                            ..Default::default()
-                        },
-                        SelectionItem {
-                            name: "Close".to_string(),
-                            dismiss_on_select: true,
-                            ..Default::default()
-                        },
-                    ],
-                    ..SelectionViewParams::picker()
-                });
+                self.rate_limit_reset_active_operation = None;
+                self.pending_rate_limit_reset_operation = Some(operation);
+                self.replace_rate_limit_reset_popup(self.pending_reset_credit_params());
                 false
             }
         }
@@ -439,12 +469,29 @@ impl ChatWidget {
         &mut self,
         request_id: u64,
         snapshots: Vec<RateLimitSnapshot>,
+        owner_key: Option<String>,
         result: Result<RateLimitResetCreditsSummary, String>,
     ) -> bool {
-        if self.pending_rate_limit_reset_request_id != Some(request_id) {
+        if self.pending_rate_limit_reset_request_id != Some(request_id)
+            || self
+                .rate_limit_reset_active_operation
+                .as_ref()
+                .is_none_or(|(id, operation)| {
+                    *id != request_id || !self.reset_credit_owner_matches(operation)
+                })
+        {
             return false;
         }
+        let Some((_, operation)) = self.rate_limit_reset_active_operation.take() else {
+            return false;
+        };
         self.pending_rate_limit_reset_request_id = None;
+        if result.is_ok() && owner_key.as_deref() != Some(operation.owner_key.as_str()) {
+            self.replace_rate_limit_reset_popup(Self::rate_limit_reset_message_params(
+                "The original reset completed. Refresh usage in the original account to check its remaining resets.",
+            ));
+            return false;
+        }
         for snapshot in snapshots {
             self.on_rate_limit_snapshot(Some(snapshot));
         }
@@ -454,11 +501,13 @@ impl ChatWidget {
                 let available_count = response.available_count;
                 self.available_rate_limit_reset_credits = Some(available_count);
                 format!(
-                    "Usage reset. You have {available_count} {} left.",
+                    "Reset operation confirmed. You have {available_count} {} left.",
                     reset_label(available_count)
                 )
             }
-            Err(_) => "Usage reset.".to_string(),
+            Err(_) => {
+                "Reset operation confirmed. Refresh usage to check current permission.".to_string()
+            }
         };
         self.replace_rate_limit_reset_popup(Self::rate_limit_reset_message_params(&message));
         true
@@ -468,7 +517,7 @@ impl ChatWidget {
         SelectionViewParams {
             view_id: Some(RATE_LIMIT_RESET_VIEW_ID),
             title: Some("Usage limit resets".to_string()),
-            subtitle: Some("Usage reset. Checking your remaining resets...".to_string()),
+            subtitle: Some("Reset operation confirmed. Checking current usage...".to_string()),
             items: vec![SelectionItem {
                 name: "Refreshing...".to_string(),
                 is_disabled: true,
@@ -521,7 +570,9 @@ impl ChatWidget {
 
     pub(crate) fn clear_pending_rate_limit_reset_requests(&mut self) {
         self.pending_rate_limit_reset_request_id = None;
-        self.pending_rate_limit_reset_idempotency_key = None;
+        self.rate_limit_reset_draft = None;
+        self.rate_limit_reset_active_operation = None;
+        self.rate_limit_reset_owner_key = None;
         self.rate_limit_reset_picker_request_id = None;
         self.pending_usage_menu_rate_limit_request_id = None;
         self.available_rate_limit_reset_credits = None;
@@ -569,16 +620,12 @@ impl ChatWidget {
     }
 
     fn take_next_rate_limit_reset_request_id(&mut self) -> u64 {
-        let request_id = self.next_rate_limit_reset_request_id;
-        self.next_rate_limit_reset_request_id = self
-            .next_rate_limit_reset_request_id
-            .wrapping_add(/*rhs*/ 1);
-        request_id
+        NEXT_RESET_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
     }
 }
 
 /// Keep usage actions readable on narrow terminals and honor customized list bindings.
-fn usage_hint_line(
+pub(super) fn usage_hint_line(
     keymap: &crate::keymap::ListKeymap,
     accept_label: &'static str,
 ) -> Line<'static> {

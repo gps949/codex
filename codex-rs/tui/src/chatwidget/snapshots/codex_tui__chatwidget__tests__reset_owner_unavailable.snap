@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/usage.rs
+assertion_line: 1185
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Usage limit resets
+  This server cannot verify the reset's account. Upgrade Codex and refresh
+  usage before using a reset.
+
+
+› 1. Close
+
+  enter select · esc back

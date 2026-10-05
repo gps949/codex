@@ -1,6 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/usage.rs
-assertion_line: 426
+assertion_line: 444
 expression: "states.join(\"\\n---\\n\")"
 ---
   Usage limit resets
@@ -45,13 +45,13 @@ expression: "states.join(\"\\n---\\n\")"
 ›    Using a reset...
 ---
   Usage limit resets
-  Couldn't reset usage. Please try again.
+  This reset's result is unconfirmed. Review it before using another reset.
 
 
-› 1. Try again
+› 1. Review original reset  Retry the same reset safely
   2. Close
 
-  enter select · esc back
+  enter review · esc back
 ---
   Usage limit resets
   Your usage does not need a reset right now.
@@ -70,13 +70,13 @@ expression: "states.join(\"\\n---\\n\")"
   enter select · esc back
 ---
   Usage limit resets
-  Usage reset. Checking your remaining resets...
+  Reset operation confirmed. Checking current usage...
 
 
 ›    Refreshing...
 ---
   Usage limit resets
-  Usage reset. You have 1 usage limit reset left.
+  Reset operation confirmed. You have 1 usage limit reset left.
 
 
 › 1. Close

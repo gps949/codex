@@ -416,7 +416,8 @@ async fn backend_banner_reset_redemption_rejects_pre_reset_content() -> Result<(
         app.config.cwd.to_path_buf(),
     ));
     app.chat_widget.set_model("test-model-a");
-    let banner = response_with_banner();
+    let mut banner = response_with_banner();
+    banner.reset_owner_key = Some("a".repeat(64));
     app.chat_widget.update_backend_banner(&banner);
     assert!(
         render_bottom_popup(&app.chat_widget, /*width*/ 90)
@@ -437,14 +438,24 @@ async fn backend_banner_reset_redemption_rejects_pre_reset_content() -> Result<(
         app.chat_widget.queued_user_message_texts(),
         vec!["after reset"]
     );
-    let request_id = app.chat_widget.show_rate_limit_reset_consuming_popup();
+    let operation = crate::app::reset_credit_operation::ResetCreditOperation {
+        owner_key: "a".repeat(64),
+        idempotency_key: "mock-reset".to_string(),
+        credit_id: None,
+    };
+    app.chat_widget
+        .set_reset_credit_owner(Some(operation.owner_key.clone()));
+    app.chat_widget
+        .set_pending_reset_credit_operation(Some(operation.clone()), None);
+    let request_id = app
+        .prepare_reset_credit_operation(&operation)
+        .expect("prepared reset");
     app.handle_event(
         &mut tui,
         &mut session,
         AppEvent::RateLimitResetCreditConsumed {
             request_id,
-            idempotency_key: "mock-reset".into(),
-            credit_id: None,
+            operation,
             result: Ok(
                 codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse {
                     outcome:

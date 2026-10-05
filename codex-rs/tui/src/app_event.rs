@@ -762,6 +762,7 @@ pub(crate) enum AppEvent {
     /// Confirm the reset credit selected from the reset-credit picker.
     OpenRateLimitResetConfirmation {
         picker_request_id: u64,
+        owner_key: String,
         confirmation_gate: Arc<AtomicBool>,
         credit_id: Option<String>,
         reset_title: String,
@@ -771,15 +772,13 @@ pub(crate) enum AppEvent {
 
     /// Consume one reset credit using a stable idempotency key.
     ConsumeRateLimitResetCredit {
-        idempotency_key: String,
-        credit_id: Option<String>,
+        operation: crate::app::reset_credit_operation::ResetCreditOperation,
     },
 
     /// Result of consuming one reset credit.
     RateLimitResetCreditConsumed {
         request_id: u64,
-        idempotency_key: String,
-        credit_id: Option<String>,
+        operation: crate::app::reset_credit_operation::ResetCreditOperation,
         result: Result<ConsumeAccountRateLimitResetCreditResponse, String>,
     },
 

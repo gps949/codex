@@ -1720,6 +1720,13 @@ impl App {
                 hard_stop_generation,
                 result,
             } => {
+                let reset_owner_matches = match origin {
+                    RateLimitRefreshOrigin::ResetConsume { request_id } => result.as_ref().map_or_else(
+                        |_| self.reset_credit_refresh_error_matches(request_id),
+                        |response| self.reset_credit_refresh_matches(request_id, response),
+                    ),
+                    _ => true,
+                };
                 let accepted = match self.rate_limit_refresh_state.finish(
                     request_id,
                     hard_stop_generation,
@@ -1737,9 +1744,13 @@ impl App {
                         self.refresh_rate_limits(app_server, RateLimitRefreshOrigin::Recovery);
                         false
                     }
-                };
+                } && reset_owner_matches;
                 match result {
                 Ok(response) => {
+                    let reset_owner_key = response.reset_owner_key.clone();
+                    if accepted {
+                        self.observe_reset_credit_read(&response);
+                    }
                     let rate_limit_reset_credits = response.rate_limit_reset_credits.clone();
                     let snapshots = if accepted
                     {
@@ -1775,6 +1786,7 @@ impl App {
                             self.chat_widget.finish_post_consume_reset_credits_refresh(
                                 request_id,
                                 snapshots,
+                                reset_owner_key,
                                 rate_limit_reset_credits.ok_or_else(|| {
                                     "account/rateLimits/read response did not include rateLimitResetCredits"
                                         .to_string()
@@ -1800,6 +1812,7 @@ impl App {
                             self.chat_widget.finish_rate_limit_reset_credits_refresh(
                                 request_id,
                                 snapshots,
+                                reset_owner_key,
                                 rate_limit_reset_credits.ok_or_else(|| {
                                     "account/rateLimits/read response did not include rateLimitResetCredits"
                                         .to_string()
@@ -1830,6 +1843,7 @@ impl App {
                             self.chat_widget.finish_post_consume_reset_credits_refresh(
                                 request_id,
                                 Vec::new(),
+                                None,
                                 Err(err),
                             );
                         }
@@ -1848,18 +1862,24 @@ impl App {
                             self.chat_widget.finish_rate_limit_reset_credits_refresh(
                                 request_id,
                                 Vec::new(),
+                                None,
                                 Err(err),
                             );
                         }
                     }
                 }
                 }
-                if (accepted || matches!(
+                if reset_owner_matches && (accepted || matches!(
                     origin,
                     RateLimitRefreshOrigin::Recovery | RateLimitRefreshOrigin::ResetConsume { .. }
                 )) && !self.rate_limit_refresh_state.has_pending_recovery()
                 {
                     self.chat_widget.finish_rate_limit_recovery();
+                }
+                if let RateLimitRefreshOrigin::ResetConsume { request_id } = origin
+                    && self.reset_credit_operations.post_consume.as_ref().is_some_and(|(id, _)| *id == request_id)
+                {
+                    self.reset_credit_operations.post_consume = None;
                 }
             },
             AppEvent::OpenAnalytics { view: summary_view } => {
@@ -1881,6 +1901,7 @@ impl App {
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::OpenRateLimitResetCredits => {
+                self.restore_reset_credit_operations();
                 let request_id = self.chat_widget.show_rate_limit_reset_loading_popup();
                 self.refresh_rate_limits(
                     app_server,
@@ -1889,6 +1910,7 @@ impl App {
             }
             AppEvent::OpenRateLimitResetConfirmation {
                 picker_request_id,
+                owner_key,
                 confirmation_gate,
                 credit_id,
                 reset_title,
@@ -1897,6 +1919,7 @@ impl App {
             } => {
                 self.chat_widget.show_rate_limit_reset_confirmation(
                     picker_request_id,
+                    owner_key,
                     confirmation_gate,
                     credit_id,
                     reset_title,
@@ -1905,25 +1928,19 @@ impl App {
                 );
             }
             AppEvent::ConsumeRateLimitResetCredit {
-                idempotency_key,
-                credit_id,
+                operation,
             } => {
-                if let Some(request_id) = self
-                    .chat_widget
-                    .start_rate_limit_reset_consumption(&idempotency_key)
-                {
+                if let Some(request_id) = self.prepare_reset_credit_operation(&operation) {
                     self.consume_rate_limit_reset_credit(
                         app_server,
                         request_id,
-                        idempotency_key,
-                        credit_id,
+                        operation,
                     );
                 }
             }
             AppEvent::RateLimitResetCreditConsumed {
                 request_id,
-                idempotency_key,
-                credit_id,
+                operation,
                 result,
             } => {
                 if let Err(err) = &result {
@@ -1931,17 +1948,11 @@ impl App {
                         "account/rateLimitResetCredit/consume failed during TUI request: {err}"
                     );
                 }
-                if self.chat_widget.finish_rate_limit_reset_consume(
+                if self.finish_reset_credit_operation(
                     request_id,
-                    idempotency_key,
-                    credit_id,
+                    operation,
                     result,
                 ) {
-                    // Reads started before redemption must not restore the pre-reset banner.
-                    self.rate_limit_hard_stop_generation =
-                        self.rate_limit_hard_stop_generation.wrapping_add(1);
-                    self.rate_limit_refresh_state.invalidate_recovery();
-                    self.chat_widget.clear_backend_banner();
                     self.refresh_rate_limits(
                         app_server,
                         RateLimitRefreshOrigin::ResetConsume { request_id },

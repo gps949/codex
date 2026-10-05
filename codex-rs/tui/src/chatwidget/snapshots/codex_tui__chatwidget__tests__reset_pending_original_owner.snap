@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/usage.rs
+assertion_line: 1236
+expression: "render_bottom_popup(&chat, 80)"
+---
+  Usage limit resets
+  Return to the original account to retry this reset. Its result is still
+  unconfirmed.
+
+
+› 1. Close
+
+  enter select · esc back
