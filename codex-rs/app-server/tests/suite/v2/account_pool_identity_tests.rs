@@ -214,10 +214,14 @@ async fn account_rate_limit_read_survives_managed_same_seat_token_refresh() -> R
         timeout(DEFAULT_READ_TIMEOUT, app.read_response(read_id)).await??;
     let snapshot = json!({"limitId": "codex", "planType": "business",
         "primary": {"usedPercent": 43, "windowDurationMins": 300, "resetsAt": 2000000000}});
+    let reset_owner_key = response.reset_owner_key.clone();
+    assert!(reset_owner_key.is_some());
     assert_eq!(
         response,
         serde_json::from_value::<GetAccountRateLimitsResponse>(json!({
             "ordinaryUsageAllowed": true,
+            "resetOwnerKey": reset_owner_key,
+            "pendingResetCredit": null,
             "accountId": "shared-workspace",
             "rateLimits": snapshot,
             "rateLimitsByLimitId": {"codex": snapshot}
@@ -226,15 +230,20 @@ async fn account_rate_limit_read_survives_managed_same_seat_token_refresh() -> R
     Ok(())
 }
 
-#[test_case::test_case(false; "request_seat")]
-#[test_case::test_case(true; "preserve_external_selection")]
+#[test_case::test_case(false, false; "request_seat")]
+#[test_case::test_case(true, false; "preserve_external_selection")]
+#[test_case::test_case(false, true; "reject_confirmation_for_previous_seat")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool) -> Result<()> {
+async fn account_pool_manual_reset_binds_business_seat(
+    switch_during_reset: bool,
+    switch_before_confirmation: bool,
+) -> Result<()> {
     use app_test_support::ChatGptAuthFixture;
     use app_test_support::write_chatgpt_auth;
     use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditOutcome;
     use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditParams;
     use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
+    use codex_app_server_protocol::GetAccountRateLimitsResponse;
     use codex_config::types::AuthCredentialsStoreMode;
     use codex_login::AccountProfileId;
     use codex_login::AccountRuntimeStateStore;
@@ -313,6 +322,18 @@ async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool
                 "status": "available", "granted_at": "2026-01-01T00:00:00Z", "expires_at": null}]
         })))
         .mount(&backend).await;
+    if switch_before_confirmation {
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .and(header("authorization", "Bearer access-selected"))
+            .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+                "account_id":"shared-business-workspace", "user_id":"seat-a", "plan_type":"business",
+                "rate_limit":{"allowed":false, "limit_reached":true,
+                    "primary_window":{"used_percent":100,"limit_window_seconds":18000,
+                        "reset_at":reset.timestamp(),"reset_after_seconds":18000}}
+            })))
+            .mount(&backend).await;
+    }
     Mock::given(method("POST"))
         .and(path("/api/codex/rate-limit-reset-credits/consume"))
         .and(header("authorization", "Bearer access-selected"))
@@ -323,7 +344,7 @@ async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool
                 .set_delay(Duration::from_secs(if switch_during_reset { 3 } else { 0 }))
                 .set_body_json(json!({"code": "reset", "windows_reset": 2}))
         })
-        .expect(1)
+        .expect(u64::from(!switch_before_confirmation))
         .mount(&backend)
         .await;
     let mut app = TestAppServer::builder()
@@ -340,9 +361,65 @@ async fn account_pool_manual_reset_binds_business_seat(switch_during_reset: bool
         timeout(DEFAULT_READ_TIMEOUT, app.read_response(account_read)).await??;
     let store = AccountRuntimeStateStore::new(home.path().to_path_buf());
     let mut expected = store.load()?;
+    if switch_before_confirmation {
+        let read = app.send_get_account_rate_limits_request().await?;
+        let usage: GetAccountRateLimitsResponse = app.read_response(read).await?;
+        let original_owner = usage
+            .reset_owner_key
+            .expect("usage binds the original seat");
+        store.select(
+            AccountProfileId::new("other-seat")?,
+            codex_login::AccountSelectionMode::ForceProbe,
+        )?;
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            app.read_stream_until_matching_notification(
+                "select another synthetic Business seat",
+                |notification| {
+                    notification.method == "accountPool/updated"
+                        && notification
+                            .params
+                            .as_ref()
+                            .and_then(|params| params["activeProfileId"].as_str())
+                            == Some("other-seat")
+                },
+            ),
+        )
+        .await??;
+        let consume = app
+            .send_consume_account_rate_limit_reset_credit_request(
+                ConsumeAccountRateLimitResetCreditParams {
+                    expected_owner_key: Some(original_owner),
+                    idempotency_key: "old-seat-confirmation".into(),
+                    credit_id: None,
+                },
+            )
+            .await?;
+        let error = timeout(
+            DEFAULT_READ_TIMEOUT,
+            app.read_stream_until_error_message(RequestId::Integer(consume)),
+        )
+        .await??;
+        assert!(
+            error
+                .error
+                .message
+                .contains("account changed since reset confirmation")
+        );
+        assert!(
+            backend
+                .received_requests()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("Mock request recording is disabled"))?
+                .iter()
+                .all(|request| request.method.as_str() != "POST")
+        );
+        return Ok(());
+    }
     let consume = app
         .send_consume_account_rate_limit_reset_credit_request(
             ConsumeAccountRateLimitResetCreditParams {
+                expected_owner_key: None,
                 idempotency_key: "business-seat-reset".into(),
                 credit_id: None,
             },

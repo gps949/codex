@@ -42,6 +42,7 @@ async fn consume_rate_limit_reset_credit_requires_chatgpt_auth() -> Result<()> {
     let consume_id = mcp
         .send_consume_account_rate_limit_reset_credit_request(
             ConsumeAccountRateLimitResetCreditParams {
+                expected_owner_key: None,
                 idempotency_key: "request-1".to_string(),
                 credit_id: None,
             },
@@ -145,6 +146,7 @@ async fn consume_account_rate_limit_reset_credit_forwards_selected_credit_id() -
     let request_id = mcp
         .send_consume_account_rate_limit_reset_credit_request(
             ConsumeAccountRateLimitResetCreditParams {
+                expected_owner_key: None,
                 idempotency_key: "request-selected".to_string(),
                 credit_id: Some("credit-123".to_string()),
             },
@@ -172,6 +174,7 @@ async fn consume_account_rate_limit_reset_credit_rejects_empty_idempotency_key()
     let request_id = mcp
         .send_consume_account_rate_limit_reset_credit_request(
             ConsumeAccountRateLimitResetCreditParams {
+                expected_owner_key: None,
                 idempotency_key: String::new(),
                 credit_id: None,
             },
@@ -192,6 +195,7 @@ async fn consume_account_rate_limit_reset_credit_rejects_empty_credit_id() -> Re
     let request_id = mcp
         .send_consume_account_rate_limit_reset_credit_request(
             ConsumeAccountRateLimitResetCreditParams {
+                expected_owner_key: None,
                 idempotency_key: "request-1".to_string(),
                 credit_id: Some(String::new()),
             },
@@ -354,6 +358,8 @@ async fn consume_preserves_new_refusals_and_unconfirmed_partial_resets() -> Resu
             .await;
         let mut app = initialized_app_server(home.path()).await?;
         consume_reset_credit(&mut app, "synthetic-delayed-reset").await?;
+        // A terminal replay is a receipt for the original operation, not new recovery evidence.
+        consume_reset_credit(&mut app, "synthetic-delayed-reset").await?;
         assert_eq!(
             store.load()?.profiles[0],
             expected
@@ -431,6 +437,7 @@ async fn consume_revalidates_credit_scope_status_and_expiry_before_spending() ->
         let id = app
             .send_consume_account_rate_limit_reset_credit_request(
                 ConsumeAccountRateLimitResetCreditParams {
+                    expected_owner_key: None,
                     idempotency_key: "invalid-credit".into(),
                     credit_id: Some("credit-123".into()),
                 },
@@ -525,10 +532,53 @@ async fn consume_replays_the_original_credit_after_a_lost_response_and_restart()
         );
         drop(app);
 
+        let binding: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            home.path().join(".manual-rate-limit-reset-credits.json"),
+        )?)?;
+        let original_owner = binding["operations"][0]["ownerDigest"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        write_chatgpt_auth(
+            home.path(),
+            ChatGptAuthFixture::new("another-seat-token")
+                .account_id("account-123")
+                .chatgpt_user_id("another-seat")
+                .plan_type("pro"),
+            AuthCredentialsStoreMode::File,
+        )?;
+        let mut changed = initialized_app_server(home.path()).await?;
+        let rejected = changed
+            .send_raw_request(
+                "account/rateLimitResetCredit/consume",
+                Some(json!({
+                    "idempotencyKey":"lost-response", "creditId":"credit-123",
+                    "expectedOwnerKey":original_owner
+                })),
+            )
+            .await?;
+        assert_eq!(
+            read_error_response(&mut changed, rejected)
+                .await?
+                .error
+                .code,
+            INVALID_REQUEST_ERROR_CODE
+        );
+        drop(changed);
+        write_chatgpt_auth(
+            home.path(),
+            ChatGptAuthFixture::new("same-owner-refreshed-token")
+                .account_id("account-123")
+                .chatgpt_user_id("user-123")
+                .plan_type("pro"),
+            AuthCredentialsStoreMode::File,
+        )?;
+
         let mut app = initialized_app_server(home.path()).await?;
         let id = app
             .send_consume_account_rate_limit_reset_credit_request(
                 ConsumeAccountRateLimitResetCreditParams {
+                    expected_owner_key: Some(original_owner),
                     idempotency_key: "lost-response".into(),
                     credit_id: Some("credit-123".into()),
                 },
@@ -597,6 +647,7 @@ async fn consume_rejects_a_known_key_with_a_changed_credit_or_owner() -> Result<
     let changed_credit = app
         .send_consume_account_rate_limit_reset_credit_request(
             ConsumeAccountRateLimitResetCreditParams {
+                expected_owner_key: None,
                 idempotency_key: "bound-operation".into(),
                 credit_id: Some("another-credit".into()),
             },
@@ -692,12 +743,19 @@ async fn consume_rejects_oversized_request_bindings_before_spending() -> Result<
     let mut app = initialized_app_server(home.path()).await?;
     for params in [
         ConsumeAccountRateLimitResetCreditParams {
+            expected_owner_key: None,
             idempotency_key: "x".repeat(129),
             credit_id: None,
         },
         ConsumeAccountRateLimitResetCreditParams {
+            expected_owner_key: None,
             idempotency_key: "request".into(),
             credit_id: Some("x".repeat(257)),
+        },
+        ConsumeAccountRateLimitResetCreditParams {
+            expected_owner_key: Some("not-a-reset-owner".into()),
+            idempotency_key: "request".into(),
+            credit_id: None,
         },
     ] {
         let id = app
@@ -744,6 +802,143 @@ async fn consume_refuses_to_post_when_the_binding_cannot_be_persisted() -> Resul
     Ok(())
 }
 
+#[tokio::test]
+async fn consume_rejects_confirmation_for_a_previous_workspace_or_business_seat() -> Result<()> {
+    let (home, server) = chatgpt_test_context().await?;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+            "account_id": "account-123", "user_id": "user-123", "plan_type": "business",
+            "rate_limit": {"allowed": true, "limit_reached": false,
+                "primary_window": {"used_percent": 43, "limit_window_seconds": 18000,
+                    "reset_after_seconds": 3600, "reset_at": 2000000000}}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+            "code": "reset", "windows_reset": 2
+        })))
+        .expect(/*r*/ 0)
+        .mount(&server)
+        .await;
+    let mut app = initialized_app_server(home.path()).await?;
+    let read = app.send_get_account_rate_limits_request().await?;
+    let response: GetAccountRateLimitsResponse = app.read_response(read).await?;
+    let owner = serde_json::to_value(response)?["resetOwnerKey"]
+        .as_str()
+        .expect("the same usage read binds its reset owner")
+        .to_owned();
+    drop(app);
+    for (workspace, user) in [
+        ("another-workspace", "user-123"),
+        ("account-123", "another-business-seat"),
+    ] {
+        write_chatgpt_auth(
+            home.path(),
+            ChatGptAuthFixture::new("changed-synthetic-token")
+                .account_id(workspace)
+                .chatgpt_user_id(user)
+                .plan_type("business"),
+            AuthCredentialsStoreMode::File,
+        )?;
+        let mut app = initialized_app_server(home.path()).await?;
+        let consume = app
+            .send_raw_request(
+                "account/rateLimitResetCredit/consume",
+                Some(json!({"idempotencyKey": "old-confirmation", "expectedOwnerKey": owner})),
+            )
+            .await?;
+        let error = read_error_response(&mut app, consume).await?;
+        assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+        assert!(error.error.message.contains("account changed"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unconfirmed_reset_blocks_a_new_key_until_the_original_operation_completes() -> Result<()>
+{
+    let (home, server) = chatgpt_test_context().await?;
+    Mock::given(method("POST"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
+        .and(body_json(
+            json!({"redeem_request_id": "unconfirmed", "credit_id": "credit-123"}),
+        ))
+        .respond_with(ResponseTemplate::new(/*s*/ 503))
+        .expect(/*r*/ 1)
+        .mount(&server)
+        .await;
+    let mut app = initialized_app_server(home.path()).await?;
+    let original = send_consume_reset_credit(&mut app, "unconfirmed").await?;
+    assert_eq!(
+        read_error_response(&mut app, original).await?.error.code,
+        INTERNAL_ERROR_CODE
+    );
+    drop(app);
+    let mut app = initialized_app_server(home.path()).await?;
+    let replacement = send_consume_reset_credit(&mut app, "replacement-key").await?;
+    let error = read_error_response(&mut app, replacement).await?;
+    assert!(error.error.message.contains("original operation"));
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method.as_str() == "POST")
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn root_owner_change_during_credit_validation_prevents_spending() -> Result<()> {
+    let (home, server) = chatgpt_test_context().await?;
+    let credential_home = home.path().to_path_buf();
+    Mock::given(method("GET"))
+        .and(path("/api/codex/rate-limit-reset-credits"))
+        .respond_with(move |_: &wiremock::Request| {
+            write_chatgpt_auth(
+                &credential_home,
+                ChatGptAuthFixture::new("changed-root-token")
+                    .account_id("account-123")
+                    .chatgpt_user_id("another-seat")
+                    .plan_type("business"),
+                AuthCredentialsStoreMode::File,
+            )
+            .expect("change synthetic root owner");
+            ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
+                "available_count":1, "credits":[{"id":"credit-123",
+                    "reset_type":"codex_rate_limits", "status":"available",
+                    "granted_at":"2026-01-01T00:00:00Z", "expires_at":null}]
+            }))
+        })
+        .with_priority(/*p*/ 1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/codex/rate-limit-reset-credits/consume"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200))
+        .expect(/*r*/ 0)
+        .mount(&server)
+        .await;
+    let mut app = initialized_app_server(home.path()).await?;
+    let consume = send_consume_reset_credit(&mut app, "root-owner-changed").await?;
+    let error = read_error_response(&mut app, consume).await?;
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(error.error.message.contains("account changed before reset"));
+    assert!(
+        !home
+            .path()
+            .join(".manual-rate-limit-reset-credits.json")
+            .exists()
+    );
+    Ok(())
+}
+
 async fn chatgpt_test_context() -> Result<(TempDir, MockServer)> {
     let codex_home = TempDir::new()?;
     write_chatgpt_auth(
@@ -784,6 +979,7 @@ async fn consume_reset_credit(
 async fn send_consume_reset_credit(mcp: &mut TestAppServer, idempotency_key: &str) -> Result<i64> {
     mcp.send_consume_account_rate_limit_reset_credit_request(
         ConsumeAccountRateLimitResetCreditParams {
+            expected_owner_key: None,
             idempotency_key: idempotency_key.to_string(),
             credit_id: None,
         },
@@ -818,4 +1014,36 @@ fn write_chatgpt_base_url(codex_home: &Path, base_url: &str) -> std::io::Result<
         codex_home.join("config.toml"),
         format!("chatgpt_base_url = \"{base_url}\"\n"),
     )
+}
+
+#[tokio::test]
+async fn unconfirmed_automatic_reset_blocks_a_new_manual_post() -> Result<()> {
+    let (home, server) = chatgpt_test_context().await?;
+    std::fs::write(
+        home.path()
+            .join(format!(".rate-limit-reset-credit-{}.json", "a".repeat(40))),
+        serde_json::to_vec(
+            &json!({"version":1,"scope":{"profileId":"synthetic-profile", "ownerKey":"synthetic-owner"},
+            "attemptedAt":1,"requestId":"original-auto-request","phase":{"state":"pending"}}),
+        )?,
+    )?;
+    let mut app = initialized_app_server(home.path()).await?;
+    let request_id = send_consume_reset_credit(&mut app, "new-manual-request").await?;
+    let error = read_error_response(&mut app, request_id).await?;
+    assert!(
+        error
+            .error
+            .message
+            .contains("automatic reset is unconfirmed"),
+        "{error:?}"
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .all(|request| request.method.as_str() != "POST")
+    );
+    Ok(())
 }

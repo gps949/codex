@@ -597,3 +597,6 @@ async fn native_account_menu_finishes_before_inline_review_and_startup_stop() ->
 
 #[path = "native_account_manager_actions.rs"]
 mod actions;
+
+#[path = "native_account_manager_quick_tests.rs"]
+mod quick;
