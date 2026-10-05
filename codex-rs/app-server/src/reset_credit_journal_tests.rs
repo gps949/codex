@@ -41,9 +41,10 @@ fn a_full_journal_refuses_new_spending_without_forgetting_known_keys() {
     std::fs::write(
         home.path().join(JOURNAL_FILE_NAME),
         serde_json::to_vec(&json!({
-            "version": 1,
+            "version": 2,
             "operations": (0..MAX_OPERATIONS).map(|index| json!({
-                "ownerDigest":owner,"idempotencyKey":format!("request-{index}"),"creditId":"credit"
+                "ownerDigest":owner,"idempotencyKey":format!("request-{index}"),"creditId":"credit",
+                "phase":{"state":"terminal","outcome":"nothingToReset"}
             })).collect::<Vec<_>>()
         }))
         .unwrap(),
@@ -71,9 +72,17 @@ fn malformed_or_ambiguous_journals_block_new_spending() {
     let record = json!({"ownerDigest": "a".repeat(64),
         "idempotencyKey": "request", "creditId": "credit"});
     for malformed in [
-        json!({"version": 2, "operations": []}),
+        json!({"version": 3, "operations": []}),
         json!({"version": 1, "operations": [], "extra": "unexpected"}),
         json!({"version": 1, "operations": [record.clone(), record]}),
+        json!({"version": 2, "operations": [
+            {"ownerDigest":"a".repeat(64),"idempotencyKey":"first","creditId":"credit",
+                "phase":{"state":"pending"}},
+            {"ownerDigest":"a".repeat(64),"idempotencyKey":"second","creditId":"another-credit",
+                "phase":{"state":"pending"}}
+        ]}),
+        json!({"version": 2, "operations": [{"ownerDigest":"a".repeat(64),
+            "idempotencyKey":"first","creditId":"credit","phase":{"state":"unknown"}}]}),
         json!({"version": 1, "operations": [{"ownerDigest": "a".repeat(64),
             "idempotencyKey": "request", "creditId": "credit", "secret": "never-accepted"}]}),
         json!({"version": 1, "operations": [{"ownerDigest": "invalid",
@@ -129,4 +138,103 @@ fn a_failed_persist_does_not_create_a_replayable_binding() {
         ManualResetCreditJournal::load(home.path()),
         Err(JOURNAL_UNAVAILABLE)
     ));
+}
+
+#[test]
+fn unconfirmed_operations_survive_restart_and_block_rebinding_until_terminal() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = "a".repeat(64);
+    let mut journal = ManualResetCreditJournal::load(home.path()).unwrap();
+    journal.remember(&owner, "original", "credit").unwrap();
+    let mut journal = ManualResetCreditJournal::load(home.path()).unwrap();
+    assert_eq!(
+        journal.pending_for_owner(&owner),
+        Some(PendingAccountRateLimitResetCredit {
+            owner_key: owner.clone(),
+            idempotency_key: "original".into(),
+            credit_id: Some("credit".into()),
+        })
+    );
+    assert_eq!(
+        journal.remember(&owner, "replacement", "another-credit"),
+        Err(PENDING_OPERATION)
+    );
+    journal
+        .complete(
+            &owner,
+            "original",
+            ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed,
+        )
+        .unwrap();
+    let mut journal = ManualResetCreditJournal::load(home.path()).unwrap();
+    assert_eq!(journal.pending_for_owner(&owner), None);
+    assert_eq!(
+        journal.known_credit(&owner, "original", /*expected_credit_id*/ None),
+        Ok(Some("credit"))
+    );
+    assert_eq!(
+        journal.terminal_outcome(&owner, "original"),
+        Ok(Some(
+            ConsumeAccountRateLimitResetCreditOutcome::AlreadyRedeemed
+        ))
+    );
+    assert_eq!(
+        journal.remember(&owner, "replacement", "another-credit"),
+        Ok(())
+    );
+}
+
+#[test]
+fn latest_legacy_binding_requires_original_review_before_a_new_operation() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = "a".repeat(64);
+    std::fs::write(
+        home.path().join(JOURNAL_FILE_NAME),
+        serde_json::to_vec(&json!({
+            "version": 1, "operations": [
+                {"ownerDigest":owner,"idempotencyKey":"old","creditId":"old-credit"},
+                {"ownerDigest":owner,"idempotencyKey":"latest","creditId":"latest-credit"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut journal = ManualResetCreditJournal::load(home.path()).unwrap();
+    assert_eq!(journal.terminal_outcome(&owner, "latest"), Ok(None));
+    assert_eq!(
+        journal.pending_for_owner(&owner).unwrap().idempotency_key,
+        "latest"
+    );
+    assert_eq!(
+        journal.remember(&owner, "new", "new-credit"),
+        Err(PENDING_OPERATION)
+    );
+    journal.remember(&owner, "latest", "latest-credit").unwrap();
+    journal
+        .complete(
+            &owner,
+            "latest",
+            ConsumeAccountRateLimitResetCreditOutcome::NothingToReset,
+        )
+        .unwrap();
+    journal.remember(&owner, "new", "new-credit").unwrap();
+    journal
+        .complete(
+            &owner,
+            "new",
+            ConsumeAccountRateLimitResetCreditOutcome::NothingToReset,
+        )
+        .unwrap();
+    let journal = ManualResetCreditJournal::load(home.path()).unwrap();
+    assert_eq!(journal.pending_for_owner(&owner), None);
+    assert_eq!(
+        journal.terminal_outcome(&owner, "latest"),
+        Ok(Some(
+            ConsumeAccountRateLimitResetCreditOutcome::NothingToReset
+        ))
+    );
+    assert_eq!(
+        journal.known_credit(&owner, "old", /*expected_credit_id*/ None),
+        Ok(Some("old-credit"))
+    );
 }
