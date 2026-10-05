@@ -236,6 +236,18 @@ async fn consume_account_rate_limit_reset_credit_surfaces_backend_failure() -> R
 #[tokio::test]
 async fn consume_timeout_releases_account_auth_queue() -> Result<()> {
     let (codex_home, server) = chatgpt_test_context().await?;
+    // Replay a persisted operation so the 100 ms budget only covers consumption,
+    // independent of how long a busy runner takes to validate a fresh inventory.
+    let owner = super::rate_limits::expected_reset_owner(&server.uri(), "account-123", "user-123");
+    std::fs::write(
+        codex_home
+            .path()
+            .join(".manual-rate-limit-reset-credits.json"),
+        serde_json::to_vec(&json!({"version":2,"operations":[{
+            "ownerDigest":owner,"idempotencyKey":"request-timeout","creditId":"credit-123",
+            "phase":{"state":"pending"}
+        }]}))?,
+    )?;
     Mock::given(method("GET"))
         .and(path("/api/codex/accounts/check"))
         .respond_with(
@@ -288,6 +300,14 @@ async fn consume_timeout_releases_account_auth_queue() -> Result<()> {
         mcp.read_stream_until_response_message(RequestId::Integer(account_id)),
     )
     .await??;
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .all(|request| request.url.path() != "/api/codex/rate-limit-reset-credits")
+    );
     Ok(())
 }
 
