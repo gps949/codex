@@ -14,6 +14,7 @@ mod primary;
 mod profile_identity;
 mod quota;
 mod reset_journal;
+mod selection;
 pub use reset_journal::ResetJournalView;
 mod warmup;
 pub use preferences::ManagerLanguage;
@@ -88,6 +89,8 @@ pub struct ApiAccountView {
     #[serde(flatten)]
     pub account: codex_login::ApiAccount,
     pub has_key: bool,
+    /// Nonsecret fingerprint of the exact key shown by this management snapshot.
+    pub credential_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -209,6 +212,8 @@ pub enum AccountManagerOperation {
         api_key: String,
     },
     ApiUse {
+        #[serde(rename = "expectedCredentialRevision")]
+        expected_credential_revision: Option<String>,
         #[serde(rename = "profileId")]
         profile_id: String,
     },
@@ -217,6 +222,8 @@ pub enum AccountManagerOperation {
         profile_id: String,
     },
     ApiFallback {
+        #[serde(rename = "expectedCredentialRevision")]
+        expected_credential_revision: Option<String>,
         config: codex_login::ApiAccountFallback,
     },
     Refresh {
@@ -259,6 +266,8 @@ pub enum AccountManagerOperation {
         profile_id: String,
     },
     Redeem {
+        #[serde(rename = "expectedOwnerKey")]
+        expected_owner_key: Option<String>,
         #[serde(rename = "profileId")]
         profile_id: String,
         #[serde(rename = "creditId")]
@@ -271,7 +280,7 @@ pub enum AccountManagerOperation {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountManagerResult {
     pub message: String,

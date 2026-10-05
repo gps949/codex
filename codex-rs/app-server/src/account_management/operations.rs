@@ -3,7 +3,6 @@ use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_login::AccountLabelUpdate;
 use codex_login::AccountProfileMetadataUpdate;
-use codex_login::AccountProfileState;
 use codex_login::AccountRuntimeStateStore;
 use codex_login::AccountSelectionMode;
 use codex_login::AuthManager;
@@ -36,7 +35,8 @@ impl AccountManager {
                     &expected_digest,
                     acknowledge_unconfirmed,
                 )?;
-                "Unconfirmed legacy reset record archived. No credit was used and quota was not changed.".into()
+                "Unconfirmed reset record archived. No credit was used and quota was not changed."
+                    .into()
             }
             AccountManagerOperation::DecisionSave {
                 config,
@@ -88,28 +88,16 @@ impl AccountManager {
                 self.refresh_profiles(profile_ids).await?
             }
             AccountManagerOperation::Use { profile_id } => {
-                self.select(&profile_id, AccountSelectionMode::AvailableOnly)?;
+                self.select(&profile_id, AccountSelectionMode::AvailableOnly, context)
+                    .await?;
                 "Account selected for subsequent requests.".into()
             }
             AccountManagerOperation::Retry { profile_id } => {
-                self.select(&profile_id, AccountSelectionMode::ForceProbe)?;
+                self.select(&profile_id, AccountSelectionMode::ForceProbe, context)
+                    .await?;
                 "Local quota cooldown cleared for one probe. No reset credit was used.".into()
             }
-            AccountManagerOperation::Automatic => {
-                let inventory = self.inventory().await?;
-                if let Some(candidate) = inventory
-                    .accounts
-                    .iter()
-                    .find(|account| account.availability == "ready")
-                {
-                    self.select(&candidate.profile_id, AccountSelectionMode::AvailableOnly)?;
-                } else {
-                    self.api_store()
-                        .select(codex_login::ApiAccountSelection::Subscription)?;
-                    codex_login::AccountPoolRuntime::resume_home(&self.config.codex_home)?;
-                }
-                "Returned to subscription account selection. Exhausted accounts retain their cooldowns.".into()
-            }
+            AccountManagerOperation::Automatic => self.select_automatic(context).await?,
             AccountManagerOperation::Update {
                 profile_id,
                 label,
@@ -211,12 +199,19 @@ impl AccountManager {
                 "Reset credits loaded for the selected account.".into()
             }
             AccountManagerOperation::Redeem {
+                expected_owner_key,
                 profile_id,
                 credit_id,
                 idempotency_key,
             } => {
-                self.redeem_credit(&profile_id, &credit_id, &idempotency_key, context)
-                    .await?
+                self.redeem_credit(
+                    &profile_id,
+                    &credit_id,
+                    &idempotency_key,
+                    expected_owner_key.as_deref(),
+                    context,
+                )
+                .await?
             }
             AccountManagerOperation::Settings { values } => {
                 self.update_settings(values).await?;
@@ -225,24 +220,6 @@ impl AccountManager {
             }
         };
         Ok(AccountManagerResult { message, data })
-    }
-
-    fn select(&self, id: &str, mode: AccountSelectionMode) -> anyhow::Result<()> {
-        let record = self.profile(id)?;
-        anyhow::ensure!(
-            !record.profile.disabled,
-            "Enable this account before selecting it"
-        );
-        anyhow::ensure!(
-            record.state == AccountProfileState::Ready,
-            "Complete account login first"
-        );
-        AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf())
-            .select(record.profile.id, mode)?;
-        self.api_store()
-            .select(codex_login::ApiAccountSelection::Subscription)?;
-        codex_login::AccountPoolRuntime::resume_home(&self.config.codex_home)?;
-        Ok(())
     }
 
     async fn update_settings(&self, values: serde_json::Value) -> anyhow::Result<()> {

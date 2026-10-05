@@ -2,7 +2,6 @@ use super::*;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_backend_client::Client;
-use codex_backend_client::ConsumeRateLimitResetCreditCode;
 use codex_login::AccountProfileState;
 use codex_login::AccountRateLimitWindow;
 use codex_login::AccountRateLimits;
@@ -14,6 +13,8 @@ use std::time::Duration;
 
 #[path = "quota_report.rs"]
 mod report;
+#[path = "quota_reset_credits.rs"]
+mod reset_credits;
 use report::QuotaRefreshOutcome;
 use report::QuotaRefreshReport;
 use report::RefreshPermit;
@@ -296,193 +297,10 @@ impl AccountManager {
         Ok((report, count))
     }
 
-    pub(super) async fn read_credits(&self, id: &str) -> anyhow::Result<serde_json::Value> {
-        let profile = self.profile(id)?;
-        let (client, manager, auth) = self.profile_client(id).await?;
-        let owner = manager
-            .auth_change_state_receiver()
-            .borrow()
-            .owner_generation;
-        let details = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.list_rate_limit_reset_credits(),
-        )
-        .await??;
-        manager.reload().await;
-        let current_profile = self.profile(id)?;
-        let current = manager.auth_cached();
-        let pool = self.execution_pool().await?;
-        let store = AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf());
-        anyhow::ensure!(
-            !current_profile.profile.disabled
-                && current_profile.state == AccountProfileState::Ready
-                && current_profile.profile.credential_home == profile.profile.credential_home
-                && manager
-                    .auth_change_state_receiver()
-                    .borrow()
-                    .owner_generation
-                    == owner
-                && current
-                    .as_ref()
-                    .is_some_and(|current| current.get_account_id() == auth.get_account_id()
-                        && current.get_chatgpt_user_id() == auth.get_chatgpt_user_id())
-                && pool.as_ref().is_some_and(|pool| store
-                    .validate_profile_auth(pool, &profile.profile.id, &auth)
-                    .unwrap_or(false)),
-            "Account identity changed during the credit check; refresh before viewing credits"
-        );
-        let credits: Vec<_> = details.credits.into_iter().map(|credit| serde_json::json!({
-            "id":credit.id,"resetType":credit.reset_type,"status":credit.status,"grantedAt":credit.granted_at,
-            "expiresAt":credit.expires_at,"title":credit.title,"description":credit.description,
-        })).collect();
-        Ok(
-            serde_json::json!({"profileId":id,"availableCount":details.available_count,"credits":credits}),
-        )
-    }
-
     async fn execution_pool(&self) -> anyhow::Result<Option<Arc<codex_login::AccountPool>>> {
         Ok(Some(
             codex_login::load_account_pool_for_management(&self.config.auth_config()).await?,
         ))
-    }
-
-    pub(super) async fn redeem_credit(
-        &self,
-        id: &str,
-        credit_id: &str,
-        key: &str,
-        context: &AccountOperationContext,
-    ) -> anyhow::Result<String> {
-        anyhow::ensure!(
-            !credit_id.is_empty() && credit_id.len() <= 256 && !key.is_empty() && key.len() <= 128,
-            "Invalid credit or operation ID"
-        );
-        let profile = self.profile(id)?;
-        let (client, manager, auth) = self.profile_client(id).await?;
-        let owner = manager
-            .auth_change_state_receiver()
-            .borrow()
-            .owner_generation;
-        let store = AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf());
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        let _lock = loop {
-            if let Some(lock) = store.try_lock_reset_credit()? {
-                break lock;
-            }
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
-                "Another reset operation is running; retry with the same operation ID"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        };
-        let current_profile = self.profile(id)?;
-        anyhow::ensure!(
-            !current_profile.profile.disabled
-                && current_profile.state == AccountProfileState::Ready
-                && current_profile.profile.credential_home == profile.profile.credential_home,
-            "Account selection changed while waiting; refresh before redeeming a credit"
-        );
-        manager.reload().await;
-        anyhow::ensure!(
-            manager
-                .auth_change_state_receiver()
-                .borrow()
-                .owner_generation
-                == owner
-                && manager.auth_cached().is_some_and(
-                    |current| current.get_token_data().ok() == auth.get_token_data().ok()
-                ),
-            "Account credentials changed while waiting; refresh before redeeming a credit"
-        );
-        let credits =
-            tokio::time::timeout_at(deadline, client.list_rate_limit_reset_credits()).await??;
-        let credit = credits
-            .credits
-            .iter()
-            .find(|credit| credit.id == credit_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "This credit is no longer listed. Refresh quota and inspect available credits."
-                )
-            })?;
-        anyhow::ensure!(
-            credit.reset_type == "codex_rate_limits"
-                && credit.status == "available"
-                && credit
-                    .expires_at
-                    .as_ref()
-                    .is_none_or(|expires| DateTime::parse_from_rfc3339(expires)
-                        .is_ok_and(|expires| expires > Utc::now())),
-            "This credit is unavailable, expired, or has a different quota scope"
-        );
-        let current_profile = self.profile(id)?;
-        anyhow::ensure!(
-            !current_profile.profile.disabled
-                && current_profile.state == AccountProfileState::Ready,
-            "Account changed during the credit check; no credit was redeemed"
-        );
-        let pool = self.execution_pool().await?;
-        anyhow::ensure!(
-            pool.as_ref().is_some_and(|pool| store
-                .validate_profile_auth(pool, &profile.profile.id, &auth)
-                .unwrap_or(false)),
-            "Account credentials changed; refresh before redeeming this credit"
-        );
-        let probe = pool
-            .as_ref()
-            .map(|pool| store.capture_quota_probe(pool, &profile.profile.id, &auth))
-            .transpose()?
-            .flatten();
-        context.ensure_current().await?;
-        let result = tokio::time::timeout_at(
-            deadline,
-            client.consume_rate_limit_reset_credit_by_id(key, credit_id),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Reset outcome is unconfirmed. Refresh quota before retrying the same operation ID."
-            )
-        })??;
-        manager.reload().await;
-        let current = manager.auth_cached();
-        anyhow::ensure!(
-            manager
-                .auth_change_state_receiver()
-                .borrow()
-                .owner_generation
-                == owner
-                && current
-                    .as_ref()
-                    .is_some_and(|current| current.get_account_id() == auth.get_account_id()
-                        && current.get_chatgpt_user_id() == auth.get_chatgpt_user_id()),
-            "Account identity changed during reset; its new identity was left untouched"
-        );
-        let message = match result.code {
-            ConsumeRateLimitResetCreditCode::Reset if result.windows_reset >= 2 => {
-                let confirmed = if let (Some(pool), Some(probe)) = (pool.as_ref(), probe) {
-                    store.confirm_quota_reset(pool, probe, Utc::now())?
-                } else {
-                    false
-                };
-                if confirmed {
-                    "Reset credit redeemed and quota recovery confirmed for this account."
-                } else {
-                    "Reset credit redeemed. Checking fresh quota before confirming local recovery."
-                }
-            }
-            ConsumeRateLimitResetCreditCode::Reset => {
-                "Backend reported a partial or unconfirmed reset. Checking fresh quota."
-            }
-            ConsumeRateLimitResetCreditCode::NothingToReset
-            | ConsumeRateLimitResetCreditCode::AlreadyRedeemed => {
-                "Backend reported no new redemption. Checking quota before confirming recovery."
-            }
-            _ => "No reset was applied. Refresh quota or inspect available credits.",
-        };
-        drop(_lock);
-        self.refresh_profiles(Some(vec![id.into()])).await?;
-        Ok(message.into())
     }
 }
 
