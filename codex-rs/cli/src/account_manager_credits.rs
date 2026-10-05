@@ -1,4 +1,4 @@
-//! Reset-credit selection and recovery preserve the original operation identity.
+//! Account-bound reset-credit confirmation recovers the server's immutable pending operation.
 
 use super::Locale;
 use super::clean;
@@ -8,10 +8,10 @@ use codex_app_server::account_management::AccountManagerOperation as Operation;
 use codex_app_server::account_management::ManagedAccountView;
 use std::sync::Arc;
 
-/// Retains the exact operation when the backend outcome is not yet confirmed.
 pub(super) struct PendingRedemption {
     credit_id: String,
     operation_id: String,
+    owner_key: String,
 }
 
 pub(super) async fn redeem(
@@ -21,18 +21,54 @@ pub(super) async fn redeem(
     locale: Locale,
 ) -> anyhow::Result<()> {
     let id = &account.profile_id;
+    let result = manager
+        .execute(Operation::Credits {
+            profile_id: id.clone(),
+        })
+        .await?;
+    if !result.data["inventoryError"].is_null() {
+        println!("{}", locale.text("Credit inventory unavailable; current count is unknown. The original reset is retained."));
+    }
+    let owner = result.data["resetOwnerKey"].as_str().filter(|owner| owner.len() == 64
+        && owner.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        .ok_or_else(|| anyhow::anyhow!(locale.text("Reset confirmation needs a current account binding. Update the host and reload credits.")))?;
+    if !pending.contains_key(id) && !result.data["pendingResetCredit"].is_null() {
+        let recovered: codex_app_server_protocol::PendingAccountRateLimitResetCredit =
+            serde_json::from_value(result.data["pendingResetCredit"].clone())?;
+        anyhow::ensure!(recovered.owner_key == owner, locale.text("The original reset belongs to another account. Return to that account before retrying."));
+        let credit_id = recovered
+            .credit_id
+            .ok_or_else(|| anyhow::anyhow!(locale.text("Credit ID missing")))?;
+        anyhow::ensure!(
+            !credit_id.is_empty()
+                && credit_id.len() <= 256
+                && !recovered.idempotency_key.is_empty()
+                && recovered.idempotency_key.len() <= 128,
+            locale.text("The pending reset could not be verified. Reload credits before retrying.")
+        );
+        pending.insert(
+            id.clone(),
+            PendingRedemption {
+                credit_id,
+                operation_id: recovered.idempotency_key,
+                owner_key: owner.into(),
+            },
+        );
+    }
     if let Some(operation) = pending.get(id) {
+        anyhow::ensure!(operation.owner_key == owner, locale.text("The original reset belongs to another account. Return to that account before retrying."));
         println!(
             "{}",
             locale.format(
                 "A previous reset has an unconfirmed outcome. Credit: {} · Operation: {}",
-                &[&clean(&operation.credit_id), &operation.operation_id]
+                &[
+                    &clean(&operation.credit_id),
+                    &clean(&operation.operation_id)
+                ]
             )
         );
-        println!("{}", locale.text(
-            "R refreshes quota. RETRY uses the same credit and operation ID. REVIEW clears the pending record only after you check its outcome."
-        ));
-        match prompt(locale, "Choose R, RETRY, REVIEW, or Enter to return", "")
+        println!("{}", locale.text("RETRY checks the original operation without selecting a new credit. R refreshes quota. Enter returns."));
+        match prompt(locale, "Choose R, RETRY, or Enter to return", "")
             .await?
             .as_str()
         {
@@ -46,54 +82,14 @@ pub(super) async fn redeem(
                 let _ = prompt(locale, "Enter to return", "").await?;
                 return Ok(());
             }
-            "REVIEW" => {
-                let result = manager
-                    .execute(Operation::Credits {
-                        profile_id: id.clone(),
-                    })
-                    .await?;
-                let credit = result.data["credits"].as_array().and_then(|credits| {
-                    credits
-                        .iter()
-                        .find(|credit| credit["id"].as_str() == Some(operation.credit_id.as_str()))
-                });
-                println!(
-                    "{}",
-                    locale.format(
-                        "Original credit status: {}",
-                        &[locale.message(credit.map_or("No longer listed", |credit| {
-                            credit["status"].as_str().unwrap_or("Unknown")
-                        }))]
-                    )
-                );
-                println!("{}", locale.text(
-                    "Clear only after checking the provider's quota and credit history. This forgets the pending record; it does not undo a redemption."
-                ));
-                if prompt(
-                    locale,
-                    "Type REVIEWED to confirm you checked the outcome",
-                    "",
-                )
-                .await?
-                    == "REVIEWED"
-                {
-                    pending.remove(id);
-                }
-                return Ok(());
-            }
             "RETRY" => {}
             _ => return Ok(()),
         }
     } else {
-        let result = manager
-            .execute(Operation::Credits {
-                profile_id: id.clone(),
-            })
-            .await?;
         let credits = result.data["credits"]
             .as_array()
             .ok_or_else(|| anyhow::anyhow!(locale.text("Credit list unavailable")))?;
-        let available: Vec<_> = credits
+        let mut available = credits
             .iter()
             .filter(|credit| {
                 credit["status"].as_str() == Some("available")
@@ -103,8 +99,20 @@ pub(super) async fn redeem(
                             .is_ok_and(|at| at > chrono::Utc::now())
                     })
             })
-            .collect();
-        if available.is_empty() {
+            .collect::<Vec<_>>();
+        available.sort_by(|left, right| {
+            let expiry = |credit: &serde_json::Value| {
+                credit["expiresAt"]
+                    .as_str()
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                    .map(|at| at.with_timezone(&chrono::Utc))
+            };
+            expiry(left)
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+                .cmp(&expiry(right).unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC))
+                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+        });
+        let Some(credit) = available.first() else {
             println!(
                 "{}",
                 locale.text(
@@ -113,50 +121,35 @@ pub(super) async fn redeem(
             );
             let _ = prompt(locale, "Enter to return", "").await?;
             return Ok(());
-        }
-        for (index, credit) in available.iter().enumerate() {
-            println!(
-                "{}",
-                locale.format(
-                    "{}: {} · {} · Expires {}",
-                    &[
-                        &(index + 1).to_string(),
-                        &clean(
-                            credit["title"]
-                                .as_str()
-                                .unwrap_or_else(|| locale.text("Reset credit"))
-                        ),
-                        &clean(match credit["resetType"].as_str() {
-                            Some("codex_rate_limits") if locale == Locale::SimplifiedChinese =>
-                                locale.text("Codex quota"),
-                            Some(scope) => scope,
-                            None => locale.text("Unknown scope"),
-                        }),
-                        &clean(
-                            credit["expiresAt"]
-                                .as_str()
-                                .unwrap_or_else(|| locale.text("No expiry reported"))
-                        )
-                    ]
-                )
-            );
-        }
-        let choice = prompt(locale, "Credit number (Enter returns)", "").await?;
-        if choice.is_empty() {
-            return Ok(());
-        }
-        let credit = choice
-            .parse::<usize>()
-            .ok()
-            .and_then(|index| index.checked_sub(1))
-            .and_then(|index| available.get(index))
-            .ok_or_else(|| anyhow::anyhow!(locale.text("Choose a listed credit number")))?;
+        };
         println!(
             "{}",
             locale.format(
                 "This consumes one reset credit for {}.",
                 &[&clean(&account.label)]
             )
+        );
+        println!(
+            "{}",
+            locale.format(
+                "{} · Expires {}",
+                &[
+                    &clean(
+                        credit["title"]
+                            .as_str()
+                            .unwrap_or_else(|| locale.text("Reset credit"))
+                    ),
+                    &clean(
+                        credit["expiresAt"]
+                            .as_str()
+                            .unwrap_or_else(|| locale.text("No expiry reported"))
+                    ),
+                ]
+            )
+        );
+        println!(
+            "{}",
+            locale.text("Earliest-expiring available credit selected.")
         );
         if prompt(locale, "Type REDEEM to confirm", "").await? != "REDEEM" {
             return Ok(());
@@ -168,26 +161,22 @@ pub(super) async fn redeem(
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!(locale.text("Credit ID missing")))?
                     .into(),
-                operation_id: format!(
-                    "manager-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)?
-                        .as_nanos()
-                ),
+                operation_id: codex_protocol::ThreadId::new().to_string(),
+                owner_key: owner.into(),
             },
         );
     }
     let operation = &pending[id];
-    // Show a recoverable identifier before contacting the backend, even if input closes.
     println!(
         "{}",
-        locale.format("Reset operation: {}", &[&operation.operation_id])
+        locale.format("Reset operation: {}", &[&clean(&operation.operation_id)])
     );
     match manager
         .execute(Operation::Redeem {
             profile_id: id.clone(),
             credit_id: operation.credit_id.clone(),
             idempotency_key: operation.operation_id.clone(),
+            expected_owner_key: Some(operation.owner_key.clone()),
         })
         .await
     {
@@ -195,13 +184,11 @@ pub(super) async fn redeem(
             pending.remove(id);
             println!("{}", clean(locale.message(&result.message)));
         }
-        Err(error) => {
-            println!(
-                "{}\n{}",
-                clean(locale.message(&error.to_string())),
-                locale.text("The operation ID was retained. Refresh quota before retrying.")
-            );
-        }
+        Err(error) => println!(
+            "{}\n{}",
+            clean(locale.message(&error.to_string())),
+            locale.text("The operation ID was retained. Refresh quota before retrying.")
+        ),
     }
     let _ = prompt(locale, "Enter to return", "").await?;
     Ok(())

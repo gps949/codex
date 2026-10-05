@@ -1246,6 +1246,39 @@
       const readAt = Math.floor(guidance.now());
       await synchronizeInventory();
       setBusy(false);
+      const recovered = result.data.pendingResetCredit;
+      if (
+        recovered !== null &&
+        (!verifiedResetTuple(recovered) ||
+          recovered.ownerKey !== result.data.resetOwnerKey)
+      )
+        throw new Error(
+          t(
+            "The pending reset could not be verified. Reload credits before retrying.",
+          ),
+        );
+      if (recovered && !state.redemption) {
+        saveRedemption({
+          profileId: id,
+          creditId: recovered.creditId,
+          idempotencyKey: recovered.idempotencyKey,
+          ownerKey: recovered.ownerKey,
+          startedAt: readAt,
+        });
+      } else if (
+        recovered &&
+        state.redemption &&
+        ((!state.redemption.ownerKey && state.redemption.profileId === id) ||
+          state.redemption.ownerKey === recovered.ownerKey) &&
+        state.redemption.idempotencyKey === recovered.idempotencyKey &&
+        state.redemption.creditId === recovered.creditId
+      ) {
+        saveRedemption({
+          ...state.redemption,
+          profileId: id,
+          ownerKey: recovered.ownerKey,
+        });
+      }
       const pending = state.redemption;
       const eligible = result.data.credits
         .filter(
@@ -1262,19 +1295,57 @@
         });
       const selected = pending
         ? pending.profileId === id &&
-          eligible.find((credit) => credit.id === pending.creditId)
+          verifiedResetTuple(pending) &&
+          (result.data.credits.find(
+            (credit) => credit.id === pending.creditId,
+          ) || {
+            id: pending.creditId,
+            title: t("Previous reset credit"),
+            status: "unknown",
+            resetType: "codex_rate_limits",
+            expiresAt: null,
+          })
         : eligible[0];
       if (selected) showRedemption(id, selected, { data: result.data, readAt });
       else showCredits(id, result.data, readAt);
-      notice(result.message || "Reset credits loaded.");
+      if (
+        result.data.inventoryError !== null &&
+        result.data.inventoryError !== undefined
+      )
+        notice(
+          "Credit inventory is unavailable. The available credit count is unknown.",
+          true,
+        );
+      else notice(result.message || "Reset credits loaded.");
     } catch (error) {
       setBusy(false);
       showResult(error.message, true);
     }
   }
+  function creditInventoryWarning(data) {
+    if (data?.inventoryError === null || data?.inventoryError === undefined)
+      return null;
+    const warning = element("div", "", "message warning");
+    warning.append(
+      element(
+        "p",
+        t(
+          "Credit inventory is unavailable. The available credit count is unknown.",
+        ),
+      ),
+      element(
+        "p",
+        t(
+          "The original operation is preserved. Retrying uses the same account, credit, and operation ID.",
+        ),
+      ),
+    );
+    return warning;
+  }
   function showCredits(id, data, readAt) {
     const account = accountById(id);
     const pending = state.redemption;
+    const inventoryWarning = creditInventoryWarning(data);
     openDialog(
       t("Choose a reset credit"),
       "Choose a credit. Nothing is consumed until you confirm.",
@@ -1285,11 +1356,15 @@
             ["Profile ID", id],
             [
               t("Eligible credits"),
-              data.credits.filter((credit) => creditValidity(credit).eligible)
-                .length,
+              inventoryWarning
+                ? t("Unknown")
+                : data.credits.filter(
+                    (credit) => creditValidity(credit).eligible,
+                  ).length,
             ],
           ]),
         );
+        if (inventoryWarning) body.append(inventoryWarning);
         if (!contactAllowed(account))
           body.append(
             element(
@@ -1310,7 +1385,7 @@
               "disclosure",
             ),
           );
-        if (!data.credits.length)
+        if (!inventoryWarning && !data.credits.length)
           body.append(
             element(
               "p",
@@ -1322,15 +1397,18 @@
           const choice = element("div", "", "credit-choice");
           const select = button(
             "Use this credit",
-            () => showRedemption(id, credit),
+            () => showRedemption(id, credit, { data, readAt }),
             "primary",
           );
           select.disabled =
+            Boolean(inventoryWarning) ||
             !contactAllowed(account) ||
             !creditValidity(credit).eligible ||
             Boolean(
               pending &&
-                (pending.profileId !== id || pending.creditId !== credit.id),
+                (!verifiedResetTuple(pending) ||
+                  pending.profileId !== id ||
+                  pending.creditId !== credit.id),
             );
           if (select.disabled) select.dataset.unavailable = "true";
           const content = element("div");
@@ -1353,12 +1431,15 @@
         $("dialog-submit").disabled = true;
         $("dialog-submit").dataset.unavailable = "true";
         if (
+          !inventoryWarning &&
           !data.credits.some(
             (credit) =>
               creditValidity(credit).eligible &&
               contactAllowed(account) &&
               (!pending ||
-                (pending.profileId === id && pending.creditId === credit.id)),
+                (verifiedResetTuple(pending) &&
+                  pending.profileId === id &&
+                  pending.creditId === credit.id)),
           )
         )
           body.append(
@@ -1375,7 +1456,11 @@
         );
         if (
           pending?.profileId === id &&
-          (!prior || !creditValidity(prior).eligible)
+          !inventoryWarning &&
+          !data.pendingResetCredit &&
+          (!verifiedResetTuple(pending) ||
+            !prior ||
+            !creditValidity(prior).eligible)
         )
           body.append(
             button("Clear reviewed operation", () =>
@@ -1385,7 +1470,26 @@
       },
     );
   }
+  function verifiedResetTuple(value) {
+    return Boolean(
+      value &&
+        typeof value.ownerKey === "string" &&
+        /^[a-f0-9]{64}$/.test(value.ownerKey) &&
+        typeof value.creditId === "string" &&
+        value.creditId.length > 0 &&
+        value.creditId.length <= 256 &&
+        typeof value.idempotencyKey === "string" &&
+        value.idempotencyKey.length > 0 &&
+        value.idempotencyKey.length <= 128,
+    );
+  }
   function saveRedemption(value) {
+    if (value && !verifiedResetTuple(value))
+      throw new Error(
+        t(
+          "The pending reset could not be verified. Reload credits before retrying.",
+        ),
+      );
     try {
       if (value) sessionStorage.setItem(resetStorageKey, JSON.stringify(value));
       else sessionStorage.removeItem(resetStorageKey);
@@ -1400,9 +1504,12 @@
     $("pending-reset").hidden = !value;
   }
   function showRedemption(id, credit, context = null) {
+    const inventoryWarning = creditInventoryWarning(context?.data);
     openDialog(
       t("Use this reset credit"),
-      "Confirm to consume one credit for this account.",
+      inventoryWarning
+        ? "Retry the original reset operation. Its outcome may remain unconfirmed."
+        : "Confirm to consume one credit for this account.",
       (body) => {
         body.append(
           definitions([
@@ -1413,6 +1520,7 @@
             ["Scope", guidance.creditScope(credit.resetType)],
           ]),
         );
+        if (inventoryWarning) body.append(inventoryWarning);
         if (state.redemption)
           body.append(
             definitions([
@@ -1444,8 +1552,24 @@
         );
       },
       async () => {
+        const replay =
+          state.redemption?.profileId === id &&
+          state.redemption.creditId === credit.id;
+        const owner = replay
+          ? state.redemption.ownerKey
+          : context?.data?.resetOwnerKey;
         if (
-          !creditValidity(credit).eligible ||
+          typeof owner !== "string" ||
+          !/^[a-f0-9]{64}$/.test(owner) ||
+          context?.data?.resetOwnerKey !== owner
+        )
+          throw new Error(
+            t(
+              "Account changed since confirmation. Reload credits for the original account before retrying.",
+            ),
+          );
+        if (
+          (!replay && (inventoryWarning || !creditValidity(credit).eligible)) ||
           !contactAllowed(accountById(id))
         )
           throw new Error(
@@ -1474,6 +1598,7 @@
             profileId: id,
             creditId: credit.id,
             idempotencyKey: crypto.randomUUID(),
+            ownerKey: owner,
             startedAt: Math.floor(Date.now() / 1000),
           };
           saveRedemption(pending);
@@ -1484,6 +1609,7 @@
             profileId: id,
             creditId: credit.id,
             idempotencyKey: pending.idempotencyKey,
+            expectedOwnerKey: pending.ownerKey,
           });
           saveRedemption(null);
         } catch (error) {
@@ -1507,7 +1633,9 @@
       t("Clear reviewed reset operation"),
       evidence.profileMissing
         ? "A fresh account read shows the original profile is no longer enrolled. Its redemption outcome cannot be checked here. Clear only this browser's retry record after reviewing the uncertainty; no credit will be consumed."
-        : "The latest successful credit read shows this credit is absent or unavailable. This does not prove whether the earlier operation consumed it. Clear only this browser's retry record; no credit will be consumed.",
+        : !verifiedResetTuple(pending)
+          ? "This legacy retry record has no verified account binding. Review the original outcome before clearing this local record. No credit is consumed."
+          : "The latest successful credit read shows this credit is absent or unavailable. This does not prove whether the earlier operation consumed it. Clear only this browser's retry record; no credit will be consumed.",
       (body) => {
         body.append(
           definitions([
@@ -1517,11 +1645,13 @@
               "Review evidence",
               evidence.profileMissing
                 ? t("Profile absent from current inventory")
-                : credit
-                  ? t("Credit unavailable ({status})", {
-                      status: credit.status,
-                    })
-                  : t("Credit absent from latest returned list"),
+                : !verifiedResetTuple(pending)
+                  ? t("Retry record has no verified account binding")
+                  : credit
+                    ? t("Credit unavailable ({status})", {
+                        status: credit.status,
+                      })
+                    : t("Credit absent from latest returned list"),
             ],
             [
               "Validity",
@@ -1851,6 +1981,12 @@
       [t("Local key"), account.hasKey ? t("Stored") : t("Missing")],
     ];
   }
+  function apiCredentialRevision(account) {
+    const revision = account?.credentialRevision;
+    return typeof revision === "string" && /^[a-f0-9]{64}$/.test(revision)
+      ? revision
+      : null;
+  }
   function renderApiAccounts() {
     const inventory = state.inventory;
     const accounts = inventory.apiAccounts || [];
@@ -1902,11 +2038,23 @@
         confirmOperation(
           "Use API account",
           "Subsequent turns send conversation content to this provider and are billed under its API account. This explicit selection is shared with clients using this Codex home.",
-          { type: "apiUse", profileId: account.id },
+          {
+            type: "apiUse",
+            profileId: account.id,
+            expectedCredentialRevision: apiCredentialRevision(account),
+          },
           [[t("Account"), account.label], ...apiDetails(account)],
         ),
       );
-      use.disabled = state.busy || account.disabled || !account.hasKey;
+      use.disabled =
+        state.busy ||
+        account.disabled ||
+        !account.hasKey ||
+        !apiCredentialRevision(account);
+      if (!apiCredentialRevision(account))
+        use.title = t(
+          "The API account binding could not be verified. Reload account details before authorizing paid requests.",
+        );
       actions.append(
         use,
         button("Edit API account", () => showApiEditor(account)),
@@ -2174,7 +2322,12 @@
         const options = [
           ["", t("Choose a provider target")],
           ...(state.inventory.apiAccounts || [])
-            .filter((account) => !account.disabled && account.hasKey)
+            .filter(
+              (account) =>
+                !account.disabled &&
+                account.hasKey &&
+                apiCredentialRevision(account),
+            )
             .map((account) => [
               account.id,
               `${account.label} (${account.model})`,
@@ -2186,7 +2339,7 @@
           "Provider target",
           "select",
           fallback.profileId || "",
-          "Only enabled profiles with a stored key are eligible.",
+          "Only enabled profiles with a stored key and verified account details are eligible.",
           { options },
         );
         wait = field(
@@ -2205,7 +2358,10 @@
         );
         if (
           enabled.checked &&
-          (!account || account.disabled || !account.hasKey)
+          (!account ||
+            account.disabled ||
+            !account.hasKey ||
+            !apiCredentialRevision(account))
         )
           throw new Error(
             t(
@@ -2222,7 +2378,13 @@
           config.enabled
             ? "Authorize automatic paid requests to this exact provider after the waiting time shown. Conversation content is sent to this provider and its API billing applies."
             : "Disable automatic paid fallback. Explicit manual API selection remains available.",
-          { type: "apiFallback", config },
+          {
+            type: "apiFallback",
+            config,
+            expectedCredentialRevision: config.enabled
+              ? apiCredentialRevision(account)
+              : null,
+          },
           [
             [
               t("Automatic paid fallback"),

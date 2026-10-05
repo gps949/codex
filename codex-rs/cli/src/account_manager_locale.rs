@@ -128,8 +128,8 @@ fn chinese(english: &str) -> Option<&'static str> {
             "请先核对该账号的额度和重置历史。归档会放弃旧请求，之后可能使用另一张券。原记录会备份保留，额度不变。"
         }
         "Type yes to archive the reviewed record" => "输入 yes 归档已复核的记录",
-        "Unconfirmed legacy reset record archived. No credit was used and quota was not changed." => {
-            "未确认的旧版重置记录已备份归档；没有使用券或修改额度。"
+        "Unconfirmed reset record archived. No credit was used and quota was not changed." => {
+            "未确认的重置记录已备份归档；没有使用券或修改额度。"
         }
         "Language saved for browser and terminal managers." => {
             "已保存语言，浏览器和终端管理界面共用此设置。"

@@ -228,7 +228,10 @@ pub(super) fn inspect(codex_home: &Path) -> anyhow::Result<Vec<ResetJournalView>
             attempted_at,
             legacy,
             archive_available: legacy
-                || matches!(bytes.as_deref().map(classify), Ok(JournalKind::Damaged)),
+                || matches!(
+                    bytes.as_deref().map(classify),
+                    Ok(JournalKind::Damaged | JournalKind::Pending(..))
+                ),
             message: message.to_owned(),
         });
     }
@@ -264,9 +267,9 @@ pub(super) fn archive(
     anyhow::ensure!(
         matches!(
             classify(&bytes),
-            JournalKind::Legacy(..) | JournalKind::Damaged
+            JournalKind::Legacy(..) | JournalKind::Damaged | JournalKind::Pending(..)
         ),
-        "Only legacy or damaged reset journals may be archived; owner-bound and unknown schemas must be retained"
+        "Only recognized unresolved or damaged reset journals may be archived; unknown schemas must be retained"
     );
     let directory = codex_home.join(ARCHIVE_DIRECTORY);
     match std::fs::symlink_metadata(&directory) {

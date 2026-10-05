@@ -63,24 +63,34 @@ fn missing_acknowledgement_and_changed_digest_leave_source_untouched() -> anyhow
 }
 
 #[test]
-fn pending_owner_bound_journals_remain_available_for_automatic_reconciliation() -> anyhow::Result<()>
-{
+fn reviewed_pending_archive_preserves_the_exact_unconfirmed_record_without_claiming_success()
+-> anyhow::Result<()> {
     let home = tempfile::tempdir()?;
     let path = journal(home.path(), PENDING)?;
     let views = inspect(home.path())?;
     let public = serde_json::to_string(&views)?;
     assert!(!public.contains("private-request-id"));
     assert!(!public.contains("private-owner-key"));
-    assert!(!public.contains("requestId"));
     assert_eq!(
         (views.len(), views[0].legacy, views[0].archive_available),
-        (1, false, false)
+        (1, false, true)
     );
-    assert!(archive_acknowledged(home.path(), &views[0].digest).is_err());
+    assert!(
+        archive(
+            home.path(),
+            NAME,
+            &views[0].digest,
+            /*acknowledge_unconfirmed*/ false
+        )
+        .is_err()
+    );
     assert_eq!(std::fs::read(&path)?, PENDING);
-    let mut confirmed: serde_json::Value = serde_json::from_slice(PENDING)?;
-    confirmed["phase"] = serde_json::json!({"state":"confirmed", "outcome":"quotaRecovered"});
-    std::fs::write(&path, serde_json::to_vec(&confirmed)?)?;
+    archive_acknowledged(home.path(), &views[0].digest)?;
+    let directory = std::fs::read_dir(home.path().join(ARCHIVE_DIRECTORY))?
+        .next()
+        .unwrap()?
+        .path();
+    assert_eq!(std::fs::read(directory.join(NAME))?, PENDING);
     assert!(inspect(home.path())?.is_empty());
     Ok(())
 }

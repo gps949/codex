@@ -144,6 +144,8 @@ fn manager_chinese_wide_inventory_aligns_terminal_cells() {
 fn manager_chinese_narrow_manual_api_retains_account_data_and_has_no_subscription_marker() {
     let mut inventory = inventory();
     inventory.api_accounts = vec![codex_app_server::account_management::ApiAccountView {
+        credential_revision: None,
+
         account: codex_login::ApiAccount {
             id: "api-{untouched}".into(),
             label: "Needs login".into(),
