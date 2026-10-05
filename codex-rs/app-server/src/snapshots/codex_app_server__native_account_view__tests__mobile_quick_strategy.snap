@@ -1,0 +1,16 @@
+---
+source: app-server/src/native_account_view_tests.rs
+expression: render(question)
+---
+Rotation strategy
+By priority
+Use the lowest priority number first
+
+By reset time
+Current · Start idle windows, then prefer the soonest reset
+
+Back
+
+
+Close
+

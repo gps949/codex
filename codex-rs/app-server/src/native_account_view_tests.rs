@@ -3,6 +3,156 @@ use pretty_assertions::assert_eq;
 
 const NOW: i64 = 1_700_000_000;
 
+#[test]
+fn quick_page_shows_identity_and_selects_only_available_subscriptions() {
+    let mut inventory = fixture();
+    let mut standby = inventory.accounts[0].clone();
+    standby.id = "standby".into();
+    standby.label = "Standby".into();
+    standby.current = false;
+    standby.state = "ready".into();
+    inventory.accounts.push(standby);
+    let question = inventory.question_at(MenuPage::Quick(0), NativeAccountLanguage::English, NOW);
+    assert_eq!(
+        question.choices[0].action,
+        MenuAction::Page(MenuPage::Detail(0))
+    );
+    assert_eq!(
+        question.choices[1].action,
+        MenuAction::SelectSubscription(1)
+    );
+    assert!(question.choices[0].description.contains("Business"));
+    assert!(
+        question.choices[0]
+            .description
+            .contains("alpha@example.test")
+    );
+    insta::assert_snapshot!("mobile_quick_accounts", render(question));
+}
+
+#[test]
+fn quick_browsing_and_page_ranges_keep_their_origin() {
+    let mut inventory = fixture();
+    inventory.accounts = (0..12)
+        .map(|index| {
+            let mut account = fixture().accounts.remove(0);
+            account.id = format!("profile-{index}");
+            account.current = index == 9;
+            account
+        })
+        .collect();
+    let origin = MenuOrigin::Quick(3);
+    let question = inventory.question_at(
+        MenuPage::ChoosePage {
+            first: 4,
+            end: 6,
+            origin,
+        },
+        NativeAccountLanguage::English,
+        NOW,
+    );
+    assert_eq!(
+        question.choices.last().unwrap().action,
+        MenuAction::Page(MenuPage::Quick(3))
+    );
+    let options = inventory.question_at(
+        MenuPage::QuickOptions(3),
+        NativeAccountLanguage::English,
+        NOW,
+    );
+    assert_eq!(options.choices.len(), 5);
+    assert_eq!(
+        options.choices[0].action,
+        MenuAction::Page(MenuPage::Quick(4))
+    );
+    assert_eq!(
+        options.choices[1].action,
+        MenuAction::Page(MenuPage::Quick(2))
+    );
+}
+
+#[test]
+fn quick_strategy_offers_explicit_values_with_the_effective_strategy_marked() {
+    let mut inventory = fixture();
+    inventory.settings = serde_json::json!({"rotation_strategy": "earliest_reset"});
+    let question = inventory.question_at(
+        MenuPage::Strategy(MenuOrigin::Quick(0)),
+        NativeAccountLanguage::English,
+        NOW,
+    );
+    assert_eq!(
+        question.choices[0].action,
+        MenuAction::SetStrategy(codex_config::AccountPoolRotationStrategy::FillFirst)
+    );
+    assert_eq!(
+        question.choices[1].action,
+        MenuAction::SetStrategy(codex_config::AccountPoolRotationStrategy::EarliestReset)
+    );
+    insta::assert_snapshot!("mobile_quick_strategy", render(question));
+}
+
+#[test]
+fn refresh_last_batch_describes_the_actual_wrapped_range() {
+    let mut inventory = fixture();
+    inventory.accounts = (0..5).map(|_| fixture().accounts.remove(0)).collect();
+    let question = inventory.question_at(MenuPage::Refresh(4), NativeAccountLanguage::English, NOW);
+    assert_eq!(question.choices[1].description, "1–4");
+    assert_eq!(
+        question.choices[1].action,
+        MenuAction::Page(MenuPage::Refresh(0))
+    );
+}
+
+#[test]
+fn current_subscription_is_retained_before_the_inventory_cap() {
+    use crate::account_management::ManagedAccountView;
+    use crate::account_management::ManagedRateLimits;
+    let accounts = (0..129)
+        .map(|index| ManagedAccountView {
+            profile_id: format!("profile-{index}"),
+            label: format!("Profile {index}"),
+            custom_label: None,
+            priority: index,
+            disabled: false,
+            login_state: "signedIn".into(),
+            availability: "ready".into(),
+            cooldown_until: None,
+            backend_resets_at: None,
+            plan: Some("Pro".into()),
+            email: Some(format!("profile-{index}@example.test")),
+            rate_limits: ManagedRateLimits {
+                primary: None,
+                secondary: None,
+                observed_at: None,
+                primary_observed_at: None,
+                secondary_observed_at: None,
+            },
+            reset_credit_count: None,
+            refresh: None,
+            warmup: None,
+        })
+        .collect();
+    let inventory = FrozenAccountInventory::from_inventory(AccountManagerInventory {
+        primary_login: None,
+        decision_advisor: None,
+        reset_journals: vec![],
+        host_now: NOW,
+        paused: false,
+        active_profile_id: Some("profile-128".into()),
+        accounts,
+        settings: serde_json::json!({}),
+        login_jobs: vec![],
+        api_accounts: vec![],
+        api_selection: codex_login::ApiAccountSelection::Subscription,
+        api_fallback: codex_login::ApiAccountFallback::default(),
+    });
+    let question = inventory.question_at(MenuPage::Quick(0), NativeAccountLanguage::English, NOW);
+    assert_eq!(question.choices[0].label, "1. Profile 128");
+    assert!(question.choices[0].description.contains("Current"));
+    assert_eq!(inventory.accounts.len(), 128);
+    assert_eq!(inventory.total, 129);
+}
+
 fn fixture() -> FrozenAccountInventory {
     FrozenAccountInventory {
         accounts: vec![FrozenAccount {
@@ -98,6 +248,7 @@ fn native_api_detail_explains_paid_use_without_subscription_quota() {
             images: false,
         },
         has_key: true,
+        credential_revision: Some("test-credential-revision".into()),
     };
     inventory.accounts[0].state = "manual".into();
     insta::assert_snapshot!(
@@ -121,6 +272,10 @@ fn phone_pages_keep_short_headings_and_bounded_unique_choices() {
     inventory.total = inventory.accounts.len();
     for page in [
         MenuPage::Home,
+        MenuPage::Quick(0),
+        MenuPage::Quick(63),
+        MenuPage::QuickOptions(63),
+        MenuPage::Strategy(MenuOrigin::Quick(31)),
         MenuPage::Overview(0),
         MenuPage::Overview(31),
         MenuPage::Detail(0),
@@ -128,8 +283,16 @@ fn phone_pages_keep_short_headings_and_bounded_unique_choices() {
         MenuPage::Actions(0),
         MenuPage::More(0),
         MenuPage::Membership(0),
-        MenuPage::ChoosePage { first: 0, end: 32 },
-        MenuPage::ChoosePage { first: 31, end: 32 },
+        MenuPage::ChoosePage {
+            first: 0,
+            end: 32,
+            origin: MenuOrigin::Overview(0),
+        },
+        MenuPage::ChoosePage {
+            first: 31,
+            end: 32,
+            origin: MenuOrigin::Overview(31),
+        },
         MenuPage::Primary,
         MenuPage::Settings(0),
         MenuPage::Settings(1),
@@ -163,6 +326,7 @@ fn all_captured_accounts_are_reachable_with_short_page_choices() {
     let mut page = MenuPage::ChoosePage {
         first: 0,
         end: inventory.pages(),
+        origin: MenuOrigin::Overview(0),
     };
     let mut steps = 0;
     loop {
@@ -269,7 +433,7 @@ fn display_shortening_never_changes_the_exact_captured_account_id() {
 #[test]
 fn explicit_paid_confirmation_names_the_account_and_does_not_execute() {
     let inventory = fixture();
-    let mut session = actions::NativeMenuSession::new(inventory);
+    let mut session = actions::NativeMenuSession::new(inventory, NativeMenuEntry::Manage);
     session
         .prepare(MenuOperation::PrimaryUse(0), NativeAccountLanguage::Chinese)
         .unwrap();
@@ -369,6 +533,7 @@ fn unavailable_api_actions_offer_guidance_without_paid_choices() {
             images: false,
         },
         has_key: false,
+        credential_revision: None,
     };
     let mut rendered = Vec::new();
     for disabled in [false, true] {

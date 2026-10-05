@@ -1,0 +1,16 @@
+---
+source: app-server/src/native_account_actions_tests.rs
+expression: render(session.question(NativeAccountLanguage::English))
+---
+Reset needs confirmation
+Previous reset
+Its result is unconfirmed. Inspect or retry this operation before using another credit.
+
+Retry previous reset
+Requires confirmation; preserves the original credit and operation key
+
+Reload credits
+Recheck this account's reset operation
+
+Back
+

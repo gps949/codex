@@ -5,7 +5,7 @@ expression: "format!(\"{}\\n\\n{}\", render(first), render(second))"
 ---
 Pool settings
 Rotation strategy
-Currently fill first; confirm to use earliest reset
+By priority
 
 Window warmup
 Currently on; confirm to turn off

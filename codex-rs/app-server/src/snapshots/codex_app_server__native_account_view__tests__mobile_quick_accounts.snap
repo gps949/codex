@@ -1,0 +1,26 @@
+---
+source: app-server/src/native_account_view_tests.rs
+expression: render(question)
+---
+Accounts · 1/1
+1. Alpha 中文
+Current · Cooldown · recheck quota
+Primary (5h): 10% used · 2 d old
+Secondary: Stale (100% cached) · just now
+Business · alpha@example.test
+
+2. Standby
+Ready
+Primary (5h): 10% used · 2 d old
+Secondary: Stale (100% cached) · just now
+Business · alpha@example.test
+
+Choose automatically
+By priority · Subscriptions
+Preserve quota cooldowns; use eligible subscription accounts
+
+Strategy
+By priority
+
+More
+Pages, quota refresh and full management

@@ -1,0 +1,7 @@
+---
+source: app-server/src/native_account_actions_tests.rs
+assertion_line: 143
+expression: "question.choices[0].description"
+---
+Its result is unconfirmed. Inspect or retry this operation before using another credit.
+Credit inventory unavailable; current count unknown. The original operation is retained.
