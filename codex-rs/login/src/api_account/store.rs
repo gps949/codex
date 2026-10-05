@@ -36,6 +36,23 @@ impl ApiAccountStore {
         self.read()
     }
 
+    /// Captures all account descriptions and their exact key revisions in one transaction.
+    /// Keys stay in this store; the snapshot contains only non-secret fingerprints.
+    pub fn management_snapshot(&self) -> std::io::Result<ApiAccountInventory> {
+        let _lock = crate::account_file::lock(&self.home)?;
+        let state = self.read()?;
+        let mut credential_revisions = BTreeMap::new();
+        for account in &state.accounts {
+            if let Some(revision) = self.revision_for_target(account)? {
+                credential_revisions.insert(account.id.clone(), revision);
+            }
+        }
+        Ok(ApiAccountInventory {
+            state,
+            credential_revisions,
+        })
+    }
+
     /// Reads metadata only when the account transaction lock is immediately available.
     pub fn try_load(&self) -> std::io::Result<Option<ApiAccountState>> {
         let Some(_lock) = crate::account_file::try_lock(&self.home)? else {
@@ -145,7 +162,23 @@ impl ApiAccountStore {
         self.write(&state)
     }
 
+    /// Selects the current target. Interactive callers must capture a revision before confirmation
+    /// and pass it to `select_checked` instead.
     pub fn select(&self, selection: ApiAccountSelection) -> std::io::Result<()> {
+        let revision = match &selection {
+            ApiAccountSelection::Subscription => None,
+            ApiAccountSelection::Manual { profile_id } => self.credential_revision(profile_id)?,
+        };
+        self.select_checked(selection, revision.as_deref())
+    }
+
+    /// Validates the target/key shown for confirmation in the same transaction as selection.
+    /// Manual selection requires a confirmed revision; subscription selection does not.
+    pub fn select_checked(
+        &self,
+        selection: ApiAccountSelection,
+        expected_revision: Option<&str>,
+    ) -> std::io::Result<()> {
         let _lock = crate::account_file::lock(&self.home)?;
         let mut state = self.read()?;
         if let ApiAccountSelection::Manual { profile_id } = &selection {
@@ -155,15 +188,16 @@ impl ApiAccountStore {
                 .find(|account| &account.id == profile_id && !account.disabled)
                 .ok_or_else(|| std::io::Error::other("API account is unavailable"))?;
             account.validate()?;
-            if crate::load_auth_dot_json(
-                &self.credential_home(profile_id)?,
-                self.mode,
-                self.keyring,
-            )?
-            .and_then(|auth| auth.openai_api_key)
-            .is_none()
-            {
-                return Err(std::io::Error::other("API account needs a key"));
+            let expected = expected_revision.ok_or_else(|| {
+                std::io::Error::other("API selection needs a confirmed credential revision")
+            })?;
+            let revision = self
+                .revision_for_target(account)?
+                .ok_or_else(|| std::io::Error::other("API account needs a key"))?;
+            if revision != expected {
+                return Err(std::io::Error::other(
+                    "API target or key changed since confirmation; reload before selecting",
+                ));
             }
         }
         state.selection = selection;
@@ -174,7 +208,23 @@ impl ApiAccountStore {
         self.write(&state)
     }
 
+    /// Configures the current target. Interactive callers must use `configure_fallback_checked`
+    /// with the revision captured before confirmation.
     pub fn configure_fallback(&self, fallback: ApiAccountFallback) -> std::io::Result<()> {
+        let revision = match (&fallback.profile_id, fallback.enabled) {
+            (Some(profile_id), true) => self.credential_revision(profile_id)?,
+            (Some(_) | None, false) | (None, true) => None,
+        };
+        self.configure_fallback_checked(fallback, revision.as_deref())
+    }
+
+    /// Binds paid fallback enablement to its confirmed target and exact key.
+    /// Disabling fallback does not require a credential revision.
+    pub fn configure_fallback_checked(
+        &self,
+        fallback: ApiAccountFallback,
+        expected_revision: Option<&str>,
+    ) -> std::io::Result<()> {
         let _lock = crate::account_file::lock(&self.home)?;
         let mut state = self.read()?;
         if fallback.wait_minutes > 1440 {
@@ -182,17 +232,26 @@ impl ApiAccountStore {
                 "Fallback waiting limit is 1440 minutes",
             ));
         }
-        if fallback.enabled
-            && !fallback.profile_id.as_ref().is_some_and(|id| {
-                state
-                    .accounts
-                    .iter()
-                    .any(|account| &account.id == id && !account.disabled)
-            })
-        {
-            return Err(std::io::Error::other(
-                "Choose an enabled API fallback account",
-            ));
+        if fallback.enabled {
+            let account = fallback
+                .profile_id
+                .as_ref()
+                .and_then(|id| {
+                    state
+                        .accounts
+                        .iter()
+                        .find(|account| &account.id == id && !account.disabled)
+                })
+                .ok_or_else(|| std::io::Error::other("Choose an enabled API fallback account"))?;
+            account.validate()?;
+            let expected = expected_revision.ok_or_else(|| {
+                std::io::Error::other("Paid API fallback needs a confirmed credential revision")
+            })?;
+            if self.revision_for_target(account)?.as_deref() != Some(expected) {
+                return Err(std::io::Error::other(
+                    "API target or key changed since confirmation; reload before enabling fallback",
+                ));
+            }
         }
         state.fallback = fallback;
         state.revision = state
@@ -234,6 +293,38 @@ impl ApiAccountStore {
                 .and_then(|auth| auth.openai_api_key)
                 .is_some(),
         )
+    }
+
+    /// Returns a target-bound fingerprint so confirmations detect replacement of the API key.
+    /// The digest cannot authenticate requests and never includes a plaintext credential.
+    pub fn credential_revision(&self, id: &str) -> std::io::Result<Option<String>> {
+        let _lock = crate::account_file::lock(&self.home)?;
+        let state = self.read()?;
+        let account = state
+            .accounts
+            .iter()
+            .find(|account| account.id == id)
+            .ok_or_else(|| std::io::Error::other("API account no longer exists"))?;
+        self.revision_for_target(account)
+    }
+
+    fn revision_for_target(&self, account: &ApiAccount) -> std::io::Result<Option<String>> {
+        use sha2::Digest;
+        let key = crate::load_auth_dot_json(
+            &self.credential_home(&account.id)?,
+            self.mode,
+            self.keyring,
+        )?
+        .and_then(|auth| auth.openai_api_key);
+        let descriptor = serde_json::to_vec(account)?;
+        Ok(key.filter(|key| !key.trim().is_empty()).map(|key| {
+            let mut digest = sha2::Sha256::new();
+            digest.update(b"codex-api-credential-revision-v1\0");
+            digest.update((descriptor.len() as u64).to_be_bytes());
+            digest.update(&descriptor);
+            digest.update(key.as_bytes());
+            format!("{:x}", digest.finalize())
+        }))
     }
 
     /// Replaces a key without changing the profile's target, capabilities or selection.

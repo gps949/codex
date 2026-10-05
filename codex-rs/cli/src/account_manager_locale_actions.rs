@@ -2,6 +2,42 @@
 
 pub(super) fn chinese(english: &str) -> Option<&'static str> {
     Some(match english {
+        "API account: {}" => "API 账号：{}",
+        "HTTPS endpoint: {}" => "HTTPS 接口：{}",
+        "Model: {}" => "模型：{}",
+        "Type USE to select this API account" => "输入 USE 选择此 API 账号",
+        "Type ENABLE to confirm paid fallback" => "输入 ENABLE 确认付费兜底",
+        "API confirmation needs a current credential revision. Reload API accounts." => {
+            "API 确认需要当前凭据版本，请重新读取 API 账号。"
+        }
+        "Subsequent turns send conversation content to this provider and are billed under its API account. This explicit selection is shared with clients using this Codex home." => {
+            "后续回合会把会话内容发送至该提供商，并由其 API 账号计费；此明确选择由同一 Codex 主目录的客户端共享。"
+        }
+
+        "Credit inventory unavailable; current count is unknown. The original reset is retained." => {
+            "重置券库存不可用，当前数量未知；原重置操作仍保留。"
+        }
+        "Reset confirmation needs a current account binding. Update the host and reload credits." => {
+            "重置确认需要当前账号绑定，请更新宿主并重载券信息。"
+        }
+        "The original reset belongs to another account. Return to that account before retrying." => {
+            "原重置操作属于另一个账号，请回到原账号后再重试。"
+        }
+        "The pending reset could not be verified. Reload credits before retrying." => {
+            "无法核验待确认重置，请重新读取券信息后重试。"
+        }
+        "RETRY checks the original operation without selecting a new credit. R refreshes quota. Enter returns." => {
+            "RETRY 核对原操作，不选择新券；R 刷新额度，回车返回。"
+        }
+        "Choose R, RETRY, or Enter to return" => "输入 R、RETRY 或回车返回",
+        "{} · Expires {}" => "{} · 到期 {}",
+        "Earliest-expiring available credit selected." => "已选择最早到期的可用券。",
+        "Automatic subscription selection applied using the current rotation strategy." => {
+            "已按当前轮换策略自动选择订阅账号。"
+        }
+        "Returned to subscriptions. No eligible account is currently available; quota cooldowns were retained." => {
+            "已返回订阅账号池；暂无符合条件的账号，额度冷却仍保留。"
+        }
         "Saved source: {}" => "保存的登录来源：{}",
         "Resolved by running host" => "由运行中的宿主解析",
         "External host sign-in is resolved by the running host. Stored root credentials are not its current identity." => {

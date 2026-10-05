@@ -5,6 +5,7 @@ pub use store::ApiAccountStore;
 
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -73,6 +74,14 @@ pub struct ApiAccountState {
     pub fallback: ApiAccountFallback,
     #[serde(default)]
     pub revision: u64,
+}
+
+/// Non-secret management data captured together under the account transaction lock.
+#[derive(Debug)]
+pub struct ApiAccountInventory {
+    pub state: ApiAccountState,
+    /// Exact target-and-key fingerprints; accounts without a saved key have no entry.
+    pub credential_revisions: BTreeMap<String, String>,
 }
 
 impl ApiAccount {

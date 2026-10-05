@@ -9,6 +9,7 @@ use super::input::secret_prompt;
 
 use codex_app_server::account_management::AccountManager;
 use codex_app_server::account_management::AccountManagerOperation as Operation;
+use codex_app_server::account_management::ApiAccountView;
 use codex_app_server::account_management::ManagedAccountView;
 use std::sync::Arc;
 
@@ -291,7 +292,16 @@ pub(super) async fn api_actions(
                 .and_then(|index| inventory.api_accounts.get(index))
                 .ok_or_else(|| anyhow::anyhow!(locale.text("Invalid account number")))?;
             if input == "u" {
+                let revision = api_confirmation_revision(account, locale)?;
+                println!("{}", api_confirmation_details(account, locale));
+                println!("{}", locale.text(
+                    "Subsequent turns send conversation content to this provider and are billed under its API account. This explicit selection is shared with clients using this Codex home."
+                ));
+                if prompt(locale, "Type USE to select this API account", "").await? != "USE" {
+                    return Ok(());
+                }
                 Operation::ApiUse {
+                    expected_credential_revision: Some(revision),
                     profile_id: account.account.id.clone(),
                 }
             } else if input == "k" {
@@ -356,7 +366,7 @@ pub(super) async fn api_actions(
                 "" => return Ok(()),
                 _ => anyhow::bail!(locale.text("No change made. Type ENABLE or DISABLE.")),
             };
-            let profile_id = if enabled {
+            let (profile_id, expected_credential_revision) = if enabled {
                 let index: usize = prompt(locale, "API account number", "")
                     .await?
                     .parse()
@@ -365,19 +375,23 @@ pub(super) async fn api_actions(
                     .checked_sub(1)
                     .and_then(|index| inventory.api_accounts.get(index))
                     .ok_or_else(|| anyhow::anyhow!(locale.text("Invalid account number")))?;
-                anyhow::ensure!(
-                    !account.account.disabled && account.has_key,
-                    locale.text("Choose an enabled API account with a saved key")
-                );
-                Some(account.account.id.clone())
+                let revision = api_confirmation_revision(account, locale)?;
+                println!("{}", api_confirmation_details(account, locale));
+                (Some(account.account.id.clone()), Some(revision))
             } else {
-                None
+                (None, None)
             };
             let wait_minutes = prompt(locale, "Subscription waiting minutes before fallback", "5")
                 .await?
                 .parse()
                 .map_err(|_| anyhow::anyhow!(locale.text("Enter a whole number")))?;
+            if enabled
+                && prompt(locale, "Type ENABLE to confirm paid fallback", "").await? != "ENABLE"
+            {
+                return Ok(());
+            }
             Operation::ApiFallback {
+                expected_credential_revision,
                 config: codex_login::ApiAccountFallback {
                     enabled,
                     profile_id,
@@ -394,3 +408,36 @@ pub(super) async fn api_actions(
     let _ = prompt(locale, "Enter to return", "").await?;
     Ok(())
 }
+
+fn api_confirmation_revision(account: &ApiAccountView, locale: Locale) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !account.account.disabled && account.has_key,
+        locale.text("Choose an enabled API account with a saved key")
+    );
+    account
+        .credential_revision
+        .as_ref()
+        .filter(|revision| !revision.is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                locale.text(
+                    "API confirmation needs a current credential revision. Reload API accounts."
+                )
+            )
+        })
+}
+
+fn api_confirmation_details(account: &ApiAccountView, locale: Locale) -> String {
+    [
+        locale.format("API account: {}", &[&clean(&account.account.label)]),
+        locale.format("Profile: {}", &[&clean(&account.account.id)]),
+        locale.format("HTTPS endpoint: {}", &[&clean(&account.account.base_url)]),
+        locale.format("Model: {}", &[&clean(&account.account.model)]),
+    ]
+    .join("\n")
+}
+
+#[cfg(test)]
+#[path = "account_manager_actions_tests.rs"]
+mod tests;
