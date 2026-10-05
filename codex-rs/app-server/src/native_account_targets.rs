@@ -71,14 +71,17 @@ pub(super) fn same_target(expected: &FrozenAccount, actual: &FrozenAccount) -> b
             AccountDetail::Api {
                 account: left,
                 has_key: left_key,
+                credential_revision: left_revision,
             },
             AccountDetail::Api {
                 account: right,
                 has_key: right_key,
+                credential_revision: right_revision,
             },
         ) => {
             serde_json::to_value(left).ok() == serde_json::to_value(right).ok()
                 && left_key == right_key
+                && left_revision == right_revision
         }
         _ => false,
     }

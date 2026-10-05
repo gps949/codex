@@ -38,6 +38,36 @@ impl NativeMenuSession {
                 ],
             ),
             MenuPage::Credits(index, page) => {
+                if let Some(previous) = &self.pending_reset {
+                    let mut choices = vec![choice(language.text("Previous reset", "之前的重置"),
+                        language.text("Its result is unconfirmed. Inspect or retry this operation before using another credit.", "结果尚未确认；使用另一张券前请核验或重试这次操作。"), MenuAction::Page(self.page))];
+                    if self.credit_inventory_error.is_some() {
+                        choices[0].description.push_str(language.text(
+                            "\nCredit inventory unavailable; current count unknown. The original operation is retained.",
+                            "\n重置券库存不可用，当前数量未知；原操作仍保留。",
+                        ));
+                    }
+                    if previous.credit_id.is_some() {
+                        choices.push(choice(language.text("Retry previous reset", "重试之前的重置"),
+                            language.text("Requires confirmation; preserves the original credit and operation key", "需要确认；保留原券与原操作键"),
+                            MenuAction::Prepare(MenuOperation::RetryPendingCredit(index))));
+                    }
+                    choices.extend([
+                        choice(
+                            language.text("Reload credits", "重载重置券"),
+                            language.text(
+                                "Recheck this account's reset operation",
+                                "重新核验此账号的重置操作",
+                            ),
+                            MenuAction::Execute(MenuOperation::Credits(index)),
+                        ),
+                        back(MenuPage::Actions(index)),
+                    ]);
+                    return MenuQuestion::new(
+                        language.text("Reset needs confirmation", "重置待确认"),
+                        choices,
+                    );
+                }
                 let mut choices = self
                     .credits
                     .iter()
@@ -111,12 +141,22 @@ impl NativeMenuSession {
                     choices,
                 )
             }
-            page => self.inventory.question(page, language),
+            page => {
+                let mut question = self.inventory.question(page, language);
+                if matches!(page, MenuPage::Detail(_)) {
+                    for choice in &mut question.choices {
+                        if choice.label == language.text("Back", "返回") {
+                            choice.action = MenuAction::Page(self.list_origin.page());
+                        }
+                    }
+                }
+                question
+            }
         }
     }
 }
 
-fn receipt(message: &str, language: NativeAccountLanguage) -> &str {
+pub(super) fn receipt(message: &str, language: NativeAccountLanguage) -> &str {
     let translated = match message {
         "Account selected for subsequent requests." => "已选择此账号，后续请求将使用它。",
         "Local quota cooldown cleared for one probe. No reset credit was used." => {

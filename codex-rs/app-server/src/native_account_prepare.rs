@@ -18,17 +18,8 @@ impl NativeMenuSession {
         }
         let mut target = None;
         let mut return_page = MenuPage::Home;
+        let mut pending_reset = None;
         let (title, description, operation) = match operation {
-            MenuOperation::Automatic => (
-                language.text("Use subscription pool?", "使用订阅账号池？"),
-                language
-                    .text(
-                        "Exit manual API use. No cooldown is cleared and no credit is used.",
-                        "退出手动 API 使用；不会清除冷却或使用重置券。",
-                    )
-                    .into(),
-                AccountManagerOperation::Automatic,
-            ),
             MenuOperation::PrimaryRoot => (
                 language.text("Use root host login?", "主登录改用根登录？"),
                 language
@@ -69,7 +60,10 @@ impl NativeMenuSession {
                             "API 目标仍可明确手动选择。",
                         )
                         .into(),
-                    AccountManagerOperation::ApiFallback { config },
+                    AccountManagerOperation::ApiFallback {
+                        expected_credential_revision: None,
+                        config,
+                    },
                 )
             }
             MenuOperation::Setting(index) => {
@@ -84,8 +78,7 @@ impl NativeMenuSession {
                     },
                 )
             }
-            MenuOperation::Use(index)
-            | MenuOperation::Retry(index)
+            MenuOperation::Retry(index)
             | MenuOperation::Disable(index)
             | MenuOperation::Enable(index)
             | MenuOperation::ClearLabel(index)
@@ -94,6 +87,7 @@ impl NativeMenuSession {
             | MenuOperation::Relogin(index)
             | MenuOperation::PrimaryUse(index)
             | MenuOperation::Redeem(index, _)
+            | MenuOperation::RetryPendingCredit(index)
             | MenuOperation::ApiUse(index)
             | MenuOperation::ApiRemove(index)
             | MenuOperation::ApiFallback(index) => {
@@ -104,14 +98,20 @@ impl NativeMenuSession {
                 ) {
                     anyhow::ensure!(
                         !account.disabled
-                            && matches!(account.detail, AccountDetail::Api { has_key: true, .. }),
+                            && matches!(
+                                account.detail,
+                                AccountDetail::Api {
+                                    has_key: true,
+                                    credential_revision: Some(_),
+                                    ..
+                                }
+                            ),
                         "Enable this API target and configure its key before paid selection or fallback"
                     );
                 }
                 return_page = MenuPage::Detail(index);
                 let id = account.id.clone();
                 let (title, explanation, operation) = match operation {
-                    MenuOperation::Use(_) => (language.text("Use this account?", "使用此账号？"), language.text("Subsequent requests use this account; automatic failover remains enabled.", "后续请求使用此账号；仍可自动切换。").into(), AccountManagerOperation::Use { profile_id: id }),
                     MenuOperation::Retry(_) => (language.text("Probe external reset?", "尝试外部重置恢复？"), language.text("Clear local quota cooldown for one probe. No reset credit is redeemed.", "清除本地额度冷却以尝试一次；不会兑换重置券。").into(), AccountManagerOperation::Retry { profile_id: id }),
                     MenuOperation::Disable(_) | MenuOperation::Enable(_) | MenuOperation::ClearLabel(_) => {
                         let update = match &account.detail {
@@ -128,15 +128,30 @@ impl NativeMenuSession {
                     MenuOperation::Relogin(_) => { anyhow::ensure!(self.login.as_ref().is_none_or(|login| login.status != "waiting"), "Complete or cancel this menu's existing sign-in first"); (language.text("Sign in again?", "重新登录？"), language.text("Verify this account in a browser. Existing credentials are retained until verification succeeds.", "在浏览器验证此账号；验证成功前保留现有凭据。").into(), AccountManagerOperation::Login { profile_id: Some(id), label: None }) },
                     MenuOperation::PrimaryUse(_) => (language.text("Change host sign-in?", "更换主登录账号？"), language.text("Remote owner changes; pairing may be needed. Inference selection stays unchanged.", "更换 Remote 身份，可能需要配对；推理选择不变。").into(), AccountManagerOperation::PrimaryUse { profile_id: id }),
                     MenuOperation::Redeem(_, credit_index) => {
+                        anyhow::ensure!(self.pending_reset.is_none(), "A previous reset operation is unconfirmed. Review that operation before starting a new one.");
+                        anyhow::ensure!(self.credit_owner_key.as_deref().is_some_and(crate::reset_credit_journal::valid_owner_key), "Reload credits to verify their backend owner before redemption.");
+                        let owner_key = self.credit_owner_key.clone().ok_or_else(|| anyhow::anyhow!("Reset credit owner is unavailable"))?;
                         anyhow::ensure!(self.credit_target.as_ref().is_some_and(|target| same_target(target, &account)) && self.credit_identity == self.identities.get(&account.id).cloned().flatten(), "Reload credits for this account before redemption");
                         let credit = self.credits.get(credit_index).ok_or_else(|| anyhow::anyhow!("Credit no longer appears"))?;
                         anyhow::ensure!(credit.available, "This credit is unavailable or has a different quota scope");
                         (language.text("Use one reset credit?", "使用一张重置券？"), format!("{}\n{}: {}\n{}", language.text("One credit is consumed for this account only", "仅为此账号消耗一张券"), language.text("Expires", "到期"), credit.expires,
-                            language.text("Backend identity, availability and expiry are checked again before redemption.", "兑换前将再次核对后端身份、券状态与到期时间。")), AccountManagerOperation::Redeem { profile_id: id, credit_id: credit.id.clone(), idempotency_key: self.redemption_keys.entry((account.id.clone(), credit.id.clone())).or_insert_with(|| uuid::Uuid::new_v4().to_string()).clone() })
+                            language.text("Backend identity, availability and expiry are checked again before redemption.", "兑换前将再次核对后端身份、券状态与到期时间。")), AccountManagerOperation::Redeem { expected_owner_key: Some(owner_key.clone()), profile_id: id, credit_id: credit.id.clone(), idempotency_key: self.redemption_keys.entry((owner_key, credit.id.clone())).or_insert_with(|| uuid::Uuid::new_v4().to_string()).clone() })
                     }
-                    MenuOperation::ApiUse(_) => (language.text("Select paid API?", "选择付费 API？"), language.text("Conversation content goes to this provider; charges can apply and there is no hard spending cap.\nSubsequent requests use this provider. Use automatic selection for subscriptions.", "会向此提供商发送会话内容；可能收费，没有消费金额硬上限。\n后续请求使用此提供商；自动选择可恢复使用订阅。").into(), AccountManagerOperation::ApiUse { profile_id: id }),
+                    MenuOperation::RetryPendingCredit(_) => {
+                        anyhow::ensure!(self.credit_target.as_ref().is_some_and(|target| same_target(target, &account))
+                            && self.credit_identity == self.identities.get(&account.id).cloned().flatten(),
+                            "Reload the previous reset operation for this account before retrying.");
+                        let previous = self.pending_reset.as_ref().ok_or_else(|| anyhow::anyhow!("No previous reset operation is available"))?;
+                        let credit_id = previous.credit_id.clone().ok_or_else(|| anyhow::anyhow!("The previous operation does not identify its credit. Inspect the host reset records before retrying."))?;
+                        pending_reset = Some(previous.clone());
+                        return_page = MenuPage::Credits(index, 0);
+                        (language.text("Retry previous reset?", "重试之前的重置？"),
+                            language.text("The previous result is unconfirmed. Retry the same credit and operation; no new reset request is created.", "之前的结果尚未确认；重试同一张券与同一次操作，不创建新的重置请求。").into(),
+                            AccountManagerOperation::Redeem { expected_owner_key: Some(previous.owner_key.clone()), profile_id: id, credit_id, idempotency_key: previous.idempotency_key.clone() })
+                    }
+                    MenuOperation::ApiUse(_) => (language.text("Select paid API?", "选择付费 API？"), language.text("Conversation content goes to this provider; charges can apply and there is no hard spending cap.\nSubsequent requests use this provider. Use automatic selection for subscriptions.", "会向此提供商发送会话内容；可能收费，没有消费金额硬上限。\n后续请求使用此提供商；自动选择可恢复使用订阅。").into(), AccountManagerOperation::ApiUse { expected_credential_revision: match &account.detail { AccountDetail::Api { credential_revision, .. } => credential_revision.clone(), _ => None }, profile_id: id }),
                     MenuOperation::ApiRemove(_) => (language.text("Remove API and key?", "移除 API 与密钥？"), language.text("Delete this target and its locally stored key.", "删除此目标及其本地保存的密钥。").into(), AccountManagerOperation::ApiRemove { profile_id: id }),
-                    MenuOperation::ApiFallback(_) => (language.text("Enable paid fallback?", "启用付费兜底？"), language.text("Conversation content goes to this provider; charges can apply and there is no hard spending cap.\nPaid use may start after subscription exhaustion and a 5-minute wait.", "会向此提供商发送会话内容；可能收费，没有消费金额硬上限。\n订阅耗尽并等待 5 分钟后，可能开始付费使用。").into(), AccountManagerOperation::ApiFallback { config: codex_login::ApiAccountFallback { enabled: true, profile_id: Some(id), wait_minutes: 5 } }),
+                    MenuOperation::ApiFallback(_) => (language.text("Enable paid fallback?", "启用付费兜底？"), language.text("Conversation content goes to this provider; charges can apply and there is no hard spending cap.\nPaid use may start after subscription exhaustion and a 5-minute wait.", "会向此提供商发送会话内容；可能收费，没有消费金额硬上限。\n订阅耗尽并等待 5 分钟后，可能开始付费使用。").into(), AccountManagerOperation::ApiFallback { expected_credential_revision: match &account.detail { AccountDetail::Api { credential_revision, .. } => credential_revision.clone(), _ => None }, config: codex_login::ApiAccountFallback { enabled: true, profile_id: Some(id), wait_minutes: 5 } }),
                     _ => unreachable!("matched target operation"),
                 };
                 let description = if matches!(
@@ -162,6 +177,7 @@ impl NativeMenuSession {
             }
             MenuOperation::Reload
             | MenuOperation::Refresh(_)
+            | MenuOperation::RefreshQuick(_)
             | MenuOperation::RefreshAccount(_)
             | MenuOperation::Credits(_)
             | MenuOperation::LoginCheck
@@ -179,7 +195,9 @@ impl NativeMenuSession {
             title: title.into(),
             description,
             return_page,
+            pending_reset,
         });
+        self.return_page = return_page;
         self.page = MenuPage::Confirm;
         Ok(())
     }
