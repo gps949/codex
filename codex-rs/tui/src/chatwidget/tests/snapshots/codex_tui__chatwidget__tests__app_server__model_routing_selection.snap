@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+assertion_line: 1134
+expression: "cells.iter().map(|lines| lines_to_single_string(lines)).collect::<String>()"
+---
+⚠ Model routing selected routing-economy (low) using Local rules.

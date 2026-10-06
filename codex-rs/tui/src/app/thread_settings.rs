@@ -273,6 +273,7 @@ fn thread_settings_update_has_changes(params: &ThreadSettingsUpdateParams) -> bo
         || params.sandbox_policy.is_some()
         || params.permissions.is_some()
         || params.model.is_some()
+        || params.model_selection_intent.is_some()
         || params.service_tier.is_some()
         || params.effort.is_some()
         || params.summary.is_some()

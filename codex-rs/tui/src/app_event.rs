@@ -1202,6 +1202,10 @@ pub(crate) enum AppEvent {
 
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
+    /// Release the manual model pin for future tasks on the selected thread.
+    RestoreAutomaticModelSelection {
+        thread_id: ThreadId,
+    },
 
     /// Apply a final Astra picker action and offer the flourish only if it changed the model on
     /// its original task. Automatic model updates do not use this event.

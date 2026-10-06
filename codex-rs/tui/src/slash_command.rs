@@ -173,6 +173,7 @@ impl SlashCommand {
         matches!(
             self,
             SlashCommand::Review
+                | SlashCommand::Model
                 | SlashCommand::Rename
                 | SlashCommand::New
                 | SlashCommand::Clear

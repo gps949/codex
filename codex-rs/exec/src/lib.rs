@@ -570,6 +570,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
 
     let overrides = ConfigOverrides {
         model,
+        model_selection_intent: None,
         review_model: None,
         // Default to never ask for approvals in headless mode. Rebuild below if
         // the fully resolved reviewer is AutoReview.
@@ -1152,6 +1153,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 ClientRequest::TurnStart {
                     request_id: request_ids.next(),
                     params: TurnStartParams {
+                        model_selection_intent: Some(
+                            codex_app_server_protocol::ModelSelectionIntent::FollowThread,
+                        ),
                         disabled_plugin_ids: None,
                         thread_id: primary_thread_id_for_span.clone(),
                         turn_trigger: Some("exec".to_string()),

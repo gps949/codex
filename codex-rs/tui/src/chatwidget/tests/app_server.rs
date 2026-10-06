@@ -14,6 +14,7 @@ fn thread_settings_for_test(
     codex_app_server_protocol::ThreadSettingsUpdatedNotification {
         thread_id: thread_id.to_string(),
         thread_settings: codex_app_server_protocol::ThreadSettings {
+            model_selection_intent: None,
             disabled_plugin_ids: Vec::new(),
             cwd: test_path_buf("/tmp/thread-settings").abs(),
             approval_policy: AskForApproval::OnRequest,
@@ -1111,6 +1112,27 @@ async fn config_warning_during_turn_retains_transcript_details() {
     let cells = drain_insert_history_transcript(&mut rx);
     insta::assert_snapshot!(
         "runtime_config_warning",
+        cells
+            .iter()
+            .map(|lines| lines_to_single_string(lines))
+            .collect::<String>()
+    );
+}
+
+#[tokio::test]
+async fn model_routing_selection_is_visible_in_the_turn_transcript() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    handle_turn_started(&mut chat, "routing-turn");
+    chat.handle_server_notification(
+        ServerNotification::Warning(WarningNotification {
+            thread_id: None,
+            message: "Model routing selected routing-economy (low) using Local rules.".into(),
+        }),
+        /*replay_kind*/ None,
+    );
+    let cells = drain_insert_history_transcript(&mut rx);
+    insta::assert_snapshot!(
+        "model_routing_selection",
         cells
             .iter()
             .map(|lines| lines_to_single_string(lines))

@@ -770,6 +770,21 @@ impl ChatWidget {
         } = prepared;
         let trimmed = args.trim();
         match cmd {
+            SlashCommand::Model if trimmed.eq_ignore_ascii_case("auto") => {
+                if self.blocks_direct_input {
+                    self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
+                    return;
+                }
+                let Some(thread_id) = self.thread_id else {
+                    self.add_error_message(
+                        "Session is still starting; try /model auto again in a moment.".into(),
+                    );
+                    return;
+                };
+                self.app_event_tx
+                    .send(AppEvent::RestoreAutomaticModelSelection { thread_id });
+                self.defer_input_until_settings_applied();
+            }
             SlashCommand::Export if trimmed.is_empty() => self.show_transcript_export_popup(),
             SlashCommand::Export => {
                 self.set_queue_autosend_suppressed(/*suppressed*/ true);

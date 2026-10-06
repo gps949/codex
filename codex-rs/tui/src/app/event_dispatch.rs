@@ -2024,10 +2024,24 @@ impl App {
                     || self.chat_widget.current_collaboration_mode().model() != model;
                 if model_changed {
                     self.chat_widget.set_model(&model);
-                    self.sync_active_thread_model_setting(app_server, model, /*effort*/ None)
-                        .await;
-                    self.sync_active_thread_service_tier_to_cached_session()
-                        .await;
+                }
+                self.sync_active_thread_model_setting(app_server, model, /*effort*/ None)
+                    .await;
+                self.sync_active_thread_service_tier_to_cached_session()
+                    .await;
+            }
+            AppEvent::RestoreAutomaticModelSelection { thread_id } => {
+                let params = codex_app_server_protocol::ThreadSettingsUpdateParams {
+                    thread_id: thread_id.to_string(),
+                    model_selection_intent: Some(codex_app_server_protocol::ModelSelectionIntent::Automatic),
+                    ..Default::default()
+                };
+                if self.send_thread_settings_update(app_server, params).await
+                    && self.chat_widget.thread_id() == Some(thread_id)
+                {
+                    self.chat_widget.add_info_message(
+                        "Automatic model selection requested for new tasks.".into(), /*hint*/ None,
+                    );
                 }
             }
             AppEvent::AstraSelectedFromModelPicker { .. } => unreachable!("picker event unwrapped"),

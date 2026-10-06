@@ -124,6 +124,7 @@ struct ThreadEnvironmentOverride {
 }
 
 struct ThreadSettingsBuildParams {
+    model_selection_intent: Option<codex_app_server_protocol::ModelSelectionIntent>,
     method: &'static str,
     disabled_plugin_ids: Option<Vec<String>>,
     environment_override: ThreadEnvironmentOverride,
@@ -627,10 +628,35 @@ impl TurnRequestProcessor {
                 environment_selections,
             )
             .await;
+        // Inspect an exact legacy mode echo before normalization expands null developer
+        // instructions into the built-in text. Distinct choices remain explicit in Core.
+        let mut model_selection_intent = params.model_selection_intent;
+        if model_selection_intent.is_none() && params.collaboration_mode.is_some() {
+            let saved = thread.thread_settings_snapshot().await;
+            if saved.model_selection_intent
+                == Some(codex_protocol::protocol::ModelSelectionIntent::Automatic)
+                && params
+                    .model
+                    .as_ref()
+                    .is_none_or(|model| model == &saved.model)
+                && params
+                    .effort
+                    .as_ref()
+                    .is_none_or(|effort| Some(effort) == saved.reasoning_effort.as_ref())
+                && params.collaboration_mode.as_ref().is_some_and(|mode| {
+                    mode.settings.model == saved.model
+                        && mode.settings.reasoning_effort == saved.reasoning_effort
+                })
+            {
+                model_selection_intent =
+                    Some(codex_app_server_protocol::ModelSelectionIntent::FollowThread);
+            }
+        }
         let thread_settings = self
             .build_thread_settings_overrides(
                 thread.as_ref(),
                 ThreadSettingsBuildParams {
+                    model_selection_intent,
                     method: "turn/start",
                     disabled_plugin_ids: params.disabled_plugin_ids,
                     environment_override,
@@ -779,6 +805,7 @@ impl TurnRequestProcessor {
         params: ThreadSettingsBuildParams,
     ) -> Result<codex_protocol::protocol::ThreadSettingsOverrides, JSONRPCErrorError> {
         let ThreadSettingsBuildParams {
+            model_selection_intent,
             method,
             disabled_plugin_ids,
             environment_override:
@@ -817,6 +844,7 @@ impl TurnRequestProcessor {
         };
 
         let has_any_overrides = has_environment_override
+            || model_selection_intent.is_some()
             || disabled_plugin_ids.is_some()
             || approval_policy.is_some()
             || approvals_reviewer.is_some()
@@ -874,6 +902,8 @@ impl TurnRequestProcessor {
         if has_any_overrides {
             thread
                 .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
+                    model_selection_intent: model_selection_intent
+                        .map(codex_app_server_protocol::ModelSelectionIntent::to_core),
                     disabled_plugin_ids: disabled_plugin_ids.clone(),
                     environments: environments.clone(),
                     runtime_workspace_roots: runtime_workspace_roots.clone(),
@@ -898,6 +928,8 @@ impl TurnRequestProcessor {
         }
 
         Ok(codex_protocol::protocol::ThreadSettingsOverrides {
+            model_selection_intent: model_selection_intent
+                .map(codex_app_server_protocol::ModelSelectionIntent::to_core),
             disabled_plugin_ids,
             environments,
             runtime_workspace_roots,
@@ -938,6 +970,7 @@ impl TurnRequestProcessor {
             .build_thread_settings_overrides(
                 thread.as_ref(),
                 ThreadSettingsBuildParams {
+                    model_selection_intent: params.model_selection_intent,
                     method: "thread/settings/update",
                     disabled_plugin_ids: params.disabled_plugin_ids,
                     environment_override,

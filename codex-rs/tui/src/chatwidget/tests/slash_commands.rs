@@ -36,6 +36,17 @@ fn fast_tier_command() -> ServiceTierCommand {
     }
 }
 
+#[tokio::test]
+async fn slash_model_auto_requests_thread_scoped_automatic_selection() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.dispatch_command_with_args(SlashCommand::Model, "auto".into(), Vec::new());
+    assert_matches!(rx.try_recv(), Ok(AppEvent::RestoreAutomaticModelSelection { thread_id: actual }) if actual == thread_id);
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(chat.bottom_pane.no_modal_or_popup_active());
+}
+
 fn complete_turn_with_message(chat: &mut ChatWidget, turn_id: &str, message: Option<&str>) {
     if let Some(message) = message {
         complete_assistant_message(
