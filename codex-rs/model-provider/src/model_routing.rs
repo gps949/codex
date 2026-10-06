@@ -239,7 +239,6 @@ pub fn choose_task_model(
         || request.preference > 100
         || request.required_context_tokens < 0
         || request.candidates.is_empty()
-        || request.candidates.len() > 32
         || complexity == RoutingTaskComplexity::Unknown
     {
         return None;
@@ -289,7 +288,10 @@ pub fn choose_task_model(
         ReasoningEffort::Ultra => 6,
         effort => effort_rank(effort)?,
     };
-    let selected = request
+    // Retain exact current metadata independently of its allowlist eligibility. Bound the
+    // compatible selection set only after filtering; the extra entry detects overflow without
+    // silently truncating either the current model or a later allowed target.
+    let candidates = request
         .candidates
         .iter()
         .enumerate()
@@ -308,6 +310,13 @@ pub fn choose_task_model(
                         .input_modalities
                         .contains(&InputModality::Image))
         })
+        .take(/*n*/ 33)
+        .collect::<Vec<_>>();
+    if candidates.len() > 32 {
+        return None;
+    }
+    let selected = candidates
+        .into_iter()
         .filter_map(|(index, candidate)| {
             let effort = candidate
                 .model

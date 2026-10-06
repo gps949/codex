@@ -59,6 +59,66 @@ fn allowlist_can_exclude_the_current_model_without_erasing_its_verified_metadata
     );
 }
 
+#[test]
+fn large_catalog_filters_the_allowlist_before_bounding_candidates() {
+    let mut catalog = (0..34)
+        .map(|index| {
+            let mut model = model("gpt-6.1-sol");
+            model.slug = format!("catalog-model-{index}");
+            RoutingCandidate {
+                model,
+                role: RoutingModelRole::Balanced,
+            }
+        })
+        .collect::<Vec<_>>();
+    // Both the allowed target and the current metadata occur after the first 32 entries.
+    catalog.extend(candidates());
+    let allowed = vec!["gpt-6-luna".to_string()];
+    let mut routing_request = request(&catalog);
+    routing_request.allowed_models = &allowed;
+    assert_eq!(
+        choose_task_model(&routing_request, RoutingTaskComplexity::Simple),
+        selection(
+            "gpt-6-luna",
+            ReasoningEffort::Low,
+            "Task complexity: simple; model role: economy."
+        )
+    );
+    let mut allowed = (0..31)
+        .map(|index| format!("catalog-model-{index}"))
+        .collect::<Vec<_>>();
+    allowed.push("gpt-6-luna".to_string());
+    routing_request.allowed_models = &allowed;
+    assert_eq!(
+        choose_task_model(&routing_request, RoutingTaskComplexity::Simple),
+        selection(
+            "gpt-6-luna",
+            ReasoningEffort::Low,
+            "Task complexity: simple; model role: economy."
+        )
+    );
+    let mut oversized_allowlist = allowed.clone();
+    oversized_allowlist.push("catalog-model-31".to_string());
+    routing_request.allowed_models = &oversized_allowlist;
+    assert_eq!(
+        choose_task_model(&routing_request, RoutingTaskComplexity::Simple),
+        None
+    );
+    catalog
+        .iter_mut()
+        .find(|candidate| candidate.model.slug == "gpt-6.1-sol")
+        .expect("current model")
+        .model
+        .used_fallback_model_metadata = true;
+    let allowed = vec!["gpt-6-luna".to_string()];
+    let mut routing_request = request(&catalog);
+    routing_request.allowed_models = &allowed;
+    assert_eq!(
+        choose_task_model(&routing_request, RoutingTaskComplexity::Simple),
+        None
+    );
+}
+
 fn selection(model: &str, effort: ReasoningEffort, reason: &str) -> Option<RoutingSelection> {
     Some(RoutingSelection {
         model: model.into(),
