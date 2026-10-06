@@ -208,6 +208,10 @@ impl AccountManager {
                 .unwrap_or(false)),
             "Account credentials changed; refresh before redeeming this credit"
         );
+        if !known && let Some(pool) = pool.as_ref() {
+            // This caller already owns the spending lock; historical receipts never clear quota.
+            codex_login::reconcile_reset_credit_recovery(pool, &store, &store.load()?).await?;
+        }
         let probe = pool
             .as_ref()
             .map(|pool| store.capture_quota_probe(pool, &profile.profile.id, &auth))

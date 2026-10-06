@@ -19,6 +19,8 @@ use report::QuotaRefreshOutcome;
 use report::QuotaRefreshReport;
 use report::RefreshPermit;
 
+const MAX_REFRESH_RECEIPTS: usize = 512;
+
 impl AccountManager {
     pub(super) async fn profile_client(
         &self,
@@ -85,6 +87,10 @@ impl AccountManager {
         ids: Option<Vec<String>>,
     ) -> anyhow::Result<String> {
         let records = self.store().load_profile_records()?;
+        let enrolled_ids = records
+            .iter()
+            .map(|record| record.profile.id.to_string())
+            .collect::<std::collections::HashSet<_>>();
         let ids = match ids {
             Some(ids) => {
                 for id in &ids {
@@ -106,6 +112,22 @@ impl AccountManager {
                 .collect(),
         };
         let ids: std::collections::HashSet<_> = ids.into_iter().collect();
+        let single_account = ids.len() == 1;
+        let mut failed = 0;
+        let mut detail = String::new();
+        let keys = ids
+            .into_iter()
+            .filter_map(|id| match self.profile_identity(&id) {
+                Ok(owner) => Some((id, owner)),
+                Err(_) => {
+                    failed += 1;
+                    detail =
+                        "Account identity could not be verified; complete login and refresh again."
+                            .into();
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
         let mut pending = Vec::new();
         let mut skipped = 0;
         {
@@ -113,16 +135,37 @@ impl AccountManager {
                 .refreshes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for id in ids {
-                if statuses.get(&id).is_some_and(|status| status.in_progress) {
+            statuses.retain(|(profile, _), status| {
+                status.in_progress || enrolled_ids.contains(profile)
+            });
+            for key in keys {
+                // An old owner's in-flight permit keeps its own slot until completion or drop.
+                statuses.retain(|(profile, owner), status| {
+                    status.in_progress || profile != &key.0 || owner == &key.1
+                });
+                if statuses.get(&key).is_some_and(|status| status.in_progress) {
                     skipped += 1;
                     continue;
                 }
                 let count = statuses
-                    .get(&id)
+                    .get(&key)
                     .and_then(|status| status.reset_credit_count);
+                if !statuses.contains_key(&key) && statuses.len() >= MAX_REFRESH_RECEIPTS {
+                    if let Some(oldest) = statuses
+                        .iter()
+                        .filter(|(_, status)| !status.in_progress)
+                        .min_by_key(|(_, status)| status.attempted_at)
+                        .map(|(key, _)| key.clone())
+                    {
+                        statuses.remove(&oldest);
+                    } else {
+                        failed += 1;
+                        detail = "Too many quota checks are in progress; wait for an existing check before refreshing again.".into();
+                        continue;
+                    }
+                }
                 statuses.insert(
-                    id.clone(),
+                    key.clone(),
                     RefreshStatus {
                         in_progress: true,
                         attempted_at: Utc::now().timestamp(),
@@ -133,17 +176,18 @@ impl AccountManager {
                 );
                 pending.push(RefreshPermit {
                     statuses: Arc::clone(&self.refreshes),
-                    id,
+                    key,
                     completed: false,
                 });
             }
         }
-        let single_account = pending.len() == 1;
         let mut jobs = futures::stream::iter(pending)
             .map(|mut permit| async move {
-                let result =
-                    tokio::time::timeout(Duration::from_secs(10), self.refresh_profile(&permit.id))
-                        .await;
+                let result = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    self.refresh_profile(&permit.key.0, &permit.key.1),
+                )
+                .await;
                 let (outcome, message, count) = match result {
                     Ok(Ok((report, count))) => (report.outcome, report.message, count),
                     Ok(Err(error)) => (QuotaRefreshOutcome::Failed, error.to_string(), None),
@@ -161,11 +205,12 @@ impl AccountManager {
                     .refreshes
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(status) = statuses.get_mut(&permit.id) {
+                if let Some(status) = statuses.get_mut(&permit.key) {
                     status.in_progress = false;
                     status.succeeded = succeeded;
                     status.message = message.clone();
-                    if succeeded {
+                    if succeeded && (count.is_some() || outcome != QuotaRefreshOutcome::Incomplete)
+                    {
                         status.reset_credit_count = count;
                     }
                 }
@@ -178,8 +223,6 @@ impl AccountManager {
         let mut updated = 0;
         let mut incomplete = 0;
         let mut denied = 0;
-        let mut failed = 0;
-        let mut detail = String::new();
         while let Some((outcome, message)) = jobs.next().await {
             match outcome {
                 QuotaRefreshOutcome::Updated => updated += 1,
@@ -204,9 +247,21 @@ impl AccountManager {
         Ok(message)
     }
 
-    async fn refresh_profile(&self, id: &str) -> anyhow::Result<(QuotaRefreshReport, Option<u64>)> {
+    async fn refresh_profile(
+        &self,
+        id: &str,
+        expected_identity: &str,
+    ) -> anyhow::Result<(QuotaRefreshReport, Option<u64>)> {
         let profile = self.profile(id)?;
+        anyhow::ensure!(
+            self.profile_identity(id)? == expected_identity,
+            "Account identity changed before quota refresh; retry for the current account"
+        );
         let (client, manager, auth) = self.profile_client(id).await?;
+        anyhow::ensure!(
+            self.profile_identity(id)? == expected_identity,
+            "Account identity changed before quota refresh; retry for the current account"
+        );
         let store = AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf());
         let pool = self.execution_pool().await?;
         let probe = pool
@@ -221,7 +276,8 @@ impl AccountManager {
             .auth_cached()
             .ok_or_else(|| anyhow::anyhow!("Account login changed during quota check"))?;
         anyhow::ensure!(
-            current.get_account_id() == auth.get_account_id()
+            self.profile_identity(id)? == expected_identity
+                && current.get_account_id() == auth.get_account_id()
                 && current.get_chatgpt_user_id() == auth.get_chatgpt_user_id(),
             "Account identity changed during quota check; retry"
         );
@@ -254,6 +310,17 @@ impl AccountManager {
         } else {
             false
         };
+        if recovered
+            && let Some(pool) = pool.as_ref()
+            && let Some(_spending) = store.try_lock_reset_credit()?
+        {
+            let state = store.load()?;
+            if let Err(error) =
+                codex_login::reconcile_reset_credit_recovery(pool, &store, &state).await
+            {
+                tracing::warn!(%error, "quota recovered; interrupted reset journal still needs review");
+            }
+        }
         if !recovered
             && let Some(snapshot) = response
                 .rate_limits

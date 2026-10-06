@@ -1,0 +1,10 @@
+---
+source: codex-rs/app-server/src/account_management/reset_journal_tests.rs
+expression: rendered
+---
+Interrupted records: 1
+Manual reset outcome remains unconfirmed; its original account may be unavailable.
+Operation: original-operation
+Credit: original-credit
+Original account: unavailable
+Result: unknown; explicit independent review required

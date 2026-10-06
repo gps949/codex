@@ -186,3 +186,78 @@ fn inventory_bounds_reads_and_rejects_unbounded_candidate_counts() -> anyhow::Re
     assert!(inspect(home.path()).is_err());
     Ok(())
 }
+
+#[test]
+fn manual_pending_is_reviewable_without_enrolling_its_original_owner() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let owner = "a".repeat(64);
+    let mut journal = crate::reset_credit_journal::ManualResetCreditJournal::load(home.path())
+        .map_err(anyhow::Error::msg)?;
+    journal
+        .remember(&owner, "original-operation", "original-credit")
+        .map_err(anyhow::Error::msg)?;
+    let original = std::fs::read(home.path().join(".manual-rate-limit-reset-credits.json"))?;
+    let views = inspect(home.path())?;
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].profile_id, None);
+    let manual = views[0].manual.as_ref().expect("owner-independent review");
+    let rendered = format!(
+        "Interrupted records: {}\n{}\nOperation: {}\nCredit: {}\nOriginal account: {}\nResult: unknown; explicit independent review required",
+        views.len(),
+        views[0].message,
+        manual.idempotency_key,
+        manual.credit_id,
+        views[0].profile_id.as_deref().unwrap_or("unavailable")
+    );
+    insta::assert_snapshot!("manual_reset_review_inventory", rendered);
+    assert_eq!(
+        (
+            manual.owner_key.as_str(),
+            manual.idempotency_key.as_str(),
+            manual.credit_id.as_str()
+        ),
+        (owner.as_str(), "original-operation", "original-credit")
+    );
+    crate::reset_credit_journal::review_manual_reset(
+        home.path(),
+        &owner,
+        &manual.idempotency_key,
+        &manual.digest,
+        /*acknowledge_unconfirmed*/ true,
+    )?;
+    assert!(inspect(home.path())?.is_empty());
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&original)?["operations"][0]["phase"]["state"]
+            == "pending"
+    );
+    Ok(())
+}
+
+#[test]
+fn browser_review_operations_decode_the_captured_original_binding() -> anyhow::Result<()> {
+    use super::super::AccountManagerOperation;
+    let operation = serde_json::from_value::<AccountManagerOperation>(serde_json::json!({
+        "type":"manualResetReview","ownerKey":"a".repeat(64),"idempotencyKey":"original",
+        "expectedDigest":"b".repeat(64),"acknowledgeUnconfirmed":true
+    }))?;
+    assert_eq!(
+        operation,
+        AccountManagerOperation::ManualResetReview {
+            owner_key: "a".repeat(64),
+            idempotency_key: "original".into(),
+            expected_digest: "b".repeat(64),
+            acknowledge_unconfirmed: true,
+        }
+    );
+    assert_eq!(
+        serde_json::from_value::<AccountManagerOperation>(serde_json::json!({
+            "type":"resetJournalArchive","fileName":NAME,"expectedDigest":"b".repeat(64),"acknowledgeUnconfirmed":true
+        }))?,
+        AccountManagerOperation::ResetJournalArchive {
+            file_name: NAME.into(),
+            expected_digest: "b".repeat(64),
+            acknowledge_unconfirmed: true,
+        }
+    );
+    Ok(())
+}

@@ -93,8 +93,8 @@ pub(super) fn quota_refresh_report(
 
 // Owns a refresh reservation even while it waits for the concurrency budget.
 pub(super) struct RefreshPermit {
-    pub(super) statuses: Arc<std::sync::Mutex<HashMap<String, RefreshStatus>>>,
-    pub(super) id: String,
+    pub(super) statuses: Arc<std::sync::Mutex<HashMap<(String, String), RefreshStatus>>>,
+    pub(super) key: (String, String),
     pub(super) completed: bool,
 }
 
@@ -105,7 +105,7 @@ impl Drop for RefreshPermit {
                 .statuses
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get_mut(&self.id)
+                .get_mut(&self.key)
         {
             status.in_progress = false;
             status.message = "Quota check interrupted; refresh to try again".into();

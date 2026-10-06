@@ -22,6 +22,7 @@ pub struct ResetJournalView {
     pub legacy: bool,
     pub archive_available: bool,
     pub message: String,
+    pub manual: Option<crate::reset_credit_journal::ManualResetCreditReviewView>,
 }
 
 enum JournalKind {
@@ -233,9 +234,26 @@ pub(super) fn inspect(codex_home: &Path) -> anyhow::Result<Vec<ResetJournalView>
                     Ok(JournalKind::Damaged | JournalKind::Pending(..))
                 ),
             message: message.to_owned(),
+            manual: None,
         });
     }
     views.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+    let manual = crate::reset_credit_journal::ManualResetCreditJournal::load(codex_home)
+        .and_then(|journal| journal.review_views());
+    match manual {
+        Ok(records) => views.extend(records.into_iter().map(|record| ResetJournalView {
+            file_name: ".manual-rate-limit-reset-credits.json".into(),
+            digest: record.digest.clone(), profile_id: None, attempted_at: None,
+            legacy: record.legacy, archive_available: false,
+            message: "Manual reset outcome remains unconfirmed; its original account may be unavailable.".into(),
+            manual: Some(record),
+        })),
+        Err(_) => views.push(ResetJournalView {
+            file_name: ".manual-rate-limit-reset-credits.json".into(), digest: String::new(),
+            profile_id: None, attempted_at: None, legacy: false, archive_available: false, manual: None,
+            message: "Manual reset records could not be inspected. No new automatic credit will be spent.".into(),
+        }),
+    }
     Ok(views)
 }
 
