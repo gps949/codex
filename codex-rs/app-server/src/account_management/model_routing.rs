@@ -32,32 +32,45 @@ pub struct ModelRoutingView {
 pub struct ModelRoutingModelView {
     pub model: String,
     pub label: String,
+    /// Effective role retained for clients using the original field.
     pub role: Option<String>,
+    pub catalog_role: Option<String>,
+    pub effective_role: Option<String>,
     pub efforts: Vec<ReasoningEffort>,
     pub context_window: Option<i64>,
 }
 
 impl AccountManager {
     pub async fn model_routing_view(&self) -> anyhow::Result<ModelRoutingView> {
+        let advisor = self.decision_advisor_view().await.ok();
+        self.model_routing_view_with_advisor(advisor.as_ref()).await
+    }
+
+    pub(super) async fn model_routing_view_with_advisor(
+        &self,
+        advisor: Option<&DecisionAdvisorView>,
+    ) -> anyhow::Result<ModelRoutingView> {
         let (_, config, version) = self.routing_user_config().await?;
         let effective = self.config.model_routing_snapshot().await?;
         let (catalog, _) = self.routing_models(RefreshStrategy::Offline).await?;
         let models = catalog
             .into_iter()
             .map(|model| {
-                let role = effective
+                let catalog_role = default_routing_role(&model)
+                    .map(|role| serde_json::to_value(role).unwrap_or_default())
+                    .and_then(|role| role.as_str().map(str::to_owned));
+                let effective_role = effective
                     .model_roles
                     .get(&model.slug)
                     .map(|role| serde_json::to_value(role).unwrap_or_default())
-                    .or_else(|| {
-                        default_routing_role(&model)
-                            .map(|role| serde_json::to_value(role).unwrap_or_default())
-                    })
-                    .and_then(|role| role.as_str().map(str::to_owned));
+                    .and_then(|role| role.as_str().map(str::to_owned))
+                    .or_else(|| catalog_role.clone());
                 ModelRoutingModelView {
                     model: model.slug.clone(),
                     label: model.display_name.clone(),
-                    role,
+                    role: effective_role.clone(),
+                    catalog_role,
+                    effective_role,
                     efforts: model
                         .supported_reasoning_levels
                         .iter()
@@ -67,7 +80,7 @@ impl AccountManager {
                 }
             })
             .collect();
-        let decision_service_ready = self.decision_advisor_view().await.ok().is_some_and(|view| {
+        let decision_service_ready = advisor.is_some_and(|view| {
             view.effective_config.validate_service().is_ok()
                 && view.policy_status == "knownAllowed"
                 && (view.credential_present

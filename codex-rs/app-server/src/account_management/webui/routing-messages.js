@@ -4,6 +4,7 @@
   const chinese = {
     "Automatic model selection": "自动选择模型",
     "Off": "关闭",
+    "On": "开启",
     "Preview only": "仅建议",
     "Automatic": "自动应用",
     "Local rules": "本地规则",
@@ -35,6 +36,12 @@
     "Unassigned": "未分配",
     "Select at least one model.": "请至少选择一个模型。",
     "Use catalog role": "使用默认角色",
+    "Current role: {role}": "实际角色：{role}",
+    "Saved → Effective": "已保存 → 实际生效",
+    "{setting}: {saved} → {effective}": "{setting}：{saved} → {effective}",
+    "All verified models": "所有已确认模型",
+    "Model roles": "模型角色",
+    "Use catalog roles": "使用默认角色",
     "Roles express your preference, not measured quota costs.":
       "角色表示你的偏好，不代表实测额度消耗。",
     "No verified models are available. Sign in and refresh the model catalog.":

@@ -120,11 +120,16 @@ impl AccountManager {
         let login_jobs = self.login_progress().await;
         let settings = self.current_pool_settings().await?;
         let (api_accounts, api_state) = self.api_inventory()?;
+        let decision_advisor = self.decision_advisor_view().await.ok();
+        let model_routing = self
+            .model_routing_view_with_advisor(decision_advisor.as_ref())
+            .await
+            .ok();
         Ok(AccountManagerInventory {
             host_now: Utc::now().timestamp(),
             primary_login: Some(self.primary_login_view()),
-            decision_advisor: self.decision_advisor_view().await.ok(),
-            model_routing: self.model_routing_view().await.ok(),
+            decision_advisor,
+            model_routing,
             reset_journals: reset_journal::inspect(&self.config.codex_home).unwrap_or_else(|_| vec![ResetJournalView {
                 file_name: String::new(), digest: String::new(), profile_id: None, attempted_at: None,
                 legacy: false, archive_available: false, manual: None,

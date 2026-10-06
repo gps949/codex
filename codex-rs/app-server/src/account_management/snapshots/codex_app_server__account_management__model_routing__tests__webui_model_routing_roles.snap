@@ -1,0 +1,12 @@
+---
+source: app-server/src/account_management/model_routing_tests.rs
+assertion_line: 42
+expression: "serde_json::to_string_pretty(&roles)?"
+---
+{
+  "savedRole": "capability",
+  "model": "gpt-6-luna",
+  "catalogRole": "economy",
+  "effectiveRole": "balanced",
+  "role": "balanced"
+}

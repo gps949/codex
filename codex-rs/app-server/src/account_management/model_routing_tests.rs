@@ -2,6 +2,51 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn routing_view_distinguishes_catalog_saved_and_effective_roles() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[model_routing.model_roles]\ngpt-6-luna='capability'\n",
+    )?;
+    let mut config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().into())
+        .cli_overrides(vec![(
+            "model_routing.model_roles.gpt-6-luna".into(),
+            toml::Value::String("balanced".into()),
+        )])
+        .build()
+        .await?;
+    let mut catalog = codex_models_manager::bundled_models_response()?;
+    catalog.models.retain(|model| model.slug == "gpt-6-luna");
+    for model in &mut catalog.models {
+        model.supported_in_api = true;
+    }
+    config.model_catalog = Some(catalog);
+    let manager = AccountManager::new(config);
+    let view = manager.model_routing_view().await?;
+    let models = serde_json::to_value(&view.models)?;
+    let roles = serde_json::json!({
+        "savedRole": view.config.model_roles["gpt-6-luna"],
+        "model": models[0]["model"],
+        "catalogRole": models[0]["catalogRole"],
+        "effectiveRole": models[0]["effectiveRole"],
+        "role": models[0]["role"],
+    });
+    assert_eq!(
+        roles,
+        serde_json::json!({
+            "savedRole": "capability", "model": "gpt-6-luna",
+            "catalogRole": "economy", "effectiveRole": "balanced", "role": "balanced",
+        })
+    );
+    insta::assert_snapshot!(
+        "webui_model_routing_roles",
+        serde_json::to_string_pretty(&roles)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn model_routing_save_is_local_and_rejects_a_stale_page_or_missing_external_consent()
 -> anyhow::Result<()> {
     let home = tempfile::tempdir()?;
