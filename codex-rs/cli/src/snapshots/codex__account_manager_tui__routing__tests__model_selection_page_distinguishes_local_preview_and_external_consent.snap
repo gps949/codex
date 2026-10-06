@@ -1,0 +1,29 @@
+---
+source: cli/src/account_manager_routing_tests.rs
+expression: "format!(\"{local}\\n---\\n{}\", render(&view, Locale::SimplifiedChinese))"
+---
+Task model selection
+Saved mode: Off
+Source: Local rules
+Main tasks: On · Subagents: On
+Balance: 50 / 100 · Highest effort: high
+0 favors endurance; 100 favors capability. Model roles are relative preferences, not measured quota costs.
+New tasks read this policy. Manual model choices and inherited full-history children keep their model.
+Preview records a suggestion; Automatic applies a validated choice. Local simulation sends no requests.
+[0] Off  [1] Preview  [2] Automatic
+[S] Source  [T] Main tasks  [A] Subagents  [B] Balance  [E] Effort
+[M] Models / roles  [P] Local simulation  [F] Local fallback  [D] Jev / Clef  [Enter] Back
+---
+任务模型选择
+已保存模式：仅预览
+决策来源：Jev / Clef 服务
+主任务：开启 · 子代理：开启
+倾向：25 / 100 · 最高思考强度：high
+0 偏续航；100 偏能力。模型角色表示相对偏好，并非实测配额消耗。
+决策服务已配置；发送任务描述需要独立同意，与工具辅助无关。
+发送任务描述：开启 · 本地规则兜底：关闭
+新任务读取此策略。手动指定模型和继承完整历史的子代理保留其模型。
+预览仅记录建议；自动模式应用经过校验的选择。本地模拟不发送请求。
+[0] 关闭  [1] 预览  [2] 自动
+[S] 来源  [T] 主任务  [A] 子代理  [B] 倾向  [E] 思考强度
+[M] 模型 / 角色  [P] 本地模拟  [F] 本地兜底  [D] Jev / Clef  [Enter] 返回

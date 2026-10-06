@@ -11,6 +11,8 @@ mod display;
 mod decision;
 #[path = "account_manager_reset_journal.rs"]
 mod reset_journal;
+#[path = "account_manager_routing.rs"]
+mod routing;
 
 #[path = "account_manager_actions.rs"]
 mod actions;
@@ -95,6 +97,10 @@ pub(crate) async fn run(manager: Arc<AccountManager>, mut locale: Locale) -> any
                 "s" => settings::choose(&inventory.settings, locale).await?,
                 "d" => {
                     decision::choose(&manager, locale).await?;
+                    None
+                }
+                "m" => {
+                    routing::choose(&manager, locale).await?;
                     None
                 }
                 "j" => reset_journal::choose(&inventory.reset_journals, locale).await?,

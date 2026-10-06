@@ -47,6 +47,7 @@ fn inventory() -> AccountManagerInventory {
     .collect();
     AccountManagerInventory {
         decision_advisor: None,
+        model_routing: None,
         reset_journals: vec![],
         primary_login: None,
         host_now: 1800000000,
@@ -87,6 +88,7 @@ fn manager_interrupted_reset_guidance_is_visible_in_both_languages() {
             legacy: true,
             archive_available: true,
             message: "Legacy record needs review".into(),
+            manual: None,
         });
     insta::assert_snapshot!(
         "manager_interrupted_reset_english",

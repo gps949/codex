@@ -4,6 +4,8 @@
 mod actions;
 #[path = "account_manager_locale_decision.rs"]
 mod decision;
+#[path = "account_manager_locale_routing.rs"]
+mod routing;
 #[path = "account_manager_locale_settings.rs"]
 mod settings;
 
@@ -95,7 +97,7 @@ impl Locale {
     }
 
     pub(super) fn main_menu(self) -> &'static str {
-        self.text("[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions\n[D] Jev / Clef  [H] Host sign-in  [C] Cancel login  [number] Account actions\n[G] Language / 中文  [Q] Quit")
+        self.text("[R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions\n[M] Model selection  [D] Jev / Clef  [H] Host sign-in  [C] Cancel login  [number] Account actions\n[G] Language / 中文  [Q] Quit")
     }
 }
 
@@ -295,7 +297,8 @@ fn chinese(english: &str) -> Option<&'static str> {
         _ => {
             return actions::chinese(english)
                 .or_else(|| settings::chinese(english))
-                .or_else(|| decision::chinese(english));
+                .or_else(|| decision::chinese(english))
+                .or_else(|| routing::chinese(english));
         }
     };
     Some(translated)

@@ -2,6 +2,15 @@
 
 pub(super) fn chinese(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Check quota and credit history independently first. This credit may already have been consumed. Review retains the original binding and a backup; its outcome stays unknown. Later operations may use another credit. Quota and account access stay unchanged." => {
+            "请先独立核验额度与券历史；此券可能已被消耗。审查会保留原绑定与备份，结果仍未知。后续操作可能使用另一张券；额度和账号访问不变。"
+        }
+        "Type REVIEW to acknowledge the unknown reset outcome" => {
+            "输入 REVIEW 确认接受未知的重置结果"
+        }
+        "Original reset reviewed and backed up. Its outcome remains unknown; later operations may use another credit. Quota and account access were not changed." => {
+            "原重置操作已审查并备份，结果仍未知；后续操作可能消耗另一张券。额度和账号访问未改变。"
+        }
         "API account: {}" => "API 账号：{}",
         "HTTPS endpoint: {}" => "HTTPS 接口：{}",
         "Model: {}" => "模型：{}",
