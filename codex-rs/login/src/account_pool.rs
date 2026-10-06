@@ -1368,7 +1368,12 @@ fn earliest_reset_key(account: &ManagedAccount, now: &DateTime<Utc>) -> Earliest
 }
 
 fn has_due_rate_limit_window(account: &ManagedAccount, now: &DateTime<Utc>) -> bool {
-    earliest_reset_key(account, now) == EarliestResetKey::Due
+    account
+        .rate_limits
+        .primary
+        .iter()
+        .chain(account.rate_limits.secondary.iter())
+        .any(|window| window.resets_at.is_some_and(|reset| reset <= *now))
 }
 
 fn set_active_profile(state: &mut AccountPoolState, profile_id: &AccountProfileId) -> bool {

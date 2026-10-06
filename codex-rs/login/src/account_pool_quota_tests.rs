@@ -141,6 +141,52 @@ fn automatic_selection_probes_stale_unknown_and_reset_quota() {
 }
 
 #[test]
+fn forced_automatic_selection_rechecks_due_weekly_quota_with_idle_primary() {
+    for strategy in [
+        AccountPoolRotationStrategy::FillFirst,
+        AccountPoolRotationStrategy::EarliestReset,
+    ] {
+        let (pool, first, second) = scheduling_pool(strategy);
+        let now = Utc::now();
+        let first_lease = pool.lease().expect("first account");
+        let AccountAvailabilityMutation::Rebound(second_lease) = pool
+            .mark_exhausted(&first_lease, Some(now + Duration::hours(1)))
+            .expect("cool first account")
+        else {
+            panic!("second account must remain available");
+        };
+        assert_eq!(second_lease.profile().id, second);
+        pool.mark_exhausted(&second_lease, Some(now + Duration::hours(2)))
+            .expect("cool second account");
+        pool.update_rate_limits(
+            &first,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 0.0,
+                    resets_at: Some(now + Duration::hours(5)),
+                    window_minutes: Some(300),
+                }),
+                secondary: Some(AccountRateLimitWindow {
+                    used_percent: 100.0,
+                    resets_at: Some(now - Duration::seconds(1)),
+                    window_minutes: Some(10080),
+                }),
+                observed_at: Some(now),
+                ..AccountRateLimits::default()
+            },
+        )
+        .expect("observe a weekly reset while primary is idle");
+        assert_eq!(
+            pool.force_activate_automatic()
+                .expect("allow one explicit probe of the due weekly window")
+                .profile()
+                .id,
+            first
+        );
+    }
+}
+
+#[test]
 fn preemptive_rotation_keeps_headroom_when_the_backup_is_known_depleted() {
     for strategy in [
         AccountPoolRotationStrategy::FillFirst,
