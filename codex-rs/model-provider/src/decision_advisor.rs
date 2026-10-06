@@ -37,11 +37,16 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 const FAILURE_TTL: Duration = Duration::from_secs(5);
 type CacheKey = [u8; 32];
 
+#[path = "decision_advisor_cooldown.rs"]
+mod cooldown;
+use cooldown::ServiceCooldowns;
+
 #[derive(Default)]
 struct State {
     cache: VecDeque<(CacheKey, Instant, DecisionAdvice)>,
     flights: HashMap<CacheKey, Weak<tokio::sync::Mutex<()>>>,
     clients: VecDeque<(HttpClientFactory, String, HttpClient)>,
+    cooldowns: ServiceCooldowns,
 }
 
 #[derive(Default)]
@@ -57,6 +62,11 @@ struct Counters {
     empty_search_recovered: AtomicU64,
     latency_total_ms: AtomicU64,
     latency_max_ms: AtomicU64,
+    service_cooldown_hits: AtomicU64,
+    model_assessments: AtomicU64,
+    model_fallbacks: AtomicU64,
+    model_timeouts: AtomicU64,
+    model_latency_total_ms: AtomicU64,
 }
 
 /// Anonymous, process-local diagnostics; no inputs, identities, endpoints, or keys.
@@ -73,6 +83,11 @@ pub struct DecisionAdvisorStats {
     pub empty_search_recovered: u64,
     pub latency_total_ms: u64,
     pub latency_max_ms: u64,
+    pub service_cooldown_hits: u64,
+    pub model_assessments: u64,
+    pub model_fallbacks: u64,
+    pub model_timeouts: u64,
+    pub model_latency_total_ms: u64,
 }
 
 pub struct DecisionAdvisor {
@@ -129,12 +144,28 @@ impl DecisionAdvisor {
             candidates: &candidates,
             catalog_revision: b"task-complexity-v1",
         };
+        let started = Instant::now();
         let advice = tokio::time::timeout(
             settings.timeout,
             self.rank_within_budget(settings, factory, &request, credential),
         )
         .await
-        .map_err(|_| DecisionAdvisorFallback::TimedOut)?;
+        .unwrap_or(DecisionAdvice::Fallback(DecisionAdvisorFallback::TimedOut));
+        self.counters
+            .model_assessments
+            .fetch_add(1, Ordering::Relaxed);
+        self.counters.model_latency_total_ms.fetch_add(
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        if let DecisionAdvice::Fallback(reason) = &advice {
+            self.counters
+                .model_fallbacks
+                .fetch_add(1, Ordering::Relaxed);
+            if *reason == DecisionAdvisorFallback::TimedOut {
+                self.counters.model_timeouts.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         match advice {
             DecisionAdvice::Fallback(reason) => Err(reason),
             DecisionAdvice::Ranked(ids) => match ids.first().map(String::as_str) {
@@ -250,11 +281,18 @@ impl DecisionAdvisor {
         digest.update(request.catalog_revision);
         digest.update(encoded);
         let key: CacheKey = digest.finalize().into();
+        let service_key = ServiceCooldowns::key(endpoint.as_str(), credential);
         let flight = {
             let mut state = self.lock_state();
             if let Some(cached) = Self::cached(&mut state, key) {
                 self.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
                 return cached;
+            }
+            if state.cooldowns.blocked(service_key) {
+                self.counters
+                    .service_cooldown_hits
+                    .fetch_add(1, Ordering::Relaxed);
+                return DecisionAdvice::Fallback(DecisionAdvisorFallback::Unavailable);
             }
             state.flights.retain(|_, flight| flight.strong_count() != 0);
             if let Some(flight) = state.flights.get(&key).and_then(Weak::upgrade) {
@@ -276,6 +314,12 @@ impl DecisionAdvisor {
             self.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
             return cached;
         }
+        if self.lock_state().cooldowns.blocked(service_key) {
+            self.counters
+                .service_cooldown_hits
+                .fetch_add(1, Ordering::Relaxed);
+            return DecisionAdvice::Fallback(DecisionAdvisorFallback::Unavailable);
+        }
         let Ok(_concurrency) = self.concurrency.try_acquire() else {
             return DecisionAdvice::Fallback(DecisionAdvisorFallback::Busy);
         };
@@ -286,10 +330,18 @@ impl DecisionAdvisor {
             if let Some(credential) = credential {
                 builder = builder.bearer_auth(credential);
             }
-            let mut response = builder
-                .send()
-                .await
-                .map_err(|_| DecisionAdvisorFallback::Unavailable)?;
+            let mut response = match builder.send().await {
+                Ok(response) => response,
+                Err(_) => {
+                    self.lock_state().cooldowns.record(service_key, FAILURE_TTL);
+                    return Err(DecisionAdvisorFallback::Unavailable);
+                }
+            };
+            if let Some(delay) =
+                ServiceCooldowns::response_delay(response.status(), response.headers())
+            {
+                self.lock_state().cooldowns.record(service_key, delay);
+            }
             if !response.status().is_success()
                 || response
                     .content_length()
@@ -414,6 +466,11 @@ impl DecisionAdvisor {
             empty_search_recovered: self.counters.empty_search_recovered.load(Ordering::Relaxed),
             latency_total_ms: self.counters.latency_total_ms.load(Ordering::Relaxed),
             latency_max_ms: self.counters.latency_max_ms.load(Ordering::Relaxed),
+            service_cooldown_hits: self.counters.service_cooldown_hits.load(Ordering::Relaxed),
+            model_assessments: self.counters.model_assessments.load(Ordering::Relaxed),
+            model_fallbacks: self.counters.model_fallbacks.load(Ordering::Relaxed),
+            model_timeouts: self.counters.model_timeouts.load(Ordering::Relaxed),
+            model_latency_total_ms: self.counters.model_latency_total_ms.load(Ordering::Relaxed),
         }
     }
 }

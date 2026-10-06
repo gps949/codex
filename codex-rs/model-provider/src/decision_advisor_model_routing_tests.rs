@@ -41,6 +41,50 @@ fn factory() -> HttpClientFactory {
 }
 
 #[tokio::test]
+async fn unavailable_service_cools_different_tasks_but_new_credentials_can_recover() {
+    for (status, retry_after) in [(401, ""), (429, "120"), (503, "60")] {
+        let server = MockServer::start().await;
+        let settings = settings(&server, DecisionAdvisorProvider::Typesafe);
+        Mock::given(method("POST"))
+            .and(header("Authorization", "Bearer old-test-key"))
+            .respond_with(ResponseTemplate::new(status).insert_header("Retry-After", retry_after))
+            .expect(/*r*/ 1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(header("Authorization", "Bearer new-test-key"))
+            .respond_with(
+                ResponseTemplate::new(/*s*/ 200).set_body_json(answer(&settings.model, "standard")),
+            )
+            .expect(/*r*/ 1)
+            .mount(&server)
+            .await;
+        let advisor = DecisionAdvisor::default();
+        let factory = factory();
+        for task in ["Implement one feature.", "Investigate another feature."] {
+            assert_eq!(
+                advisor
+                    .assess_task(&settings, &factory, task, Some("old-test-key"))
+                    .await,
+                Err(DecisionAdvisorFallback::Unavailable)
+            );
+        }
+        assert_eq!(
+            advisor
+                .assess_task(
+                    &settings,
+                    &factory,
+                    "Implement one feature.",
+                    Some("new-test-key")
+                )
+                .await,
+            Ok(RoutingTaskComplexity::Standard)
+        );
+        assert_eq!(advisor.stats().requests, 2);
+    }
+}
+
+#[tokio::test]
 async fn service_assessment_works_with_tools_off_and_deduplicates_exact_credentials() {
     for provider in [
         DecisionAdvisorProvider::Typesafe,
