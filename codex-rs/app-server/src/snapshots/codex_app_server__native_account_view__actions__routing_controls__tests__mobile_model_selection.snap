@@ -1,0 +1,42 @@
+---
+source: app-server/src/native_account_routing_actions_tests.rs
+expression: "format!(\"{}\\n---\\n{}\", render(english), render(chinese))"
+---
+Model selection
+Off
+Saved: Off · Local rules
+Main: On · Subagents: On
+Balance: 50/100 · Max effort: high
+
+Preview only
+Record suggestions; keep the current model
+
+Automatic
+Apply valid choices on new tasks; manual choices still win
+
+Use auto for this thread
+Release the manual model pin; global policy stays unchanged
+
+Policy controls
+Local rules · 50/100
+
+Back
+
+---
+模型策略
+决策来源
+本地规则
+
+主任务
+开启 → 关闭
+
+子代理
+开启 → 关闭
+
+续航 / 能力倾向
+50/100 · 0 续航 · 100 能力
+
+思考强度与模型
+high
+
+返回

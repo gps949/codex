@@ -57,7 +57,7 @@ fn menu_answers_require_exact_question_and_one_captured_label() {
     );
 }
 
-async fn setup() -> (
+pub(super) async fn setup() -> (
     Arc<NativeAccountManager>,
     Arc<OutgoingMessageSender>,
     mpsc::Receiver<OutgoingEnvelope>,
@@ -93,6 +93,7 @@ fn empty_inventory() -> FrozenAccountInventory {
     FrozenAccountInventory::from_inventory(AccountManagerInventory {
         primary_login: None,
         decision_advisor: None,
+        model_routing: None,
         reset_journals: vec![],
         host_now: 1_700_000_000,
         paused: false,
@@ -106,17 +107,42 @@ fn empty_inventory() -> FrozenAccountInventory {
     })
 }
 
-async fn launch(
+pub(super) async fn launch(
     coordinator: &Arc<NativeAccountManager>,
     outgoing: &Arc<OutgoingMessageSender>,
     thread_id: ThreadId,
-) {
+) -> Arc<codex_core::CodexThread> {
     let home = tempfile::tempdir().unwrap();
-    let config = codex_core::config::ConfigBuilder::default()
+    let mut config = codex_core::config::ConfigBuilder::default()
         .codex_home(home.path().to_path_buf())
         .build()
         .await
         .unwrap();
+    config.model_catalog = Some(codex_models_manager::bundled_models_response().unwrap());
+    let auth = codex_core::test_support::auth_manager_from_auth_with_home(
+        codex_login::CodexAuth::from_api_key("synthetic-menu-key"),
+        home.path().to_path_buf(),
+    );
+    let threads = Arc::new(codex_core::ThreadManager::new(
+        &config,
+        Arc::clone(&auth),
+        codex_core::build_models_manager(&config, auth),
+        codex_core::CodexAppsToolsCache::default(),
+        codex_protocol::protocol::SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        codex_extension_api::empty_extension_registry(),
+        Arc::new(codex_core::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        codex_core::passthrough_image_store(),
+        codex_core::thread_store_from_config(&config, /*state_db*/ None),
+        /*agent_graph_store*/ None,
+        "11111111-1111-4111-8111-111111111111".into(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    ));
+    let mut options = codex_core::StartThreadOptions::new(config.clone());
+    options.reserved_thread_id = Some(thread_id);
+    let thread = threads.start_thread(options).await.unwrap().thread;
     let manager = AccountManager::new(config);
     coordinator
         .start_inventory(
@@ -132,6 +158,7 @@ async fn launch(
                     content: vec![],
                 },
                 inventory: empty_inventory(),
+                thread: Arc::clone(&thread),
             },
             manager,
             outgoing.clone(),
@@ -142,9 +169,30 @@ async fn launch(
         )
         .await
         .unwrap();
+    let mut finished = coordinator
+        .state
+        .lock()
+        .unwrap()
+        .menus
+        .get(&thread_id)
+        .unwrap()
+        .finished
+        .clone();
+    tokio::spawn(async move {
+        while finished.borrow().is_none() {
+            if finished.changed().await.is_err() {
+                break;
+            }
+        }
+        threads
+            .shutdown_all_threads_bounded(Duration::from_secs(/*secs*/ 2))
+            .await;
+        drop(home);
+    });
+    thread
 }
 
-async fn question(
+pub(super) async fn question(
     messages: &mut mpsc::Receiver<OutgoingEnvelope>,
 ) -> (RequestId, ToolRequestUserInputParams) {
     loop {
@@ -171,7 +219,7 @@ async fn question(
     }
 }
 
-async fn answer(
+pub(super) async fn answer(
     outgoing: &OutgoingMessageSender,
     request_id: RequestId,
     params: &ToolRequestUserInputParams,

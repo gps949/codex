@@ -1,0 +1,27 @@
+---
+source: app-server/src/native_account_reset_review_tests.rs
+expression: "format!(\"{}\\n---\\n{}\", render(page), render(session.question(NativeAccountLanguage::Chinese)))"
+---
+Interrupted resets
+1. Unconfirmed reset
+Operation: original-operation
+Credit: original-credit
+Outcome unknown; original account may be unavailable
+
+Reload records
+Read current operation state; no reset credit is used
+
+Back
+
+---
+复核此次重置？
+确认
+操作编号: original-operation
+重置券: original-credit
+结果未知；原账号可能已不可访问
+请先核对额度与用券历史；这张券可能已被消耗。
+保留原操作绑定和备份，结果仍未知；后续操作可能消耗另一张券。
+不会改变额度或账号访问权限。
+
+取消
+不会执行此操作

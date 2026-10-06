@@ -1,0 +1,11 @@
+---
+source: app-server/src/native_account_routing_actions_tests.rs
+expression: render(session.question(NativeAccountLanguage::English))
+---
+Return this thread to auto?
+Confirm
+Release the manual model pin for subsequent tasks. Global Off/Preview/Automatic policy and the active task stay unchanged.
+No Jev/Clef sharing consent, paid API use or reset credit is authorized. No inference request is sent.
+
+Cancel
+No change will be made

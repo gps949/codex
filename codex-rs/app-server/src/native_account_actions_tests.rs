@@ -215,6 +215,9 @@ fn fixture() -> FrozenAccountInventory {
         settings: serde_json::json!({}),
         primary: None,
         fallback: codex_login::ApiAccountFallback::default(),
+        routing: None,
+        reset_journals: vec![],
+        reset_total: 0,
     }
 }
 

@@ -1,0 +1,14 @@
+---
+source: app-server/src/native_account_routing_actions_tests.rs
+expression: render(session.question(NativeAccountLanguage::Chinese))
+---
+同意发送任务描述？
+确认
+已保存: 关闭 · Jev / Clef
+主任务: 开启 · 子代理: 开启
+倾向: 50/100 · 最高思考: high
+同意发送符合条件任务的描述（最多 2048 字节），可能独立计费。不发送历史、源码、账号详情或额度。
+新任务生效，手动指定模型仍优先。
+
+取消
+不会执行此操作

@@ -135,6 +135,7 @@ fn current_subscription_is_retained_before_the_inventory_cap() {
     let inventory = FrozenAccountInventory::from_inventory(AccountManagerInventory {
         primary_login: None,
         decision_advisor: None,
+        model_routing: None,
         reset_journals: vec![],
         host_now: NOW,
         paused: false,
@@ -188,6 +189,9 @@ fn fixture() -> FrozenAccountInventory {
         settings: serde_json::json!({}),
         primary: None,
         fallback: codex_login::ApiAccountFallback::default(),
+        routing: None,
+        reset_journals: vec![],
+        reset_total: 0,
     }
 }
 
@@ -301,7 +305,8 @@ fn phone_pages_keep_short_headings_and_bounded_unique_choices() {
         let question = inventory.question_at(page, NativeAccountLanguage::English, NOW);
         assert!(!question.text.contains('\n'));
         assert!(question.text.chars().count() <= 56);
-        assert!((2..=5).contains(&question.choices.len()));
+        let limit = if page == MenuPage::Home { 6 } else { 5 };
+        assert!((2..=limit).contains(&question.choices.len()));
         let unique = question
             .choices
             .iter()
@@ -649,6 +654,7 @@ fn incomplete_quota_refresh_keeps_window_ages_separate_from_the_last_check_and_c
         host_now: NOW,
         primary_login: None,
         decision_advisor: None,
+        model_routing: None,
         reset_journals: vec![],
         paused: false,
         active_profile_id: None,
