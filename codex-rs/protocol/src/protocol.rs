@@ -505,10 +505,24 @@ pub enum TurnSettingsUpdateOutcome {
     },
 }
 
+/// Distinguishes a client state echo from a deliberate model choice.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum ModelSelectionIntent {
+    /// Keep the thread's selection and its existing manual pin.
+    FollowThread,
+    /// Retain this selection until automatic selection is explicitly restored.
+    Explicit,
+    /// Release the manual pin for task-boundary routing.
+    Automatic,
+}
+
 /// Thread-settings overrides that can be applied before user input or on their
 /// own. Standalone updates change the settings inherited by future turns.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ThreadSettingsOverrides {
+    pub model_selection_intent: Option<ModelSelectionIntent>,
     /// Updated fallback `cwd` and environments supplied together as a complete pair.
     pub environments: Option<TurnEnvironmentSelections>,
 
@@ -2211,6 +2225,10 @@ pub struct ThreadSettingsAppliedEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct ThreadSettingsSnapshot {
+    /// Absent in older histories; startup configuration determines the initial pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_selection_intent: Option<ModelSelectionIntent>,
     pub model: String,
     pub model_provider_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]

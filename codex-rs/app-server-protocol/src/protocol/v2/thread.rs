@@ -52,6 +52,35 @@ pub enum ThreadStartSource {
     Clear,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum ModelSelectionIntent {
+    FollowThread,
+    Explicit,
+    Automatic,
+}
+
+impl ModelSelectionIntent {
+    pub fn to_core(self) -> codex_protocol::protocol::ModelSelectionIntent {
+        match self {
+            Self::FollowThread => codex_protocol::protocol::ModelSelectionIntent::FollowThread,
+            Self::Explicit => codex_protocol::protocol::ModelSelectionIntent::Explicit,
+            Self::Automatic => codex_protocol::protocol::ModelSelectionIntent::Automatic,
+        }
+    }
+}
+
+impl From<codex_protocol::protocol::ModelSelectionIntent> for ModelSelectionIntent {
+    fn from(value: codex_protocol::protocol::ModelSelectionIntent) -> Self {
+        match value {
+            codex_protocol::protocol::ModelSelectionIntent::FollowThread => Self::FollowThread,
+            codex_protocol::protocol::ModelSelectionIntent::Explicit => Self::Explicit,
+            codex_protocol::protocol::ModelSelectionIntent::Automatic => Self::Automatic,
+        }
+    }
+}
+
 // === Threads, Turns, and Items ===
 // Thread APIs
 #[derive(
@@ -235,6 +264,10 @@ impl ThreadStartResponse {
 #[ts(export_to = "v2/")]
 pub struct ThreadSettingsUpdateParams {
     pub thread_id: String,
+    /// Follow the saved selection, pin explicit settings, or restore automatic selection.
+    /// Omission preserves the pin unless model or effort settings are supplied.
+    #[ts(optional = nullable)]
+    pub model_selection_intent: Option<ModelSelectionIntent>,
     /// Replace this thread's disabled plugin IDs.
     /// Omitted/null preserves the list; [] clears it.
     #[ts(optional = nullable)]
@@ -302,6 +335,7 @@ pub struct ThreadSettingsUpdateResponse {}
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadSettings {
+    pub model_selection_intent: Option<ModelSelectionIntent>,
     /// Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
     #[serde(default)]
     pub disabled_plugin_ids: Vec<String>,

@@ -87,6 +87,7 @@ impl TurnInputRequest {
     }
 
     /// Persistent thread settings applied when Core accepts this input.
+    /// `model_selection_intent` distinguishes a client state echo from a manual pin.
     ///
     /// Settings are applied for both `Started` and `Steered`. A steered input
     /// cannot change its already-active turn context, so those settings apply

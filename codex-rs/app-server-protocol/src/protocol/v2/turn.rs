@@ -166,6 +166,10 @@ pub struct TurnToolOutput {
 #[ts(export_to = "v2/")]
 pub struct TurnStartParams {
     pub thread_id: String,
+    /// Follow the saved selection, pin explicit settings, or restore automatic selection.
+    /// Omission treats supplied model or effort settings as an explicit choice.
+    #[ts(optional = nullable)]
+    pub model_selection_intent: Option<super::ModelSelectionIntent>,
     /// Replace this thread's disabled plugin IDs.
     /// Omitted/null preserves the list; [] clears it.
     #[ts(optional = nullable)]
