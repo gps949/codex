@@ -127,6 +127,7 @@ tikv-jemallocator = { workspace = true }
 codex-windows-sandbox = { workspace = true }
 
 [dev-dependencies]
+sha1 = { workspace = true }
 codex-uds = { workspace = true }
 app_test_support = { workspace = true }
 axum = { workspace = true, default-features = false, features = [
