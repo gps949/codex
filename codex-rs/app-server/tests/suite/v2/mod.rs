@@ -84,6 +84,7 @@ mod model_list_requirements_tests;
 mod model_provider_capabilities_read;
 #[path = "model_provider_enforcement_tests.rs"]
 mod model_provider_enforcement;
+mod model_selection;
 mod multi_agent_v2_developer_instructions;
 mod native_account_manager;
 mod otel;
