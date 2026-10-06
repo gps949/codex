@@ -36,6 +36,9 @@ mod api_key_discovery_tests;
 #[path = "cache_identity_tests.rs"]
 mod cache_identity_tests;
 
+#[path = "routing_catalog_tests.rs"]
+mod routing_catalog_tests;
+
 #[path = "model_info_overrides_tests.rs"]
 mod model_info_overrides_tests;
 

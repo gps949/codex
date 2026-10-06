@@ -147,6 +147,16 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ModelsResponse>;
 
+    /// Returns an exact catalog established for the current identity, excluding bundled seeds.
+    /// Implementations without authoritative discovery keep automatic model selection disabled.
+    /// This snapshot establishes catalog provenance, not a guarantee of current quota or access.
+    fn verified_model_catalog(
+        &self,
+        _http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, Option<ModelsResponse>> {
+        Box::pin(std::future::ready(None))
+    }
+
     /// Best-effort refresh when the in-memory catalog belongs to different credentials.
     /// Static catalogs need no refresh. Failures follow the catalog's fallback policy.
     fn refresh_after_auth_change(
@@ -286,6 +296,7 @@ impl CatalogSource {
 #[derive(Debug)]
 pub struct OpenAiModelsManager {
     remote_models: RwLock<ModelsCacheEntry>,
+    verified_models: std::sync::Mutex<Option<(String, Vec<ModelInfo>)>>,
     cache: Option<Arc<dyn ModelsCache>>,
     endpoint_client: SharedModelsEndpointClient,
     catalog_source: CatalogSource,
@@ -344,6 +355,7 @@ impl OpenAiModelsManager {
         auth_manager: Option<Arc<AuthManager>>,
     ) -> Self {
         Self {
+            verified_models: std::sync::Mutex::new(None),
             remote_models: RwLock::new(ModelsCacheEntry {
                 fetched_at: Utc::now(),
                 etag: None,
@@ -379,6 +391,26 @@ impl StaticModelsManager {
 }
 
 impl ModelsManager for OpenAiModelsManager {
+    fn verified_model_catalog(
+        &self,
+        http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, Option<ModelsResponse>> {
+        Box::pin(async move {
+            self.raw_model_catalog(RefreshStrategy::Offline, http_client_factory)
+                .await;
+            let verified = self
+                .verified_models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (identity, models) = verified.as_ref()?;
+            (self.endpoint_client.identity().as_deref() == Some(identity.as_str())).then(|| {
+                ModelsResponse {
+                    models: models.clone(),
+                }
+            })
+        })
+    }
+
     fn set_api_key_model_discovery_enabled(&self, enabled: bool) {
         self.api_key_model_discovery_enabled
             .store(enabled, Ordering::SeqCst);
@@ -602,6 +634,10 @@ impl OpenAiModelsManager {
                         // Keep this failure in memory even if persistent invalidation fails.
                         current.fetched_at = DateTime::<Utc>::MIN_UTC;
                         current.models.clear();
+                        *self
+                            .verified_models
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                         current.etag = None;
                         current.identity.clone_from(&request_identity);
                     }
@@ -674,6 +710,13 @@ impl OpenAiModelsManager {
         if entry.identity != self.endpoint_client.identity() {
             return false;
         }
+        *self
+            .verified_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = entry
+            .identity
+            .clone()
+            .map(|identity| (identity, entry.models.clone()));
         let remote_only = entry
             .models
             .iter()
@@ -755,6 +798,17 @@ impl OpenAiModelsManager {
 }
 
 impl ModelsManager for StaticModelsManager {
+    fn verified_model_catalog(
+        &self,
+        _http_client_factory: HttpClientFactory,
+    ) -> ModelsManagerFuture<'_, Option<ModelsResponse>> {
+        Box::pin(async {
+            Some(ModelsResponse {
+                models: self.remote_models.clone(),
+            })
+        })
+    }
+
     fn get_default_model<'a>(
         &'a self,
         model: &'a Option<String>,
