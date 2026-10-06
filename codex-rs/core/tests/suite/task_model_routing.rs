@@ -8,10 +8,14 @@ use codex_core::SteerSubmission;
 use codex_core::TurnInputRequest;
 use codex_core::TurnInputSubmission;
 use codex_features::Feature;
+use codex_history::RolloutItem;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::models::ImageReference;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -24,7 +28,9 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
+use codex_utils_image::data_url_from_bytes;
 use core_test_support::responses;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -60,6 +66,10 @@ fn catalog() -> ModelsResponse {
                 model.upgrade = None;
                 model.comp_hash = None;
                 model.context_window = Some(200_000);
+                model.input_modalities = vec![InputModality::Text, InputModality::Image];
+                if slug == "routing-balanced" {
+                    model.input_modalities.push(InputModality::Audio);
+                }
                 model.default_reasoning_level = Some(ReasoningEffort::Medium);
                 model.supported_reasoning_levels = [
                     ReasoningEffort::Low,
@@ -115,6 +125,177 @@ fn builder(mode: ModelRoutingMode) -> TestCodexBuilder {
                 .model_roles
                 .insert("routing-economy".into(), ModelRoutingRole::Economy);
         })
+}
+
+const RETAINED_AUDIO_URL: &str = "data:audio/mpeg;base64,YXVkaW8=";
+
+async fn resume_with_audio_output(
+    builder: &mut TestCodexBuilder,
+    server: &wiremock::MockServer,
+    output_type: &str,
+) -> Result<TestCodex> {
+    let call = match output_type {
+        "function_call_output" => Some(json!({
+            "type": "function_call", "name": "recording", "arguments": "{}",
+            "call_id": "retained-audio"
+        })),
+        "custom_tool_call_output" => Some(json!({
+            "type": "custom_tool_call", "name": "recording", "input": "record",
+            "call_id": "retained-audio"
+        })),
+        "retained_message_audio" => None,
+        _ => panic!("unsupported audio fixture"),
+    };
+    let mut values = vec![json!({"type": "message", "role": "user", "content": [
+        {"type": "input_text", "text": "Read this recording"}
+    ]})];
+    if let Some(call) = call {
+        values.push(call);
+        values.push(
+            json!({"type": output_type, "call_id": "retained-audio", "output": [
+                {"type": "input_audio", "audio_url": RETAINED_AUDIO_URL}
+            ]}),
+        );
+    } else {
+        values[0]["content"]
+            .as_array_mut()
+            .expect("message content")
+            .push(json!({"type": "input_audio", "audio_url": RETAINED_AUDIO_URL}));
+    }
+    let items: Vec<ResponseItem> = serde_json::from_value(json!(values))?;
+    let rollout = items
+        .into_iter()
+        .map(|item| RolloutItem::ResponseItem(item.into()))
+        .collect::<Vec<_>>();
+    let test = builder.build_with_auto_env(server).await?;
+    // Persist actual settings before resuming. A transcript without any admitted turn
+    // restores the upstream default model, which is not the audio-capable fixture.
+    let seed = responses::mount_sse_once(server, responses::sse_completed("audio-settings")).await;
+    test.codex
+        .start_or_steer_turn(input(ModelSelectionIntent::Explicit))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(
+        seed.single_request().body_json()["model"],
+        json!("routing-balanced")
+    );
+    test.codex.ensure_rollout_materialized().await;
+    test.codex.append_rollout_items(&rollout).await?;
+    test.codex.shutdown_and_wait().await?;
+    // Builder mutators are FnOnce and were consumed by the first build. Restore the
+    // synthetic catalog and routing/child features instead of resuming with stock defaults.
+    let initial = test.config.clone();
+    *builder = std::mem::replace(builder, test_codex()).with_config(move |config| {
+        config.model = initial.model;
+        config.model_catalog = initial.model_catalog;
+        config.model_reasoning_effort = initial.model_reasoning_effort;
+        config.model_routing = initial.model_routing;
+        config.model_selection_is_explicit = initial.model_selection_is_explicit;
+        config.model_selection_override = initial.model_selection_override;
+        config.features = initial.features;
+    });
+    builder
+        .resume_with_auto_env(
+            server,
+            Arc::clone(&test.home),
+            test.codex.rollout_path().expect("saved audio history"),
+        )
+        .await
+}
+
+#[test_case("function_call_output"; "function_audio")]
+#[test_case("custom_tool_call_output"; "custom_audio")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_routing_preserves_retained_tool_audio(output_type: &str) -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let test = resume_with_audio_output(
+        &mut builder(ModelRoutingMode::Automatic),
+        &server,
+        output_type,
+    )
+    .await?;
+    let inference = responses::mount_sse_once(&server, responses::sse_completed("audio")).await;
+    test.codex
+        .start_or_steer_turn(input(ModelSelectionIntent::Automatic))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let request = inference.single_request();
+    assert_eq!(
+        (
+            request.body_json()["model"].clone(),
+            request.call_output("retained-audio", output_type)["output"].clone()
+        ),
+        (
+            json!("routing-balanced"),
+            json!([{"type": "input_audio", "audio_url": RETAINED_AUDIO_URL}])
+        )
+    );
+    Ok(())
+}
+
+#[test_case("inline"; "inline_image")]
+#[test_case("local"; "local_image")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_images_route_by_visible_content_instead_of_encoded_size(kind: &str) -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let inference = responses::mount_sse_once(&server, responses::sse_completed("image")).await;
+    let test = builder(ModelRoutingMode::Automatic)
+        .build_with_auto_env(&server)
+        .await?;
+    let image_dir = tempfile::tempdir()?;
+    let path = image_dir.path().join("routing.png");
+    let mut state = 123_456_789u32;
+    let pixels = (0..640 * 480 * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    image::RgbImage::from_raw(/*width*/ 640, /*height*/ 480, pixels)
+        .expect("RGB image")
+        .save(&path)?;
+    let bytes = std::fs::read(&path)?;
+    assert!(
+        bytes.len() > 200_000,
+        "fixture exceeds the encoded-byte routing budget"
+    );
+    let image = match kind {
+        "inline" => UserInput::Image {
+            image: ImageReference::Inline {
+                image_url: data_url_from_bytes("image/png", &bytes),
+            },
+            detail: None,
+        },
+        "local" => UserInput::LocalImage { path, detail: None },
+        _ => panic!("unsupported image fixture"),
+    };
+    let mut request = input(ModelSelectionIntent::FollowThread);
+    let codex_protocol::turn_input::TurnInput::UserInput { content, .. } = &mut request.input
+    else {
+        panic!("user input fixture");
+    };
+    content.push(image);
+    test.codex.start_or_steer_turn(request).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let request = inference.single_request();
+    assert_eq!(request.body_json()["model"], json!("routing-economy"));
+    assert!(request.input().iter().any(|item| {
+        item["content"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|part| part["type"] == "input_image"))
+    }));
+    Ok(())
 }
 
 #[test_case(ModelRoutingMode::Off, "routing-balanced", ReasoningEffort::Medium; "off")]
@@ -621,34 +802,40 @@ async fn steering_a_simple_request_preserves_the_active_choice() -> Result<()> {
     Ok(())
 }
 
-#[test_case("none", "routing-economy", ReasoningEffort::Low; "fresh_child")]
-#[test_case("1", "routing-economy", ReasoningEffort::Low; "partial_child")]
-#[test_case("all", "routing-balanced", ReasoningEffort::Medium; "full_fork")]
+#[test_case("none", None, "routing-economy", ReasoningEffort::Low; "fresh_child")]
+#[test_case("1", None, "routing-economy", ReasoningEffort::Low; "partial_child")]
+#[test_case("all", None, "routing-balanced", ReasoningEffort::Medium; "full_fork")]
+#[test_case("2", Some("function_call_output"), "routing-economy", ReasoningEffort::Low; "partial_function_audio_filtered")]
+#[test_case("2", Some("custom_tool_call_output"), "routing-economy", ReasoningEffort::Low; "partial_custom_audio_filtered")]
+#[test_case("2", Some("retained_message_audio"), "routing-balanced", ReasoningEffort::Medium; "partial_retained_message_audio")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn child_creation_routes_only_fresh_or_partial_history(
     fork_turns: &str,
+    audio_output_type: Option<&str>,
     expected_model: &str,
     expected_effort: ReasoningEffort,
 ) -> Result<()> {
     let server = responses::start_mock_server().await;
-    let test = builder(ModelRoutingMode::Automatic)
-        .with_config(|config| {
-            config.model_routing.main_tasks = false;
-            config
-                .features
-                .enable(Feature::Collab)
-                .expect("allow collaboration");
-            config
-                .features
-                .enable(Feature::MultiAgentV2)
-                .expect("allow multi-agent v2");
-            config
-                .features
-                .disable(Feature::EnableRequestCompression)
-                .expect("plain fixture requests");
-        })
-        .build_with_auto_env(&server)
-        .await?;
+    let mut builder = builder(ModelRoutingMode::Automatic).with_config(|config| {
+        config.model_routing.main_tasks = false;
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("allow collaboration");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("allow multi-agent v2");
+        config
+            .features
+            .disable(Feature::EnableRequestCompression)
+            .expect("plain fixture requests");
+    });
+    let test = if let Some(output_type) = audio_output_type {
+        resume_with_audio_output(&mut builder, &server, output_type).await?
+    } else {
+        builder.build_with_auto_env(&server).await?
+    };
     let parent_id = test.session_configured.thread_id.to_string();
     let initial_id = parent_id.clone();
     responses::mount_sse_once_match(&server, move |request: &wiremock::Request| {
@@ -702,12 +889,27 @@ async fn child_creation_routes_only_fresh_or_partial_history(
         .into_iter()
         .map(|request| request.body_json())
         .filter(|body| body["client_metadata"]["thread_id"] == json!(child_id))
-        .map(|body| (body["model"].clone(), body["reasoning"]["effort"].clone()))
         .collect::<Vec<_>>();
     assert_eq!(
-        child_posts,
+        child_posts
+            .iter()
+            .map(|body| (body["model"].clone(), body["reasoning"]["effort"].clone()))
+            .collect::<Vec<_>>(),
         vec![(json!(expected_model), json!(expected_effort))]
     );
+    if audio_output_type == Some("retained_message_audio") {
+        let audio = child_posts[0]["input"]
+            .as_array()
+            .expect("child input")
+            .iter()
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .find(|part| part["type"] == "input_audio")
+            .expect("retained message audio");
+        assert_eq!(
+            audio,
+            &json!({"type": "input_audio", "audio_url": RETAINED_AUDIO_URL})
+        );
+    }
     child.shutdown_and_wait().await?;
     test.codex.shutdown_and_wait().await?;
     Ok(())

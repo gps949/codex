@@ -1,5 +1,10 @@
 //! Task-boundary routing retains manual pins, provider ownership and supported model metadata.
 
+mod media;
+
+pub(crate) use media::estimate_fresh_input_tokens;
+pub(crate) use media::retained_media_requirements;
+
 use crate::config::Config;
 use codex_config::ModelRoutingMode;
 use codex_config::ModelRoutingRole;

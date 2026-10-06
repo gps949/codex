@@ -9,11 +9,10 @@ use crate::task_model_routing::RoutingScope;
 use crate::task_model_routing::TaskRoutingDecision;
 use crate::task_model_routing::TaskRoutingInput;
 use crate::task_model_routing::decide_task_model;
+use crate::task_model_routing::estimate_fresh_input_tokens;
+use crate::task_model_routing::retained_media_requirements;
 use codex_history::InitialHistory;
 use codex_history::RolloutItem;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::FunctionCallOutputContentItem;
-use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ModelSelectionIntent;
@@ -113,25 +112,6 @@ pub(super) async fn retain_legacy_turn_echo(
     overrides
 }
 
-/// Checks retained media before model projection can discard unsupported image inputs.
-pub(crate) fn has_images<'a>(mut items: impl Iterator<Item = &'a ResponseItem>) -> bool {
-    items.any(|item| match item {
-        ResponseItem::Message { content, .. } => content
-            .iter()
-            .any(|part| matches!(part, ContentItem::InputImage { .. })),
-        ResponseItem::FunctionCallOutput { output, .. }
-        | ResponseItem::CustomToolCallOutput { output, .. } => {
-            output.content_items().is_some_and(|parts| {
-                parts
-                    .iter()
-                    .any(|part| matches!(part, FunctionCallOutputContentItem::InputImage { .. }))
-            })
-        }
-        ResponseItem::ImageGenerationCall { .. } => true,
-        _ => false,
-    })
-}
-
 /// Called only after new user-turn admission, before committing its settings.
 pub(super) async fn route_root_task(
     session: &Session,
@@ -182,39 +162,26 @@ pub(super) async fn route_root_task(
         return None;
     }
     let history = session.clone_history().await;
-    if history.raw_items().any(|item| {
-        matches!(item, ResponseItem::Message { content, .. }
-        if content.iter().any(|part| matches!(part, ContentItem::InputAudio { .. })))
-    }) {
+    let media = retained_media_requirements(history.raw_items());
+    if media.audio {
         return None;
     }
-    let image_count = content
-        .iter()
-        .filter(|input| {
+    let requires_images = media.images
+        || content.iter().any(|input| {
             matches!(
                 input,
                 UserInput::Image { .. } | UserInput::LocalImage { .. }
             )
-        })
-        .count();
-    let requires_images = image_count > 0 || has_images(history.raw_items());
+        });
     let base = session.get_base_instructions().await;
     let history_tokens = history
         .estimate_token_count_with_base_instructions(&base)
         .unwrap_or(i64::MAX)
         .max(session.get_total_token_usage().await);
-    // Byte counts conservatively cover fresh text; retained token usage is context, not billing.
-    // Reserve room for model-owned instructions, tool schemas and pending media.
-    let fresh_bytes = serde_json::to_vec(content).map_or(i64::MAX, |bytes| {
-        i64::try_from(bytes.len()).unwrap_or(i64::MAX)
-    });
+    // Retained token usage is context, not billing. Fresh input estimates keep text and media
+    // margins separate; reserve additional room for model-owned instructions and tool schemas.
     let required_context_tokens = history_tokens
-        .saturating_add(fresh_bytes)
-        .saturating_add(
-            i64::try_from(image_count)
-                .unwrap_or(i64::MAX)
-                .saturating_mul(4096),
-        )
+        .saturating_add(estimate_fresh_input_tokens(content))
         .saturating_add(8192);
     let config = session.get_config().await;
     let decision = decide_task_model(

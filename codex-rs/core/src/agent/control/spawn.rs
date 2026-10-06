@@ -83,7 +83,10 @@ pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>
         .collect()
 }
 
-fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool) -> bool {
+pub(in crate::agent) fn keep_forked_rollout_item(
+    item: &RolloutItem,
+    preserve_context_baselines: bool,
+) -> bool {
     match item {
         RolloutItem::ResponseItem(envelope) => match &envelope.item {
             ResponseItem::Message { role, phase, .. } => match role.as_str() {

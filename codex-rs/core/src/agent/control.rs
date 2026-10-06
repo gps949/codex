@@ -77,6 +77,7 @@ mod runtime_context;
 mod sender_context;
 mod service_tier;
 mod spawn;
+pub(super) use spawn::keep_forked_rollout_item;
 mod spawn_guard;
 mod spawn_telemetry;
 mod target;
