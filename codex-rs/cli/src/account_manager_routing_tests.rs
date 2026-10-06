@@ -15,6 +15,19 @@ fn fixture() -> ModelRoutingView {
 }
 
 #[test]
+fn empty_model_catalog_keeps_a_refresh_action_on_the_model_page() {
+    let view = fixture();
+    insta::assert_snapshot!(
+        "manager_empty_model_catalog",
+        format!(
+            "{}\n---\n{}",
+            render_models(&view, Locale::English),
+            render_models(&view, Locale::SimplifiedChinese)
+        )
+    );
+}
+
+#[test]
 fn model_selection_page_distinguishes_local_preview_and_external_consent() {
     let mut view = fixture();
     let local = render(&view, Locale::English);

@@ -63,6 +63,9 @@ pub(super) fn chinese(english: &str) -> Option<&'static str> {
             "尚无符合条件的目录模型；自动选择会保留当前模型。"
         }
         "Models / relative roles" => "模型 / 相对角色",
+        "[R] Refresh model catalog; no inference request is sent." => {
+            "[R] 刷新模型目录；不会发送推理请求。"
+        }
         "Included" => "已纳入",
         "Excluded" => "已排除",
         "unassigned" => "未指定角色",
@@ -73,6 +76,10 @@ pub(super) fn chinese(english: &str) -> Option<&'static str> {
             "* 允许所有受支持模型。选择模型序号可修改角色或是否纳入。"
         }
         "Model number or * (Enter returns)" => "模型序号或 *（回车返回）",
+        "Model number, * or R (Enter returns)" => "模型序号、* 或 R（回车返回）",
+        "Model catalog checked. Available entries may come from the last verified snapshot." => {
+            "已查询模型目录；可用条目可能来自最近一次验证的快照。"
+        }
         "0 Default role  1 Economy  2 Balanced  3 Capability  4 Toggle eligibility" => {
             "0 默认角色  1 续航  2 均衡  3 能力  4 切换是否纳入"
         }

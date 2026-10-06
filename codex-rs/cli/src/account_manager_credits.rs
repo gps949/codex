@@ -8,10 +8,18 @@ use codex_app_server::account_management::AccountManagerOperation as Operation;
 use codex_app_server::account_management::ManagedAccountView;
 use std::sync::Arc;
 
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct PendingRedemption {
-    credit_id: String,
-    operation_id: String,
-    owner_key: String,
+    pub(super) credit_id: String,
+    pub(super) operation_id: String,
+    pub(super) owner_key: String,
+}
+
+pub(super) fn clear_completed(
+    pending: &mut std::collections::HashMap<String, PendingRedemption>,
+    completed: &PendingRedemption,
+) {
+    pending.retain(|_, original| original != completed);
 }
 
 pub(super) async fn redeem(
@@ -166,7 +174,7 @@ pub(super) async fn redeem(
             },
         );
     }
-    let operation = &pending[id];
+    let operation = pending[id].clone();
     println!(
         "{}",
         locale.format("Reset operation: {}", &[&clean(&operation.operation_id)])
@@ -181,7 +189,7 @@ pub(super) async fn redeem(
         .await
     {
         Ok(result) => {
-            pending.remove(id);
+            clear_completed(pending, &operation);
             println!("{}", clean(locale.message(&result.message)));
         }
         Err(error) => println!(
@@ -193,3 +201,7 @@ pub(super) async fn redeem(
     let _ = prompt(locale, "Enter to return", "").await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "account_manager_credits_tests.rs"]
+mod tests;

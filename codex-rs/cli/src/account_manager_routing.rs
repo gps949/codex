@@ -200,7 +200,7 @@ pub(super) async fn choose(manager: &Arc<AccountManager>, locale: Locale) -> any
                 None
             }
             "m" => {
-                match model_settings(&view, locale).await {
+                match model_settings(manager, &view, &config, locale).await {
                     Ok(Some(next)) => config = next,
                     Ok(None) => continue,
                     Err(error) => {
@@ -296,92 +296,124 @@ pub(super) async fn choose(manager: &Arc<AccountManager>, locale: Locale) -> any
     }
 }
 
-async fn model_settings(
-    view: &ModelRoutingView,
-    locale: Locale,
-) -> anyhow::Result<Option<ModelRoutingConfigToml>> {
-    let mut config = view.config.clone();
-    println!("{}", locale.text("Models / relative roles"));
+fn render_models(view: &ModelRoutingView, locale: Locale) -> String {
+    let config = &view.config;
+    let mut lines = vec![locale.text("Models / relative roles").to_string()];
     if view.models.is_empty() {
-        println!(
-            "{}",
-            locale.text("No eligible catalog models; automatic selection keeps the current model.")
+        lines.push(
+            locale
+                .text("No eligible catalog models; automatic selection keeps the current model.")
+                .into(),
         );
     }
     for (index, model) in view.models.iter().enumerate() {
         let allowed =
             config.allowed_models.is_empty() || config.allowed_models.contains(&model.model);
-        println!(
+        lines.push(format!(
             "{}. {} · {} · {}",
             index + 1,
             clean(&model.model),
             locale.message(model.role.as_deref().unwrap_or("unassigned")),
             locale.text(if allowed { "Included" } else { "Excluded" })
+        ));
+    }
+    lines.push(locale.text("* includes every supported model. Choose a model number to change its role or eligibility.").into());
+    lines.push(
+        locale
+            .text("[R] Refresh model catalog; no inference request is sent.")
+            .into(),
+    );
+    lines.join("\n")
+}
+
+async fn model_settings(
+    manager: &Arc<AccountManager>,
+    view: &ModelRoutingView,
+    draft: &ModelRoutingConfigToml,
+    locale: Locale,
+) -> anyhow::Result<Option<ModelRoutingConfigToml>> {
+    let mut view = view.clone();
+    view.config = draft.clone();
+    loop {
+        let mut config = view.config.clone();
+        println!("{}", render_models(&view, locale));
+        let value = prompt(locale, "Model number, * or R (Enter returns)", "").await?;
+        if value.eq_ignore_ascii_case("r") {
+            match manager
+                .execute(AccountManagerOperation::RoutingRefreshModels)
+                .await
+            {
+                Ok(result) => println!("{}", clean(locale.message(&result.message))),
+                Err(error) => println!("{}", clean(locale.message(&error.to_string()))),
+            }
+            let mut refreshed = manager.model_routing_view().await?;
+            refreshed.config = config;
+            view = refreshed;
+            continue;
+        }
+        if value.is_empty() {
+            return Ok(None);
+        }
+        if value == "*" {
+            config.allowed_models.clear();
+            return Ok(Some(config));
+        }
+        let model = value
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| view.models.get(index))
+            .ok_or_else(|| anyhow::anyhow!(locale.text("Choose a listed number")))?;
+        println!(
+            "{}",
+            locale
+                .text("0 Default role  1 Economy  2 Balanced  3 Capability  4 Toggle eligibility")
         );
-    }
-    println!("{}", locale.text("* includes every supported model. Choose a model number to change its role or eligibility."));
-    let value = prompt(locale, "Model number or * (Enter returns)", "").await?;
-    if value.is_empty() {
-        return Ok(None);
-    }
-    if value == "*" {
-        config.allowed_models.clear();
+        match prompt(locale, "Model setting number (Enter returns)", "")
+            .await?
+            .as_str()
+        {
+            "" => return Ok(None),
+            "0" => {
+                config.model_roles.remove(&model.model);
+            }
+            "1" => {
+                config
+                    .model_roles
+                    .insert(model.model.clone(), ModelRoutingRole::Economy);
+            }
+            "2" => {
+                config
+                    .model_roles
+                    .insert(model.model.clone(), ModelRoutingRole::Balanced);
+            }
+            "3" => {
+                config
+                    .model_roles
+                    .insert(model.model.clone(), ModelRoutingRole::Capability);
+            }
+            "4" => {
+                if config.allowed_models.is_empty() {
+                    config.allowed_models = view
+                        .models
+                        .iter()
+                        .map(|model| model.model.clone())
+                        .collect();
+                }
+                if config.allowed_models.contains(&model.model) {
+                    anyhow::ensure!(
+                        config.allowed_models.len() > 1,
+                        locale.text("Keep at least one model, or use * to allow all.")
+                    );
+                    config.allowed_models.retain(|name| name != &model.model);
+                } else {
+                    config.allowed_models.push(model.model.clone());
+                }
+            }
+            _ => anyhow::bail!(locale.text("Choose a listed number")),
+        }
         return Ok(Some(config));
     }
-    let model = value
-        .parse::<usize>()
-        .ok()
-        .and_then(|index| index.checked_sub(1))
-        .and_then(|index| view.models.get(index))
-        .ok_or_else(|| anyhow::anyhow!(locale.text("Choose a listed number")))?;
-    println!(
-        "{}",
-        locale.text("0 Default role  1 Economy  2 Balanced  3 Capability  4 Toggle eligibility")
-    );
-    match prompt(locale, "Model setting number (Enter returns)", "")
-        .await?
-        .as_str()
-    {
-        "" => return Ok(None),
-        "0" => {
-            config.model_roles.remove(&model.model);
-        }
-        "1" => {
-            config
-                .model_roles
-                .insert(model.model.clone(), ModelRoutingRole::Economy);
-        }
-        "2" => {
-            config
-                .model_roles
-                .insert(model.model.clone(), ModelRoutingRole::Balanced);
-        }
-        "3" => {
-            config
-                .model_roles
-                .insert(model.model.clone(), ModelRoutingRole::Capability);
-        }
-        "4" => {
-            if config.allowed_models.is_empty() {
-                config.allowed_models = view
-                    .models
-                    .iter()
-                    .map(|model| model.model.clone())
-                    .collect();
-            }
-            if config.allowed_models.contains(&model.model) {
-                anyhow::ensure!(
-                    config.allowed_models.len() > 1,
-                    locale.text("Keep at least one model, or use * to allow all.")
-                );
-                config.allowed_models.retain(|name| name != &model.model);
-            } else {
-                config.allowed_models.push(model.model.clone());
-            }
-        }
-        _ => anyhow::bail!(locale.text("Choose a listed number")),
-    }
-    Ok(Some(config))
 }
 
 #[cfg(test)]

@@ -1,0 +1,13 @@
+---
+source: cli/src/account_manager_routing_tests.rs
+expression: "format!(\"{}\\n---\\n{}\", render_models(&view, Locale::English), render_models(&view, Locale::SimplifiedChinese))"
+---
+Models / relative roles
+No eligible catalog models; automatic selection keeps the current model.
+* includes every supported model. Choose a model number to change its role or eligibility.
+[R] Refresh model catalog; no inference request is sent.
+---
+模型 / 相对角色
+尚无符合条件的目录模型；自动选择会保留当前模型。
+* 允许所有受支持模型。选择模型序号可修改角色或是否纳入。
+[R] 刷新模型目录；不会发送推理请求。

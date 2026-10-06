@@ -134,8 +134,35 @@ pub(crate) async fn run(manager: Arc<AccountManager>, mut locale: Locale) -> any
             }
         };
         if let Some(operation) = operation {
+            let reviewed = match &operation {
+                Operation::ManualResetReview {
+                    owner_key,
+                    idempotency_key,
+                    expected_digest,
+                    ..
+                } => inventory
+                    .reset_journals
+                    .iter()
+                    .filter_map(|record| record.manual.as_ref())
+                    .find(|manual| {
+                        &manual.owner_key == owner_key
+                            && &manual.idempotency_key == idempotency_key
+                            && &manual.digest == expected_digest
+                    })
+                    .map(|manual| credits::PendingRedemption {
+                        owner_key: manual.owner_key.clone(),
+                        operation_id: manual.idempotency_key.clone(),
+                        credit_id: manual.credit_id.clone(),
+                    }),
+                _ => None,
+            };
             notice = match manager.execute(operation).await {
-                Ok(result) => locale.notice(&result.message),
+                Ok(result) => {
+                    if let Some(reviewed) = reviewed {
+                        credits::clear_completed(&mut pending, &reviewed);
+                    }
+                    locale.notice(&result.message)
+                }
                 Err(error) => locale.message(&error.to_string()).to_string(),
             };
         }
