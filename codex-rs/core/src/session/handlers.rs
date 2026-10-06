@@ -530,7 +530,13 @@ pub(super) async fn submission_loop(
                             if let Some(reply) = reply {
                                 let _ = reply.send(Ok(()));
                             }
-                            thread_settings::emit_applied(&sess, sub.id.clone(), snapshot).await;
+                            thread_settings::emit_applied(
+                                &sess,
+                                sub.id.clone(),
+                                snapshot,
+                                thread_settings::SettingsPublication::ExistingThread,
+                            )
+                            .await;
                         }
                         Err(error) => {
                             let message = format!("invalid thread settings override: {error}");

@@ -101,6 +101,7 @@ pub(crate) struct Session {
 
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
+    pub(super) model_selection_intent: codex_protocol::protocol::ModelSelectionIntent,
     /// Runtime provider and its provider-specific execution policy.
     pub(super) provider: SharedModelProvider,
 
@@ -274,6 +275,7 @@ impl SessionConfiguration {
             .map(|config| config.permission_profile.clone())
             .unwrap_or_else(|| self.permission_profile_state.snapshot());
         ThreadConfigSnapshot {
+            model_selection_intent: Some(self.model_selection_intent),
             model: self.step_settings.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
             service_tier: self.step_settings.service_tier.clone(),
@@ -315,6 +317,7 @@ impl SessionConfiguration {
         environment_selections: &[TurnEnvironmentSelection],
     ) -> ThreadSettingsSnapshot {
         ThreadSettingsSnapshot {
+            model_selection_intent: Some(self.model_selection_intent),
             model: self.step_settings.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
             service_tier: self.step_settings.service_tier.clone(),
@@ -338,6 +341,7 @@ impl SessionConfiguration {
         environment_selections: Vec<TurnEnvironmentSelection>,
     ) -> CodexThreadSettingsOverrides {
         CodexThreadSettingsOverrides {
+            model_selection_intent: Some(self.model_selection_intent),
             environments: Some(TurnEnvironmentSelections::new(
                 self.legacy_fallback_cwd.clone(),
                 environment_selections,
@@ -542,8 +546,14 @@ impl SessionConfiguration {
         super::environment::validate_environment_configs(next_environments)?;
         // Apply step settings last: the proposed permissions and environment
         // selections must be complete before deriving their validation constraints.
+        let (step_update, intent) = super::model_selection::prepare_update(
+            self.model_selection_intent,
+            &self.step_settings,
+            updates,
+        );
+        next_configuration.model_selection_intent = intent;
         next_configuration.step_settings = Arc::new(self.step_settings.apply(
-            &updates.step_settings,
+            &step_update,
             &next_configuration.step_settings_constraints(next_environments),
         )?);
         Ok(next_configuration)
@@ -594,6 +604,7 @@ pub(crate) struct SessionSettingsCommit {
 
 #[derive(Default, Clone)]
 pub(crate) struct SessionSettingsUpdate {
+    pub(crate) model_selection_intent: Option<codex_protocol::protocol::ModelSelectionIntent>,
     pub(crate) step_settings: StepSettingsUpdate,
     pub(crate) environments: Option<TurnEnvironmentSelections>,
     pub(crate) runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,

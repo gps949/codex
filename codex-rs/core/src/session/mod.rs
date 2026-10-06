@@ -245,6 +245,7 @@ mod mcp;
 mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
+pub(crate) mod model_selection;
 pub(crate) mod multi_agents;
 mod plugin_selection;
 mod realtime_history;
@@ -827,6 +828,7 @@ impl Session {
         let service_tier =
             get_service_tier(config.service_tier.clone(), fast_mode_enabled, &model_info);
         let session_configuration = SessionConfiguration {
+            model_selection_intent: model_selection::initial_intent(&config, &conversation_history),
             provider: create_model_provider(
                 config.model_provider.clone(),
                 Some(Arc::clone(&auth_manager)),

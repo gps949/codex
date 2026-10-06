@@ -43,6 +43,7 @@ pub(super) async fn update(
 /// Converts protocol overrides into the internal settings update shape.
 pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSettingsUpdate {
     let ThreadSettingsOverrides {
+        model_selection_intent,
         environments,
         runtime_workspace_roots,
         profile_workspace_roots,
@@ -61,6 +62,7 @@ pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSetti
         disabled_plugin_ids,
     } = overrides;
     SessionSettingsUpdate {
+        model_selection_intent,
         step_settings: StepSettingsUpdate {
             model,
             effort,
@@ -100,26 +102,46 @@ pub(super) async fn apply_update(
 ) -> ConstraintResult<()> {
     let _settings_guard = acquire_persistence_lock(session).await;
     let commit = session.update_settings(updates).await?;
-    emit_applied(session, submission_id, commit.snapshot).await;
+    emit_applied(
+        session,
+        submission_id,
+        commit.snapshot,
+        SettingsPublication::ExistingThread,
+    )
+    .await;
     Ok(())
 }
 
 /// Emits the snapshot published by one successful settings update.
+pub(super) enum SettingsPublication {
+    ExistingThread,
+    AcceptedTurn,
+}
+
 pub(super) async fn emit_applied(
     session: &Session,
     submission_id: String,
     snapshot: ThreadSettingsSnapshot,
+    publication: SettingsPublication,
 ) {
     let msg = EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
         thread_id: Some(session.thread_id()),
         thread_settings: snapshot,
     });
-    session
-        .send_event_raw_without_materializing_rollout(Event {
-            id: submission_id,
-            msg,
-        })
-        .await;
+    let event = Event {
+        id: submission_id,
+        msg,
+    };
+    match publication {
+        SettingsPublication::ExistingThread => {
+            session
+                .send_event_raw_without_materializing_rollout(event)
+                .await
+        }
+        // Accepted user input will materialize the rollout. Queue its settings first so a
+        // first-turn manual choice survives resume even though the file does not exist yet.
+        SettingsPublication::AcceptedTurn => session.send_event_raw(event).await,
+    }
 }
 
 /// Builds a current thread-owned snapshot for storage checkpoints.

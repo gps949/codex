@@ -436,6 +436,10 @@ async fn prepared_user_updates_merge_with_settings_at_turn_start() {
                 &session,
                 "sparse-user-start".to_string(),
                 TurnStartKind::User,
+                &SubmittedTurnInput::UserInput {
+                    content: Vec::new(),
+                    client_id: None,
+                },
             )
             .await
             .expect("apply prepared settings")
@@ -494,6 +498,10 @@ async fn automatic_admission_uses_current_candidate_after_plan_preview() {
             &session,
             "automatic-after-plan-preview".to_string(),
             TurnStartKind::Automatic,
+            &SubmittedTurnInput::UserInput {
+                content: Vec::new(),
+                client_id: None,
+            },
         )
         .await
         .expect("automatic admission should succeed")
@@ -612,6 +620,10 @@ async fn automatic_admission_rechecks_plan_mode_without_committing_sparse_settin
                 &session,
                 submission_id.to_string(),
                 TurnStartKind::Automatic,
+                &SubmittedTurnInput::UserInput {
+                    content: Vec::new(),
+                    client_id: None,
+                },
             )
             .await
             .expect("automatic admission should return a typed rejection");
@@ -693,7 +705,15 @@ async fn admission_revalidates_constraints_before_committing(kind: TurnStartKind
     let desired_settings = session.thread_settings_snapshot().await;
     let submission_id = "constraints-after-preview";
     let result = prepared
-        .apply_started(&session, submission_id.to_string(), kind)
+        .apply_started(
+            &session,
+            submission_id.to_string(),
+            kind,
+            &SubmittedTurnInput::UserInput {
+                content: Vec::new(),
+                client_id: None,
+            },
+        )
         .await;
     let Err(error) = result else {
         panic!("commit-time constraint failure must return InvalidRequest");

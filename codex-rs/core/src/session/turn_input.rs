@@ -99,6 +99,8 @@ impl PreparedTurnInputSettings {
         thread_settings: ThreadSettingsOverrides,
         start_options: TurnStartOptions,
     ) -> CodexResult<Self> {
+        let thread_settings =
+            super::model_selection::retain_legacy_turn_echo(session, thread_settings).await;
         let thread_settings_update = if thread_settings == ThreadSettingsOverrides::default() {
             None
         } else {
@@ -127,6 +129,7 @@ impl PreparedTurnInputSettings {
         session: &Arc<Session>,
         submission_id: String,
         kind: TurnStartKind,
+        input: &SubmittedTurnInput,
     ) -> CodexResult<Option<Arc<TurnContext>>> {
         let TurnStartOptions {
             turn_trigger,
@@ -136,15 +139,25 @@ impl PreparedTurnInputSettings {
             root_turn_id,
             cyber_access_program,
         } = self.start_options;
-        let emit_thread_settings_applied = self.thread_settings_update.is_some();
+        let has_requested_settings = self.thread_settings_update.is_some();
+        let mut updates = self.thread_settings_update.unwrap_or_default();
+        updates.service_tier_for_turn = service_tier;
+        let decision = if kind == TurnStartKind::User
+            && parent_turn_id.is_none()
+            && cyber_access_program.is_none()
+        {
+            super::model_selection::route_root_task(session, input, &mut updates, &submission_id)
+                .await
+        } else {
+            None
+        };
+        let emit_thread_settings_applied =
+            has_requested_settings || decision.as_ref().is_some_and(|decision| decision.apply);
         let _settings_guard = if emit_thread_settings_applied {
             Some(thread_settings::acquire_persistence_lock(session).await)
         } else {
             None
         };
-        let mut updates = self.thread_settings_update.unwrap_or_default();
-        updates.service_tier_for_turn = service_tier;
-
         let options = NewTurnContextOptions {
             final_output_json_schema,
             cyber_access_program,
@@ -174,8 +187,31 @@ impl PreparedTurnInputSettings {
                 .turn_metadata_state
                 .set_turn_trigger(turn_trigger);
         }
+        if let Some(decision) = decision {
+            let application = if decision.apply
+                && settings_snapshot.model == decision.selection.model
+                && settings_snapshot.reasoning_effort == decision.selection.effort
+            {
+                crate::model_routing_observation::ObservationApplication::Committed
+            } else {
+                crate::model_routing_observation::ObservationApplication::Proposal
+            };
+            crate::model_routing_observation::record(
+                &turn_context.config,
+                &decision,
+                crate::task_model_routing::RoutingScope::Main,
+                application,
+            )
+            .await;
+        }
         if emit_thread_settings_applied {
-            thread_settings::emit_applied(session, submission_id, settings_snapshot).await;
+            thread_settings::emit_applied(
+                session,
+                submission_id,
+                settings_snapshot,
+                thread_settings::SettingsPublication::AcceptedTurn,
+            )
+            .await;
         }
         if let Some(parent_turn_id) = parent_turn_id {
             turn_context
@@ -340,7 +376,7 @@ async fn start_or_steer(
                 Some(admission)
             };
             let Some(turn_context) = settings
-                .apply_started(session, submission_id.clone(), TurnStartKind::User)
+                .apply_started(session, submission_id.clone(), TurnStartKind::User, &input)
                 .await?
             else {
                 unreachable!("explicit user input can enter Plan mode");
@@ -462,7 +498,7 @@ async fn start_if_idle(
         }
     };
     let turn_context = match settings
-        .apply_started(session, submission_id.clone(), kind)
+        .apply_started(session, submission_id.clone(), kind, &input)
         .await
     {
         Ok(Some(turn_context)) => turn_context,
