@@ -48,10 +48,17 @@ struct AgentRoleOverrides {
 }
 
 /// Applies typed role overrides to the existing parent-derived configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoleModelPolicy {
+    Inherited,
+    Pinned,
+}
+
+/// Returns whether the role explicitly fixes model selection, including equal-valued pins.
 pub(crate) async fn apply_role_to_config(
     config: &mut Config,
     role_name: Option<&str>,
-) -> Result<(), String> {
+) -> Result<RoleModelPolicy, String> {
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
 
     let role = resolve_role_config(config, role_name)
@@ -70,10 +77,10 @@ async fn apply_role_to_config_inner(
     config: &mut Config,
     role_name: &str,
     role: &AgentRoleConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RoleModelPolicy> {
     let is_built_in = !config.agent_roles.contains_key(role_name);
     let Some(config_file) = role.config_file.as_ref() else {
-        return Ok(());
+        return Ok(RoleModelPolicy::Inherited);
     };
     let role_layer_toml = load_role_layer_toml(config, config_file, is_built_in, role_name).await?;
     let role_config = deserialize_config_toml_with_base(role_layer_toml, &config.codex_home)?;
@@ -86,6 +93,11 @@ async fn apply_role_to_config_inner(
         personality: role_config.personality,
         service_tier: role_config.service_tier,
         ..Default::default()
+    };
+    let model_policy = if overrides.model.is_some() || overrides.model_reasoning_effort.is_some() {
+        RoleModelPolicy::Pinned
+    } else {
+        RoleModelPolicy::Inherited
     };
 
     if let Some(features) = role_config.features {
@@ -121,10 +133,10 @@ async fn apply_role_to_config_inner(
         .as_table()
         .is_some_and(toml::map::Map::is_empty)
     {
-        return Ok(());
+        return Ok(model_policy);
     }
     *config = role_overrides::build_next_config(config, role_layer_toml, &overrides)?;
-    Ok(())
+    Ok(model_policy)
 }
 
 async fn load_role_layer_toml(

@@ -4,6 +4,7 @@
 //! inheritance, and validation messages remain the same for each multi-agent version.
 
 use crate::agent::role::DEFAULT_ROLE_NAME;
+use crate::agent::role::RoleModelPolicy;
 use crate::agent::role::apply_role_to_config;
 use crate::config::Config;
 use crate::session::session::Session;
@@ -35,6 +36,8 @@ pub(crate) enum SpawnConfigVersion {
 }
 
 pub(crate) struct SpawnConfigOptions<'a> {
+    pub(crate) task_description: Option<&'a str>,
+    pub(crate) history_last_n_turns: Option<usize>,
     pub(crate) version: SpawnConfigVersion,
     pub(crate) full_history_fork: bool,
     pub(crate) role_name: Option<&'a str>,
@@ -43,6 +46,7 @@ pub(crate) struct SpawnConfigOptions<'a> {
 }
 
 pub(crate) struct PreparedSpawnConfig {
+    pub(crate) routing_decision: Option<crate::task_model_routing::TaskRoutingDecision>,
     pub(crate) config: Config,
     pub(crate) role_name: Option<String>,
 }
@@ -64,13 +68,14 @@ pub(crate) async fn prepare_agent_spawn_config(
         step_context,
         &mut config,
         options.model,
-        options.reasoning_effort,
+        options.reasoning_effort.clone(),
     )
     .await?;
+    let mut role_model_policy = RoleModelPolicy::Inherited;
     if !options.full_history_fork
         || (options.version == SpawnConfigVersion::V2 && options.role_name.is_some())
     {
-        apply_spawn_agent_role(session, &mut config, options.role_name).await?;
+        role_model_policy = apply_spawn_agent_role(session, &mut config, options.role_name).await?;
         if options.version == SpawnConfigVersion::V2
             && options.full_history_fork
             && config.developer_instructions.is_none()
@@ -80,6 +85,28 @@ pub(crate) async fn prepare_agent_spawn_config(
                 .clone_from(&turn.developer_instructions);
         }
     }
+    let routing_decision = if !options.full_history_fork
+        && options.model.is_none()
+        && options.reasoning_effort.is_none()
+        && turn.config.agent_default_subagent_model.is_none()
+        && turn
+            .config
+            .agent_default_subagent_reasoning_effort
+            .is_none()
+        && role_model_policy == RoleModelPolicy::Inherited
+        && let Some(task) = options.task_description
+    {
+        super::child_model_routing::route(
+            session,
+            step_context,
+            &mut config,
+            task,
+            options.history_last_n_turns,
+        )
+        .await
+    } else {
+        None
+    };
     apply_spawn_agent_service_tier(session, &mut config).await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
@@ -96,7 +123,11 @@ pub(crate) async fn prepare_agent_spawn_config(
             .then_some(DEFAULT_ROLE_NAME)
         })
         .map(str::to_owned);
-    Ok(PreparedSpawnConfig { config, role_name })
+    Ok(PreparedSpawnConfig {
+        config,
+        role_name,
+        routing_decision,
+    })
 }
 
 /// Builds the base config snapshot for a newly spawned sub-agent.
@@ -284,17 +315,17 @@ async fn apply_spawn_agent_role(
     session: &Session,
     config: &mut Config,
     role_name: Option<&str>,
-) -> Result<(), String> {
+) -> Result<RoleModelPolicy, String> {
     let previous_model = config.model.clone();
     let previous_reasoning_effort = config.model_reasoning_effort.clone();
-    apply_role_to_config(config, role_name).await?;
+    let policy = apply_role_to_config(config, role_name).await?;
     if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
     {
-        return Ok(());
+        return Ok(policy);
     }
 
     let Some(reasoning_effort) = config.model_reasoning_effort.clone() else {
-        return Ok(());
+        return Ok(policy);
     };
     let model = config.model.clone().ok_or_else(|| {
         "spawn_agent could not resolve the child model for reasoning effort validation".to_string()
@@ -305,14 +336,15 @@ async fn apply_spawn_agent_role(
         .get_model_info(&model, &config.to_models_manager_config())
         .await;
     if model_info.used_fallback_model_metadata {
-        return Ok(());
+        return Ok(policy);
     }
 
     validate_spawn_agent_reasoning_effort(
         &model,
         &model_info.supported_reasoning_levels,
         &reasoning_effort,
-    )
+    )?;
+    Ok(policy)
 }
 
 fn find_spawn_agent_model_name(

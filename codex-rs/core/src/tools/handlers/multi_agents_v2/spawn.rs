@@ -134,6 +134,11 @@ async fn handle_spawn_agent(
         &session,
         step_context.as_ref(),
         SpawnConfigOptions {
+            task_description: Some(&message),
+            history_last_n_turns: match fork_mode.as_ref() {
+                Some(SpawnAgentForkMode::LastNTurns(n)) => Some(*n),
+                _ => None,
+            },
             version: SpawnConfigVersion::V2,
             full_history_fork: matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)),
             role_name,
@@ -216,6 +221,23 @@ async fn handle_spawn_agent(
             collab_spawn_error(err)
         })?;
     let new_thread_id = spawned_agent.thread_id;
+    if let Some(decision) = prepared.routing_decision {
+        let application = if decision.apply
+            && agent_snapshot.model == decision.selection.model
+            && agent_snapshot.reasoning_effort == decision.selection.effort
+        {
+            crate::model_routing_observation::ObservationApplication::Committed
+        } else {
+            crate::model_routing_observation::ObservationApplication::Proposal
+        };
+        crate::model_routing_observation::record(
+            &turn.config,
+            &decision,
+            crate::task_model_routing::RoutingScope::Subagent,
+            application,
+        )
+        .await;
+    }
     let agent_status = spawned_agent.status;
     let nickname = agent_snapshot
         .session_source

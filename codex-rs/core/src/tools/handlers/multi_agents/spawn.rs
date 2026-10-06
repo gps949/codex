@@ -68,6 +68,7 @@ async fn handle_spawn_agent(
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
+    let routing_task = args.message.clone();
     let input_items = parse_collab_input(args.message, args.items)?;
     let prompt = render_input_preview(&input_items);
     let session_source = turn.session_source.clone();
@@ -99,6 +100,8 @@ async fn handle_spawn_agent(
         &session,
         step_context.as_ref(),
         SpawnConfigOptions {
+            task_description: routing_task.as_deref(),
+            history_last_n_turns: None,
             version: SpawnConfigVersion::V1,
             full_history_fork: args.fork_context,
             role_name,
@@ -152,6 +155,24 @@ async fn handle_spawn_agent(
         Err(_) => (None, AgentStatus::NotFound),
     };
     let agent_snapshot = result.as_ref().ok().map(|(_, config)| config);
+    if let Some(decision) = prepared.routing_decision {
+        let application = if decision.apply
+            && agent_snapshot.is_some_and(|snapshot| {
+                snapshot.model == decision.selection.model
+                    && snapshot.reasoning_effort == decision.selection.effort
+            }) {
+            crate::model_routing_observation::ObservationApplication::Committed
+        } else {
+            crate::model_routing_observation::ObservationApplication::Proposal
+        };
+        crate::model_routing_observation::record(
+            &turn.config,
+            &decision,
+            crate::task_model_routing::RoutingScope::Subagent,
+            application,
+        )
+        .await;
+    }
     let new_agent_nickname =
         agent_snapshot.and_then(|snapshot| snapshot.session_source.get_nickname());
     let new_agent_role =
