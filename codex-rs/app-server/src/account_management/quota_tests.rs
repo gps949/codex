@@ -2,11 +2,15 @@ use super::*;
 use base64::Engine as _;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use sha1::Digest;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+
+#[path = "quota_owner_cache_tests.rs"]
+mod owner_cache_tests;
 
 struct Fixture {
     home: tempfile::TempDir,
@@ -15,6 +19,118 @@ struct Fixture {
     id: codex_login::AccountProfileId,
     reset: DateTime<Utc>,
     cached: codex_login::AccountRuntimeProfileState,
+}
+
+#[tokio::test]
+async fn owner_confirmed_free_recovery_reconciles_automatic_history_without_another_spend()
+-> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let journal_path = fixture.home.path().join(format!(
+        ".rate-limit-reset-credit-{:x}.json",
+        sha1::Sha1::digest(fixture.id.as_str().as_bytes())
+    ));
+    let owner = serde_json::to_vec(&(Some("fixture-account"), Some("fixture-owner")))?;
+    let original = json!({"version":1,"scope":{"profileId":fixture.id,"ownerKey":format!("{:x}",sha1::Sha1::digest(owner)),"creditId":null,"resetKey":null,"quotaEpoch":null},
+        "attemptedAt":(Utc::now()-chrono::Duration::hours(1)).timestamp(),"requestId":"original-automatic-request","phase":{"state":"pending"}});
+    std::fs::write(&journal_path, serde_json::to_vec(&original)?)?;
+    assert!(codex_login::manual_reset_spending_blocked(
+        fixture.home.path()
+    )?);
+    let (_, account) = fixture.refresh(json!({
+        "account_id":"fixture-account","user_id":"fixture-owner","plan_type":"pro",
+        "rate_limit":{"allowed":true,"limit_reached":false,
+            "primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_at":fixture.reset.timestamp(),"reset_after_seconds":7200},
+            "secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_at":fixture.reset.timestamp(),"reset_after_seconds":7200}},
+        "spend_control":{"reached":false}
+    })).await?;
+    assert_eq!(account.availability, "ready");
+    assert!(!codex_login::manual_reset_spending_blocked(
+        fixture.home.path()
+    )?);
+    let confirmed: serde_json::Value = serde_json::from_slice(&std::fs::read(journal_path)?)?;
+    assert_eq!(
+        (
+            &confirmed["scope"],
+            &confirmed["requestId"],
+            &confirmed["phase"]
+        ),
+        (
+            &original["scope"],
+            &original["requestId"],
+            &json!({"state":"confirmed","outcome":"quotaRecovered"})
+        )
+    );
+    assert!(confirmed["reconciledRecovery"]["observedAt"].is_string());
+    let mut manual =
+        crate::reset_credit_journal::ManualResetCreditJournal::load(fixture.home.path())
+            .map_err(anyhow::Error::msg)?;
+    manual
+        .remember(&"a".repeat(64), "new-manual-request", "new-manual-credit")
+        .map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn original_manual_replay_survives_an_unreadable_automatic_counterpart() -> anyhow::Result<()>
+{
+    let fixture = Fixture::new().await?;
+    let (_, _, auth) = fixture.manager.profile_client(fixture.id.as_str()).await?;
+    let owner =
+        crate::reset_credit_journal::owner_key(&fixture.manager.config.chatgpt_base_url, &auth)
+            .map_err(anyhow::Error::msg)?;
+    let store = AccountRuntimeStateStore::new(fixture.home.path().to_path_buf());
+    let lock = store
+        .try_lock_reset_credit()?
+        .expect("fixture spending lock");
+    let mut journal =
+        crate::reset_credit_journal::ManualResetCreditJournal::load(fixture.home.path())
+            .map_err(anyhow::Error::msg)?;
+    journal
+        .remember(&owner, "original-manual", "original-credit")
+        .map_err(anyhow::Error::msg)?;
+    drop(lock);
+    std::fs::write(
+        fixture
+            .home
+            .path()
+            .join(format!(".rate-limit-reset-credit-{}.json", "a".repeat(40))),
+        b"{interrupted",
+    )?;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits/consume"))
+        .and(wiremock::matchers::body_json(
+            json!({"redeem_request_id":"original-manual","credit_id":"original-credit"}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(/*s*/ 200)
+                .set_body_json(json!({"code":"no_credit","windows_reset":0})),
+        )
+        .expect(/*r*/ 1)
+        .mount(&fixture.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(ResponseTemplate::new(/*s*/ 503))
+        .mount(&fixture.server)
+        .await;
+    fixture
+        .manager
+        .execute(AccountManagerOperation::Redeem {
+            profile_id: fixture.id.to_string(),
+            credit_id: "original-credit".into(),
+            idempotency_key: "original-manual".into(),
+            expected_owner_key: Some(owner.clone()),
+        })
+        .await?;
+    let journal = crate::reset_credit_journal::ManualResetCreditJournal::load(fixture.home.path())
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(
+        journal
+            .terminal_outcome(&owner, "original-manual")
+            .map_err(anyhow::Error::msg)?,
+        Some(codex_app_server_protocol::ConsumeAccountRateLimitResetCreditOutcome::NoCredit)
+    );
+    Ok(())
 }
 
 impl Fixture {

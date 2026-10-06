@@ -298,13 +298,17 @@ async fn account_management_refresh_confirms_external_reset_without_generating_r
                 .await
         })
     };
+    let refresh_key = (
+        profile.id.to_string(),
+        manager.profile_identity(profile.id.as_str())?,
+    );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             if manager
                 .refreshes
                 .lock()
                 .unwrap()
-                .get(profile.id.as_str())
+                .get(&refresh_key)
                 .is_some_and(|status| status.in_progress)
             {
                 break;
