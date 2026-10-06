@@ -2,6 +2,7 @@
 //! Callers hold the home-scoped spending lock; these checks never acquire it recursively.
 
 use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
@@ -28,7 +29,13 @@ struct ManualRecord {
 #[serde(tag = "state", rename_all = "camelCase", deny_unknown_fields)]
 enum ManualPhase {
     Pending,
-    Terminal { outcome: ManualOutcome },
+    Reviewed {
+        #[serde(rename = "reviewedAt")]
+        reviewed_at: i64,
+    },
+    Terminal {
+        outcome: ManualOutcome,
+    },
 }
 
 #[derive(Deserialize)]
@@ -40,52 +47,55 @@ enum ManualOutcome {
     AlreadyRedeemed,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomaticRecord {
-    version: u32,
-    scope: AutomaticScope,
-    attempted_at: i64,
-    attempted_at_precise: Option<chrono::DateTime<chrono::Utc>>,
-    request_id: String,
-    phase: AutomaticPhase,
-    reconciled_recovery: Option<AutomaticRecovery>,
-    previous_confirmed: Option<Box<AutomaticRecord>>,
+pub(super) struct AutomaticRecord {
+    pub(super) version: u32,
+    pub(super) scope: AutomaticScope,
+    pub(super) attempted_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) attempted_at_precise: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) request_id: String,
+    pub(super) phase: AutomaticPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reconciled_recovery: Option<AutomaticRecovery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) previous_confirmed: Option<Box<AutomaticRecord>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomaticScope {
-    profile_id: String,
-    owner_key: String,
-    credit_id: Option<String>,
-    reset_key: Option<i64>,
-    quota_epoch: Option<i64>,
+pub(super) struct AutomaticScope {
+    pub(super) profile_id: String,
+    pub(super) owner_key: String,
+    pub(super) credit_id: Option<String>,
+    pub(super) reset_key: Option<i64>,
+    pub(super) quota_epoch: Option<i64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AutomaticRecovery {
-    quota_epoch: i64,
-    observed_at: chrono::DateTime<chrono::Utc>,
+pub(super) struct AutomaticRecovery {
+    pub(super) quota_epoch: i64,
+    pub(super) observed_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase", deny_unknown_fields)]
-enum AutomaticPhase {
+pub(super) enum AutomaticPhase {
     Pending,
     Confirmed { outcome: AutomaticOutcome },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-enum AutomaticOutcome {
+pub(super) enum AutomaticOutcome {
     QuotaRecovered,
     NoCredit,
 }
 
 impl AutomaticRecord {
-    fn valid(&self) -> bool {
+    pub(super) fn valid(&self) -> bool {
         self.version == 1
             && !self.request_id.is_empty()
             && self.request_id.len() <= 128
@@ -158,6 +168,11 @@ pub fn automatic_reset_spending_blocked(home: &Path) -> io::Result<bool> {
             return Err(io::Error::other("Invalid manual reset journal"));
         }
         pending |= matches!(record.phase, Some(ManualPhase::Pending));
+        if let Some(ManualPhase::Reviewed { reviewed_at }) = &record.phase
+            && *reviewed_at < 0
+        {
+            return Err(io::Error::other("Invalid manual review timestamp"));
+        }
         if let Some(ManualPhase::Terminal { outcome }) = &record.phase {
             match outcome {
                 ManualOutcome::Reset

@@ -90,3 +90,17 @@ fn automatic_unknown_or_pending_record_blocks_new_manual_spending() -> io::Resul
     assert!(manual_reset_spending_blocked(home.path()).is_err());
     Ok(())
 }
+
+#[test]
+fn reviewed_unknown_manual_operation_unblocks_new_automatic_spending() -> io::Result<()> {
+    let home = tempfile::tempdir()?;
+    let owner = "a".repeat(64);
+    let original = manual(&owner, "old", serde_json::Value::Null);
+    let reviewed = manual(&owner, "latest", json!({"state":"reviewed","reviewedAt":1}));
+    std::fs::write(
+        home.path().join(".manual-rate-limit-reset-credits.json"),
+        serde_json::to_vec(&json!({"version":2,"operations":[original,reviewed]}))?,
+    )?;
+    assert!(!automatic_reset_spending_blocked(home.path())?);
+    Ok(())
+}
