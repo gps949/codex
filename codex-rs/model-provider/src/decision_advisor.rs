@@ -4,7 +4,10 @@ use crate::DecisionAdvice;
 use crate::DecisionAdvisorFallback;
 use crate::DecisionAdvisorMode;
 use crate::DecisionAdvisorSettings;
+use crate::DecisionCandidate;
 use crate::DecisionSearchRequest;
+use crate::DecisionSearchScope;
+use crate::RoutingTaskComplexity;
 use crate::decision_advisor_protocol::MAX_BODY_BYTES;
 use crate::decision_advisor_protocol::parse_ranking;
 use crate::decision_advisor_protocol::request_body;
@@ -95,6 +98,56 @@ pub fn decision_advisor() -> &'static DecisionAdvisor {
 }
 
 impl DecisionAdvisor {
+    /// Explicit task assessment; callers gate routing and consent independently of tool search.
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn assess_task(
+        &self,
+        settings: &DecisionAdvisorSettings,
+        factory: &HttpClientFactory,
+        task: &str,
+        credential: Option<&str>,
+    ) -> Result<RoutingTaskComplexity, DecisionAdvisorFallback> {
+        settings
+            .validate_service()
+            .map_err(|_| DecisionAdvisorFallback::InvalidConfiguration)?;
+        let candidates = [
+            ("simple", "A short, self-contained translation, wording, or formatting task."),
+            ("standard", "Ordinary coding, writing, explanation, or analysis with a clear scope."),
+            ("demanding", "Complex architecture, investigation, concurrency, migration, or broad reasoning."),
+            ("high_stakes", "Security, authorization, production, financial, legal, medical, or destructive work."),
+            ("unknown", "The available task description is ambiguous or insufficient."),
+        ]
+        .into_iter()
+        .map(|(id, description)| DecisionCandidate {
+            id: id.into(),
+            description: description.into(),
+        })
+        .collect::<Vec<_>>();
+        let request = DecisionSearchRequest {
+            scope: DecisionSearchScope::Models,
+            query: task,
+            candidates: &candidates,
+            catalog_revision: b"task-complexity-v1",
+        };
+        let advice = tokio::time::timeout(
+            settings.timeout,
+            self.rank_within_budget(settings, factory, &request, credential),
+        )
+        .await
+        .map_err(|_| DecisionAdvisorFallback::TimedOut)?;
+        match advice {
+            DecisionAdvice::Fallback(reason) => Err(reason),
+            DecisionAdvice::Ranked(ids) => match ids.first().map(String::as_str) {
+                Some("simple") => Ok(RoutingTaskComplexity::Simple),
+                Some("standard") => Ok(RoutingTaskComplexity::Standard),
+                Some("demanding") => Ok(RoutingTaskComplexity::Demanding),
+                Some("high_stakes") => Ok(RoutingTaskComplexity::HighStakes),
+                Some("unknown") => Ok(RoutingTaskComplexity::Unknown),
+                Some(_) | None => Err(DecisionAdvisorFallback::InvalidResponse),
+            },
+        }
+    }
+
     /// Dropping this future cancels transport and releases both flight and concurrency guards.
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn rank(
@@ -163,7 +216,7 @@ impl DecisionAdvisor {
         credential: Option<&str>,
     ) -> DecisionAdvice {
         let started = Instant::now();
-        if settings.validate().is_err() {
+        if settings.validate_service().is_err() {
             return DecisionAdvice::Fallback(DecisionAdvisorFallback::InvalidConfiguration);
         }
         let Ok(endpoint) = Url::parse(&settings.endpoint) else {
@@ -257,7 +310,7 @@ impl DecisionAdvisor {
             }
             let body = serde_json::from_slice(&bytes)
                 .map_err(|_| DecisionAdvisorFallback::InvalidResponse)?;
-            parse_ranking(settings, request.candidates, body)
+            parse_ranking(settings, request.scope, request.candidates, body)
         };
         let remaining = settings
             .timeout
@@ -368,3 +421,7 @@ impl DecisionAdvisor {
 #[cfg(test)]
 #[path = "decision_advisor_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "decision_advisor_model_routing_tests.rs"]
+mod model_routing_tests;

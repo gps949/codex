@@ -321,19 +321,19 @@ fn decision_advisor_rejects_invalid_ranking_and_confidence() {
     let mut response = answer("jev-test");
     response["answers"]["tool"]["probabilities"]["unknown"] = json!(0.1);
     assert_eq!(
-        parse_ranking(&settings, &candidates, response),
+        parse_ranking(&settings, DecisionSearchScope::Tools, &candidates, response),
         Err(DecisionAdvisorFallback::InvalidResponse)
     );
     let mut response = answer("jev-test");
     response["answers"]["tool"]["confidence"] = json!(0.01);
     assert_eq!(
-        parse_ranking(&settings, &candidates, response),
+        parse_ranking(&settings, DecisionSearchScope::Tools, &candidates, response),
         Err(DecisionAdvisorFallback::LowConfidence)
     );
     let mut response = answer("jev-test");
     response["answers"]["tool"]["choice"] = json!("unknown");
     assert_eq!(
-        parse_ranking(&settings, &candidates, response),
+        parse_ranking(&settings, DecisionSearchScope::Tools, &candidates, response),
         Err(DecisionAdvisorFallback::InvalidResponse)
     );
 }
@@ -464,7 +464,7 @@ fn decision_advisor_rejects_model_mismatch_and_ambiguous_distribution() {
                 body
             };
             assert_eq!(
-                parse_ranking(&settings, &candidates, response),
+                parse_ranking(&settings, DecisionSearchScope::Tools, &candidates, response),
                 Err(DecisionAdvisorFallback::InvalidResponse)
             );
         }
@@ -476,13 +476,13 @@ fn decision_advisor_rejects_model_mismatch_and_ambiguous_distribution() {
     let mut body = answer("jev-test");
     body["answers"]["tool"]["probabilities"] = json!({"t0":0.39,"t1":0.4,"none":0.21});
     assert_eq!(
-        parse_ranking(&settings, &candidates, body),
+        parse_ranking(&settings, DecisionSearchScope::Tools, &candidates, body),
         Err(DecisionAdvisorFallback::LowConfidence)
     );
     let mut body = answer("jev-test");
     body["answers"]["tool"]["choice"] = json!("t0");
     assert_eq!(
-        parse_ranking(&settings, &candidates, body),
+        parse_ranking(&settings, DecisionSearchScope::Tools, &candidates, body),
         Err(DecisionAdvisorFallback::InvalidResponse)
     );
 }
