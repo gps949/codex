@@ -39,7 +39,7 @@ impl NativeAccountManager {
                         .collect()
                 }),
             }],
-            is_blocking: matches!(menu.kind, MenuKind::Synthetic),
+            is_blocking: matches!(menu.kind, MenuKind::Synthetic(_)),
             auto_resolution_ms: None,
         });
         let cancellation = menu.cancellation.child_token();

@@ -107,6 +107,36 @@ pub(super) fn validate_settings(
     fresh: &FrozenAccountInventory,
 ) -> anyhow::Result<()> {
     match operation {
+        AccountManagerOperation::ManualResetReview { .. }
+        | AccountManagerOperation::ResetJournalArchive { .. } => {
+            super::reset_review::validate_reset_review(operation, captured, fresh)?;
+        }
+        AccountManagerOperation::RoutingSave {
+            expected_version,
+            config,
+        } => {
+            let captured = captured
+                .routing
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Model routing snapshot is unavailable"))?;
+            let fresh = fresh
+                .routing
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Model routing settings could not be reloaded"))?;
+            anyhow::ensure!(
+                expected_version.as_ref() == Some(&captured.user_config_version)
+                    && captured.user_config_version == fresh.user_config_version,
+                "Model routing settings changed. Reload before saving."
+            );
+            if config.source == codex_config::ModelRoutingSource::DecisionService
+                && config.send_task_description
+            {
+                anyhow::ensure!(
+                    captured.decision_service_ready && fresh.decision_service_ready,
+                    "Decision service changed. Inspect its settings before confirming."
+                );
+            }
+        }
         AccountManagerOperation::ApiFallback { .. } => anyhow::ensure!(
             serde_json::to_value(&captured.fallback)? == serde_json::to_value(&fresh.fallback)?,
             "API fallback changed while this menu was open. Inspect its current settings first."

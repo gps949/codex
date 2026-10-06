@@ -36,9 +36,8 @@ impl FrozenAccountInventory {
             MenuPage::Quick(_) | MenuPage::QuickOptions(_) | MenuPage::Strategy(_) => {
                 self.quick_question(page, language, now)
             }
-            MenuPage::Home => MenuQuestion::new(
-                language.text("Manage accounts", "管理账号"),
-                vec![
+            MenuPage::Home => {
+                let mut choices = vec![
                     nav(
                         "Accounts",
                         "账号列表",
@@ -74,6 +73,22 @@ impl FrozenAccountInventory {
                         MenuPage::Settings(0),
                     ),
                     nav(
+                        "Model selection",
+                        "模型选择",
+                        self.routing
+                            .as_ref()
+                            .map(|view| routing::summary(view, language))
+                            .unwrap_or_else(|| {
+                                language
+                                    .text(
+                                        "Policy unavailable; reload to retry",
+                                        "策略不可用；可重载重试",
+                                    )
+                                    .into()
+                            }),
+                        MenuPage::Routing(RoutingPage::Mode),
+                    ),
+                    nav(
                         "Host sign-in",
                         "主登录账号",
                         self.primary_summary(language, now),
@@ -85,8 +100,29 @@ impl FrozenAccountInventory {
                         MenuAction::Language,
                     ),
                     close(),
-                ],
-            ),
+                ];
+                if !self.reset_journals.is_empty() {
+                    choices.insert(
+                        1,
+                        nav(
+                            "Interrupted resets",
+                            "中断的重置",
+                            language
+                                .text(
+                                    "Review original records; outcomes remain unknown",
+                                    "复核原记录；结果仍保持未知",
+                                )
+                                .into(),
+                            MenuPage::ResetReviews(0),
+                        ),
+                    );
+                }
+                MenuQuestion::new(language.text("Manage accounts", "管理账号"), choices)
+            }
+            MenuPage::Routing(page) => self.routing_question(page, language),
+            page @ (MenuPage::ResetReviews(_) | MenuPage::ResetRecord(_)) => {
+                self.reset_review_question(page, language)
+            }
             MenuPage::Overview(page) => {
                 let page = page.min(self.pages() - 1);
                 let mut choices = (page * PAGE_SIZE

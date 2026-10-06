@@ -17,6 +17,10 @@ mod location;
 mod prepare;
 #[path = "native_account_quick_actions.rs"]
 mod quick_actions;
+#[path = "native_account_reset_review.rs"]
+mod reset_review;
+#[path = "native_account_routing_actions.rs"]
+mod routing_controls;
 #[path = "native_account_settings.rs"]
 mod settings;
 #[path = "native_account_targets.rs"]
@@ -124,6 +128,9 @@ impl NativeMenuSession {
         self.confirmed_reset_receipt = None;
         match answer {
             MenuAnswer::Text(label) => {
+                if self.prepare_routing_text(&label, language)? {
+                    return Ok(MenuOutcome::Continue);
+                }
                 let MenuPage::Rename(index) = self.page else {
                     anyhow::bail!("This page does not accept text");
                 };

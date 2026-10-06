@@ -8,6 +8,16 @@ impl NativeMenuSession {
         operation: MenuOperation,
         language: NativeAccountLanguage,
     ) -> anyhow::Result<()> {
+        if let MenuOperation::Routing(change) = operation {
+            return self.prepare_routing(change, language);
+        }
+        if operation == MenuOperation::ThreadModelAutomatic {
+            self.prepare_thread_model_automatic(language);
+            return Ok(());
+        }
+        if let MenuOperation::ResetReview(index) = operation {
+            return self.prepare_reset_review(index, language);
+        }
         if let MenuOperation::Relogin(index) = operation
             && let Some(login) = &self.login
             && login.status == "waiting"
@@ -181,7 +191,10 @@ impl NativeMenuSession {
             | MenuOperation::RefreshAccount(_)
             | MenuOperation::Credits(_)
             | MenuOperation::LoginCheck
-            | MenuOperation::LoginCancel => {
+            | MenuOperation::LoginCancel
+            | MenuOperation::Routing(_)
+            | MenuOperation::ThreadModelAutomatic
+            | MenuOperation::ResetReview(_) => {
                 anyhow::bail!("This operation does not use a confirmation page")
             }
         };

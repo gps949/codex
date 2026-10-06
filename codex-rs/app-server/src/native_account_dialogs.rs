@@ -177,6 +177,18 @@ pub(super) fn receipt(message: &str, language: NativeAccountLanguage) -> &str {
         "Pool settings saved. Active sessions apply them after configuration refresh." => {
             "已保存账号池设置；活动会话将在配置刷新后应用。"
         }
+        "Model routing settings saved. New tasks read this policy; active tasks keep their admitted choice." => {
+            "模型选择设置已保存。新任务读取此策略；进行中的任务保留已确定的选择。"
+        }
+        "This thread follows the saved model policy for new tasks. Active work and the global policy are unchanged." => {
+            "此会话的新任务将遵循已保存的模型策略。当前任务和全局策略不变。"
+        }
+        "Original reset reviewed and backed up. Its outcome remains unknown; later operations may use another credit. Quota and account access were not changed." => {
+            "已复核并备份原重置记录。结果仍未知；后续操作可能使用另一张券。额度与账号访问权限未改变。"
+        }
+        "Unconfirmed reset record archived. No credit was used and quota was not changed." => {
+            "已备份归档未确认的重置记录。此次复核没有用券，也没有改变额度。"
+        }
         "Host sign-in selected. Running hosts apply this automatically and continue Remote if it was enabled. Devices may need pairing for the new owner." => {
             "已选择主登录账号；主机会自动应用并继续已开启的 Remote。设备可能需要为新身份重新配对。"
         }

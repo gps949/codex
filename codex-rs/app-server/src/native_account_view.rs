@@ -16,6 +16,10 @@ mod pages;
 mod quick;
 #[path = "native_account_view_quota.rs"]
 mod quota_details;
+#[path = "native_account_routing.rs"]
+mod routing;
+use routing::RoutingChange;
+use routing::RoutingPage;
 
 pub(crate) const PAGE_SIZE: usize = 4;
 const QUICK_PAGE_SIZE: usize = 2;
@@ -51,6 +55,9 @@ pub(crate) struct FrozenAccountInventory {
     settings: serde_json::Value,
     primary: Option<crate::account_management::PrimaryLoginView>,
     fallback: codex_login::ApiAccountFallback,
+    routing: Option<crate::account_management::ModelRoutingView>,
+    reset_journals: Vec<crate::account_management::ResetJournalView>,
+    reset_total: usize,
 }
 
 #[derive(Clone)]
@@ -105,6 +112,9 @@ pub(crate) enum MenuPage {
     },
     Browse(usize),
     Settings(usize),
+    Routing(RoutingPage),
+    ResetReviews(usize),
+    ResetRecord(usize),
     Primary,
     Refresh(usize),
     Credits(usize, usize),
@@ -139,6 +149,9 @@ pub(crate) enum MenuOperation {
     ApiFallback(usize),
     FallbackOff,
     Setting(usize),
+    Routing(RoutingChange),
+    ThreadModelAutomatic,
+    ResetReview(usize),
     LoginCheck,
     LoginCancel,
 }
@@ -202,6 +215,7 @@ fn bounded_description(value: &str) -> String {
 
 impl FrozenAccountInventory {
     pub(crate) fn from_inventory(mut inventory: AccountManagerInventory) -> Self {
+        let reset_total = inventory.reset_journals.len();
         let api_active = match &inventory.api_selection {
             codex_login::ApiAccountSelection::Subscription => None,
             codex_login::ApiAccountSelection::Manual { profile_id } => Some(profile_id),
@@ -276,6 +290,9 @@ impl FrozenAccountInventory {
             settings: inventory.settings,
             primary: inventory.primary_login,
             fallback: inventory.api_fallback,
+            routing: inventory.model_routing,
+            reset_journals: inventory.reset_journals.into_iter().take(128).collect(),
+            reset_total,
         }
     }
 

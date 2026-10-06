@@ -34,6 +34,9 @@ impl MenuLocation {
             }
             MenuPage::Home
             | MenuPage::Settings(_)
+            | MenuPage::Routing(_)
+            | MenuPage::ResetReviews(_)
+            | MenuPage::ResetRecord(_)
             | MenuPage::Primary
             | MenuPage::Confirm
             | MenuPage::Result

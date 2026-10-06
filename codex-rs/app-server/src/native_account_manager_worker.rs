@@ -151,7 +151,9 @@ impl NativeAccountManager {
         options: NativeMenuOptions,
         mut turn: Turn,
     ) -> Result<(), String> {
-        let NativeMenuInput { user, inventory } = input;
+        let NativeMenuInput {
+            user, inventory, ..
+        } = input;
         let language = options.language;
         let mut result = self
             .notify(
@@ -272,9 +274,12 @@ impl NativeAccountManager {
         options: NativeMenuOptions,
     ) -> Result<(), String> {
         let context = match &menu.kind {
-            MenuKind::Synthetic => crate::account_management::AccountOperationContext::NativeMenu(
-                menu.cancellation.clone(),
-            ),
+            MenuKind::Synthetic(thread) => {
+                crate::account_management::AccountOperationContext::ThreadMenu {
+                    cancellation: menu.cancellation.clone(),
+                    thread: Arc::clone(thread),
+                }
+            }
             MenuKind::Attached(thread) => {
                 crate::account_management::AccountOperationContext::AttachedMenu {
                     cancellation: menu.cancellation.clone(),

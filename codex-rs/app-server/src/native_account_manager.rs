@@ -58,6 +58,7 @@ pub(crate) struct NativeMenuOptions {
 struct NativeMenuInput {
     user: ThreadItem,
     inventory: FrozenAccountInventory,
+    thread: Arc<codex_core::CodexThread>,
 }
 
 #[derive(Default)]
@@ -84,7 +85,7 @@ struct ActiveMenu {
 
 #[derive(Clone)]
 enum MenuKind {
-    Synthetic,
+    Synthetic(Arc<codex_core::CodexThread>),
     Attached(Arc<codex_core::CodexThread>),
 }
 
@@ -185,7 +186,11 @@ impl NativeAccountManager {
         self.start_inventory(
             request_id,
             thread_id,
-            NativeMenuInput { user, inventory },
+            NativeMenuInput {
+                user,
+                inventory,
+                thread,
+            },
             manager,
             outgoing,
             options,
@@ -210,7 +215,7 @@ impl NativeAccountManager {
             turn_id: Uuid::now_v7().to_string(),
             cancellation: CancellationToken::new(),
             finished,
-            kind: MenuKind::Synthetic,
+            kind: MenuKind::Synthetic(Arc::clone(&input.thread)),
         };
         {
             let mut state = self
@@ -324,7 +329,7 @@ impl NativeAccountManager {
             .get(&thread_id)
             .is_some_and(|menu| {
                 menu.owner == owner
-                    && matches!(menu.kind, MenuKind::Synthetic)
+                    && matches!(menu.kind, MenuKind::Synthetic(_))
                     && (turn_id.is_empty() || menu.turn_id == turn_id)
             });
         if !matches {
@@ -450,3 +455,7 @@ impl NativeAccountManager {
 #[cfg(test)]
 #[path = "native_account_manager_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "native_account_thread_routing_tests.rs"]
+mod thread_routing_tests;
