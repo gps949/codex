@@ -34,11 +34,18 @@ impl FrozenAccountInventory {
         };
         let account_name = bounded_text(&account.label, /*max_chars*/ 38);
         match page {
-                    MenuPage::Detail(_) => MenuQuestion::new(account_name, vec![
-                        nav("Quota and identity", "额度与身份", self.account_summary(account, language, now), MenuPage::Usage(index)),
-                        nav("Account actions", "账号操作", language.text("Select, refresh, edit or manage login", "切换、刷新、编辑与管理登录").into(), MenuPage::Actions(index)),
-                        nav("Next account", "下一个账号", "".into(), MenuPage::Detail((index + 1) % self.accounts.len())), back(MenuPage::Overview(index / PAGE_SIZE)), close(),
-                    ]),
+                    MenuPage::Detail(_) => {
+                        let mut choices = vec![nav("Quota and identity", "额度与身份", self.account_summary(account, language, now), MenuPage::Usage(index))];
+                        if matches!(account.detail, AccountDetail::Subscription { .. }) && !account.disabled && account.login_state == "signedIn" {
+                            choices.push(read("Use reset credit", "使用重置券", language.text("Select the earliest-expiring available credit; confirm before use", "自动选择最早到期的有效券；使用前需要确认"), MenuOperation::UseResetCredit(index)));
+                        }
+                        choices.push(nav("Account actions", "账号操作", language.text("Select, refresh, edit or manage login", "切换、刷新、编辑与管理登录").into(), MenuPage::Actions(index)));
+                        if choices.len() == 2 {
+                            choices.push(nav("Next account", "下一个账号", "".into(), MenuPage::Detail((index + 1) % self.accounts.len())));
+                        }
+                        choices.extend([back(MenuPage::Overview(index / PAGE_SIZE)), close()]);
+                        MenuQuestion::new(account_name, choices)
+                    },
                     MenuPage::Usage(_) => {
                         let mut choices = Vec::new();
                         match &account.detail {

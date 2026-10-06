@@ -144,7 +144,7 @@ impl NativeMenuSession {
                         anyhow::ensure!(self.credit_target.as_ref().is_some_and(|target| same_target(target, &account)) && self.credit_identity == self.identities.get(&account.id).cloned().flatten(), "Reload credits for this account before redemption");
                         let credit = self.credits.get(credit_index).ok_or_else(|| anyhow::anyhow!("Credit no longer appears"))?;
                         anyhow::ensure!(credit.available, "This credit is unavailable or has a different quota scope");
-                        (language.text("Use one reset credit?", "使用一张重置券？"), format!("{}\n{}: {}\n{}", language.text("One credit is consumed for this account only", "仅为此账号消耗一张券"), language.text("Expires", "到期"), credit.expires,
+                        (language.text("Use one reset credit?", "使用一张重置券？"), format!("{}\n{}: {}\n{}: {}\n{}", language.text("One credit is consumed for this account only", "仅为此账号消耗一张券"), language.text("Credit", "重置券"), bounded_text(&credit.id, /*max_chars*/ 96), language.text("Expires", "到期"), credit.expires,
                             language.text("Backend identity, availability and expiry are checked again before redemption.", "兑换前将再次核对后端身份、券状态与到期时间。")), AccountManagerOperation::Redeem { expected_owner_key: Some(owner_key.clone()), profile_id: id, credit_id: credit.id.clone(), idempotency_key: self.redemption_keys.entry((owner_key, credit.id.clone())).or_insert_with(|| uuid::Uuid::new_v4().to_string()).clone() })
                     }
                     MenuOperation::RetryPendingCredit(_) => {
@@ -156,7 +156,10 @@ impl NativeMenuSession {
                         pending_reset = Some(previous.clone());
                         return_page = MenuPage::Credits(index, 0);
                         (language.text("Retry previous reset?", "重试之前的重置？"),
-                            language.text("The previous result is unconfirmed. Retry the same credit and operation; no new reset request is created.", "之前的结果尚未确认；重试同一张券与同一次操作，不创建新的重置请求。").into(),
+                            format!("{}\n{}: {}\n{}: {}\n{}: {}", language.text("The previous result is unconfirmed. Retry the same credit and operation; no new reset request is created.", "之前的结果尚未确认；重试同一张券与同一次操作，不创建新的重置请求。"),
+                                language.text("Credit", "重置券"), bounded_text(&credit_id, /*max_chars*/ 96),
+                                language.text("Expires", "到期"), self.credits.iter().find(|credit| credit.id == credit_id).map_or(language.text("No expiry listed", "未列出到期时间"), |credit| credit.expires.as_str()),
+                                language.text("Operation", "操作编号"), bounded_text(&previous.idempotency_key, /*max_chars*/ 96)),
                             AccountManagerOperation::Redeem { expected_owner_key: Some(previous.owner_key.clone()), profile_id: id, credit_id, idempotency_key: previous.idempotency_key.clone() })
                     }
                     MenuOperation::ApiUse(_) => (language.text("Select paid API?", "选择付费 API？"), language.text("Conversation content goes to this provider; charges can apply and there is no hard spending cap.\nSubsequent requests use this provider. Use automatic selection for subscriptions.", "会向此提供商发送会话内容；可能收费，没有消费金额硬上限。\n后续请求使用此提供商；自动选择可恢复使用订阅。").into(), AccountManagerOperation::ApiUse { expected_credential_revision: match &account.detail { AccountDetail::Api { credential_revision, .. } => credential_revision.clone(), _ => None }, profile_id: id }),
@@ -190,9 +193,11 @@ impl NativeMenuSession {
             | MenuOperation::RefreshQuick(_)
             | MenuOperation::RefreshAccount(_)
             | MenuOperation::Credits(_)
+            | MenuOperation::UseResetCredit(_)
             | MenuOperation::LoginCheck
             | MenuOperation::LoginCancel
             | MenuOperation::Routing(_)
+            | MenuOperation::RoutingRefreshModels
             | MenuOperation::ThreadModelAutomatic
             | MenuOperation::ResetReview(_) => {
                 anyhow::bail!("This operation does not use a confirmation page")

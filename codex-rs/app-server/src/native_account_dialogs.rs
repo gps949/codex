@@ -68,6 +68,12 @@ impl NativeMenuSession {
                         choices,
                     );
                 }
+                if self.credit_inventory_error.is_some() {
+                    return MenuQuestion::new(language.text("Credits unavailable", "重置券暂不可用"), vec![
+                        choice(language.text("Reload credits", "重载重置券"), language.text("Credit inventory unavailable; current count unknown. Reload before using a credit.", "重置券库存不可用，当前数量未知；请重载后再使用。"), MenuAction::Execute(MenuOperation::Credits(index))),
+                        back(MenuPage::Detail(index)),
+                    ]);
+                }
                 let mut choices = self
                     .credits
                     .iter()

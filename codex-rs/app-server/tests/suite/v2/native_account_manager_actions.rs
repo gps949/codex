@@ -223,6 +223,45 @@ async fn native_menu_credit_read_is_nonconsuming_and_redemption_cancel_sends_no_
 struct DelayedCreditCheck {
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_menu_direct_reset_reaches_earliest_expiry_confirmation_and_cancel_sends_no_post()
+-> Result<()> {
+    let mut fixture = NativeFixture::new(PoolFixture::ManagedAccount).await?;
+    Mock::given(method("GET")).and(path("/api/codex/rate-limit-reset-credits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "credits": [
+                {"id":"later-credit","reset_type":"codex_rate_limits","status":"available","expires_at":"2099-01-01T00:00:00Z","granted_at":"2026-10-03T00:00:00Z"},
+                {"id":"first-expiry","reset_type":"codex_rate_limits","status":"available","expires_at":"2098-01-01T00:00:00Z","granted_at":"2026-10-03T00:00:00Z"}
+            ],"available_count":2,"total_earned_count":2
+        }))).mount(&fixture.backend).await;
+    let (turn, id, question) = fixture.open_menu().await?;
+    let (id, question) = fixture.choose(id, &question, "Accounts").await?;
+    let (id, question) = fixture.choose(id, &question, "1. Work fixture").await?;
+    let (id, question) = fixture.choose(id, &question, "Use reset credit").await?;
+    assert_eq!(question.questions[0].question, "Use one reset credit?");
+    let description = &question.questions[0].options.as_ref().unwrap()[0].description;
+    assert!(description.contains("Work fixture"));
+    assert!(description.contains("first-expiry"));
+    assert!(description.contains("2098-01-01"));
+    let (id, question) = fixture.choose(id, &question, "Cancel").await?;
+    assert_eq!(question.questions[0].question, "Work fixture");
+    fixture
+        .answer(id.clone(), &question.questions[0].id, vec!["Close".into()])
+        .await?;
+    fixture.finish_menu(&turn.turn.id, &id).await?;
+    assert!(
+        fixture
+            .backend
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .all(|request| request.method != "POST")
+    );
+    assert!(fixture.inference_requests().await.is_empty());
+    Ok(())
+}
 impl wiremock::Respond for DelayedCreditCheck {
     fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
         let call = self

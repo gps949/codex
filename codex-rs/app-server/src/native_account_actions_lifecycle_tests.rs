@@ -147,6 +147,64 @@ impl ManagerFixture {
 }
 
 #[tokio::test]
+async fn successful_manual_reset_review_releases_its_local_tuple_and_preserves_other_keys()
+-> anyhow::Result<()> {
+    let fixture = ManagerFixture::new().await?;
+    let redeemed = fixture.mount_redemption(CreditRefresh::Available).await;
+    let mut session = fixture.pending_retry().await?;
+    let other_binding = ("b".repeat(64), "original-credit".into());
+    session
+        .redemption_keys
+        .insert(other_binding.clone(), "other-operation".into());
+    session.prepare(
+        MenuOperation::ResetReview(0),
+        NativeAccountLanguage::English,
+    )?;
+    session
+        .handle(
+            MenuAnswer::Action(MenuAction::Apply),
+            &fixture.manager,
+            NativeAccountLanguage::English,
+            &crate::account_management::AccountOperationContext::Independent,
+        )
+        .await?;
+    assert_eq!(session.pending_reset, None);
+    assert_eq!(
+        session.redemption_keys,
+        std::collections::HashMap::from([(other_binding, "other-operation".into())])
+    );
+    redeemed.store(true, Ordering::Release);
+    session
+        .execute_read(
+            MenuOperation::UseResetCredit(0),
+            &fixture.manager,
+            NativeAccountLanguage::English,
+            &crate::account_management::AccountOperationContext::Independent,
+        )
+        .await?;
+    let AccountManagerOperation::Redeem {
+        credit_id,
+        idempotency_key,
+        ..
+    } = &session.pending.as_ref().unwrap().operation
+    else {
+        unreachable!()
+    };
+    assert_eq!(credit_id, "next-credit");
+    assert_ne!(idempotency_key, "original-operation");
+    assert!(
+        fixture
+            .server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn successful_pending_reset_retry_clears_only_its_tuple_and_reloads_terminal_credits()
 -> anyhow::Result<()> {
     let fixture = ManagerFixture::new().await?;

@@ -1,6 +1,8 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+#[path = "native_account_credits_tests.rs"]
+mod credit_flow;
 #[path = "native_account_actions_lifecycle_tests.rs"]
 mod lifecycle;
 

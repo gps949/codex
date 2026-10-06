@@ -1,0 +1,12 @@
+---
+source: app-server/src/native_account_routing_actions_tests.rs
+expression: render(question)
+---
+Available models
+No eligible models
+Keep the current model until catalog candidates are available
+
+Refresh model catalog
+Read the latest catalog; no inference request is sent
+
+Back

@@ -41,6 +41,16 @@ fn render(question: MenuQuestion) -> String {
 }
 
 #[test]
+fn empty_model_catalog_has_a_noninferential_refresh_action() {
+    let session = fixture();
+    let question = session
+        .inventory
+        .routing_question(RoutingPage::Models(0), NativeAccountLanguage::English);
+    assert!(question.choices.iter().any(|choice| choice.action == MenuAction::Execute(MenuOperation::RoutingRefreshModels)));
+    insta::assert_snapshot!("mobile_empty_model_catalog", render(question));
+}
+
+#[test]
 fn native_model_menu_keeps_headings_short_and_data_in_descriptions() {
     let session = fixture();
     for page in [

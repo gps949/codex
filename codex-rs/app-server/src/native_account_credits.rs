@@ -20,11 +20,24 @@ impl NativeMenuSession {
                 )
             })?
             .to_string();
-        let pending_reset: Option<NativePendingReset> = serde_json::from_value(
+        let mut pending_reset: Option<NativePendingReset> = serde_json::from_value(
             data.get("pendingResetCredit")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
         )?;
+        if let Some(original) = &self.pending_reset {
+            self.unconfirmed_resets
+                .insert(original.owner_key.clone(), original.clone());
+        }
+        if let Some(original) = self.unconfirmed_resets.get(&owner_key) {
+            anyhow::ensure!(
+                pending_reset
+                    .as_ref()
+                    .is_none_or(|current| current == original),
+                "The previous reset operation changed. Review its original binding before continuing."
+            );
+            pending_reset = Some(original.clone());
+        }
         if let Some(pending) = &pending_reset {
             anyhow::ensure!(
                 pending.owner_key == owner_key
@@ -42,6 +55,8 @@ impl NativeMenuSession {
                     pending.idempotency_key.clone(),
                 );
             }
+            self.unconfirmed_resets
+                .insert(owner_key.clone(), pending.clone());
         }
         self.credit_inventory_error = data
             .get("inventoryError")
@@ -93,6 +108,42 @@ impl NativeMenuSession {
                 anyhow::anyhow!("Credit owner no longer appears. Reopen its account actions.")
             })?;
         self.page = MenuPage::Credits(index, 0);
+        Ok(())
+    }
+
+    pub(super) fn prepare_reset_credit(
+        &mut self,
+        index: usize,
+        language: NativeAccountLanguage,
+    ) -> anyhow::Result<()> {
+        if let Some(previous) = &self.pending_reset {
+            if previous.credit_id.is_some() {
+                self.prepare(MenuOperation::RetryPendingCredit(index), language)?;
+            }
+            return Ok(());
+        }
+        if self.credit_inventory_error.is_some() {
+            return Ok(());
+        }
+        let expiry = |credit: &NativeCredit| {
+            chrono::DateTime::parse_from_rfc3339(&credit.expires)
+                .map(|at| at.with_timezone(&chrono::Utc))
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+        };
+        let selected = self
+            .credits
+            .iter()
+            .enumerate()
+            .filter(|(_, credit)| credit.available)
+            .min_by(|(_, left), (_, right)| {
+                expiry(left)
+                    .cmp(&expiry(right))
+                    .then_with(|| left.id.cmp(&right.id))
+            })
+            .map(|(credit_index, _)| credit_index);
+        if let Some(credit_index) = selected {
+            self.prepare(MenuOperation::Redeem(index, credit_index), language)?;
+        }
         Ok(())
     }
 }

@@ -1,0 +1,33 @@
+---
+source: app-server/src/native_account_credits_tests.rs
+expression: "format!(\"{}\\n---\\n{}\", render(question), render(session.question(NativeAccountLanguage::English)))"
+---
+Work account
+Quota and identity
+Current · Ready
+Primary: Unknown · age unknown
+Secondary: Unknown · age unknown
+
+Use reset credit
+Select the earliest-expiring available credit; confirm before use
+
+Account actions
+Select, refresh, edit or manage login
+
+Back
+
+
+Close
+
+---
+Use one reset credit?
+Confirm
+1. Work account
+ID: slot-1
+One credit is consumed for this account only
+Credit: earliest
+Expires: 2099-02-01T00:00:00Z
+Backend identity, availability and expiry are checked again before redemption.
+
+Cancel
+No change will be made

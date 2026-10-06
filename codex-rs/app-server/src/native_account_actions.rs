@@ -45,6 +45,7 @@ pub(crate) struct NativeMenuSession {
     credit_owner_key: Option<String>,
     credit_inventory_error: Option<String>,
     pending_reset: Option<NativePendingReset>,
+    unconfirmed_resets: std::collections::HashMap<String, NativePendingReset>,
     notice: String,
     confirmed_reset_receipt: Option<String>,
     return_page: MenuPage,
@@ -105,6 +106,7 @@ impl NativeMenuSession {
             credit_owner_key: None,
             credit_inventory_error: None,
             pending_reset: None,
+            unconfirmed_resets: std::collections::HashMap::new(),
             notice: String::new(),
             confirmed_reset_receipt: None,
             return_page: MenuPage::Home,
@@ -246,21 +248,56 @@ impl NativeMenuSession {
                     }),
                     _ => None,
                 };
+                let reviewed = match &pending.operation {
+                    AccountManagerOperation::ManualResetReview {
+                        owner_key,
+                        idempotency_key,
+                        expected_digest,
+                        ..
+                    } => self
+                        .inventory
+                        .reset_journals
+                        .iter()
+                        .filter_map(|record| record.manual.as_ref())
+                        .find(|manual| {
+                            &manual.owner_key == owner_key
+                                && &manual.idempotency_key == idempotency_key
+                                && &manual.digest == expected_digest
+                        })
+                        .map(|manual| NativePendingReset {
+                            owner_key: manual.owner_key.clone(),
+                            idempotency_key: manual.idempotency_key.clone(),
+                            credit_id: Some(manual.credit_id.clone()),
+                        }),
+                    _ => None,
+                };
+                if let Some(redemption) = &redemption {
+                    if self.pending_reset.is_none() {
+                        self.pending_reset = Some(redemption.clone());
+                    }
+                    self.unconfirmed_resets
+                        .insert(redemption.owner_key.clone(), redemption.clone());
+                }
                 let result = manager
                     .execute_with_context(pending.operation, context)
                     .await?;
-                if let Some(redemption) = &redemption {
-                    self.confirmed_reset_receipt = Some(result.message.clone());
-                    self.return_page = return_location.restore(&self.inventory);
-                    if self.pending_reset.as_ref() == Some(redemption) {
+                if let Some(completed) = redemption.as_ref().or(reviewed.as_ref()) {
+                    if self.pending_reset.as_ref() == Some(completed) {
                         self.pending_reset = None;
                     }
-                    if let Some(credit_id) = &redemption.credit_id {
-                        let tuple = (redemption.owner_key.clone(), credit_id.clone());
-                        if self.redemption_keys.get(&tuple) == Some(&redemption.idempotency_key) {
+                    if self.unconfirmed_resets.get(&completed.owner_key) == Some(completed) {
+                        self.unconfirmed_resets.remove(&completed.owner_key);
+                    }
+                    if let Some(credit_id) = &completed.credit_id {
+                        let tuple = (completed.owner_key.clone(), credit_id.clone());
+                        if self.redemption_keys.get(&tuple) == Some(&completed.idempotency_key) {
                             self.redemption_keys.remove(&tuple);
                         }
                     }
+                }
+                if redemption.is_some() {
+                    self.confirmed_reset_receipt = Some(result.message.clone());
+                    self.return_page = return_location.restore(&self.inventory);
                 }
                 let login_started =
                     match serde_json::from_value::<LoginProgressWire>(result.data.clone()) {
@@ -389,6 +426,11 @@ impl NativeMenuSession {
             return Ok(());
         }
         let (account_operation, target, return_page) = match operation {
+            MenuOperation::RoutingRefreshModels => (
+                AccountManagerOperation::RoutingRefreshModels,
+                None,
+                self.page,
+            ),
             MenuOperation::Refresh(first) | MenuOperation::RefreshQuick(first) => {
                 let (indices, return_page) = if matches!(operation, MenuOperation::RefreshQuick(_))
                 {
@@ -428,13 +470,18 @@ impl NativeMenuSession {
                     return_page,
                 )
             }
-            MenuOperation::RefreshAccount(index) | MenuOperation::Credits(index) => {
+            MenuOperation::RefreshAccount(index)
+            | MenuOperation::Credits(index)
+            | MenuOperation::UseResetCredit(index) => {
                 let account = self.account(index)?.clone();
                 anyhow::ensure!(
                     !account.disabled && account.login_state == "signedIn",
                     "Complete account login and enable this account before contacting the backend"
                 );
-                let operation = if matches!(operation, MenuOperation::Credits(_)) {
+                let operation = if matches!(
+                    operation,
+                    MenuOperation::Credits(_) | MenuOperation::UseResetCredit(_)
+                ) {
                     AccountManagerOperation::Credits {
                         profile_id: account.id.clone(),
                     }
@@ -484,8 +531,17 @@ impl NativeMenuSession {
             .execute_with_context(account_operation, context)
             .await?;
         self.reload(manager).await?;
-        if matches!(operation, MenuOperation::Credits(_)) {
+        if matches!(
+            operation,
+            MenuOperation::Credits(_) | MenuOperation::UseResetCredit(_)
+        ) {
             self.load_credits(result.data, target, credit_identity, language)?;
+            if matches!(operation, MenuOperation::UseResetCredit(_)) {
+                let MenuPage::Credits(index, _) = self.page else {
+                    unreachable!("loaded credit page")
+                };
+                self.prepare_reset_credit(index, language)?;
+            }
         } else {
             self.page = return_location.restore(&self.inventory);
         }

@@ -460,6 +460,14 @@ impl FrozenAccountInventory {
                         RoutingPage::Models((page + 1) % view.models.len().div_ceil(3)),
                     ));
                 }
+                choices.push(choice(
+                    language.text("Refresh model catalog", "刷新模型目录"),
+                    language.text(
+                        "Read the latest catalog; no inference request is sent",
+                        "读取最新目录；不会发送推理请求",
+                    ),
+                    MenuAction::Execute(MenuOperation::RoutingRefreshModels),
+                ));
                 choices.push(back(RoutingPage::Advanced));
                 MenuQuestion::new(language.text("Available models", "可用模型"), choices)
             }
