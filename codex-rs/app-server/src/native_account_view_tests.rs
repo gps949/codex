@@ -631,13 +631,21 @@ fn host_runtime_heartbeat_expires_while_the_same_inventory_is_open() {
     });
     let initial = inventory.question_at(MenuPage::Home, NativeAccountLanguage::English, NOW);
     assert!(
-        initial.choices[2]
+        initial
+            .choices
+            .iter()
+            .find(|choice| choice.label == "Host sign-in")
+            .expect("host sign-in choice")
             .description
             .contains("Connected to relay")
     );
     let later = inventory.question_at(MenuPage::Home, NativeAccountLanguage::English, NOW + 11);
     assert!(
-        later.choices[2]
+        later
+            .choices
+            .iter()
+            .find(|choice| choice.label == "Host sign-in")
+            .expect("host sign-in choice")
             .description
             .contains("No recent running-host confirmation")
     );

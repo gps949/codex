@@ -22,7 +22,7 @@ H manages host sign-in. It is independent from inference selection.
 API accounts · fallback off
 
 [R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions
-[D] Jev / Clef  [H] Host sign-in  [C] Cancel login  [number] Account actions
+[M] Model selection  [D] Jev / Clef  [H] Host sign-in  [C] Cancel login  [number] Account actions
 [G] Language / 中文  [Q] Quit
 Choose: 
 alice@example.com · Pro (More)
@@ -53,7 +53,7 @@ API accounts · fallback off
 Account details saved. Running clients synchronize the change.
 
 [R] Refresh  [A] Add  [S] Settings  [P] API accounts  [O] Automatic subscriptions
-[D] Jev / Clef  [H] Host sign-in  [C] Cancel login  [number] Account actions
+[M] Model selection  [D] Jev / Clef  [H] Host sign-in  [C] Cancel login  [number] Account actions
 [G] Language / 中文  [Q] Quit
 Choose: 
 Explicit name matching ID, clear:
@@ -75,7 +75,7 @@ Codex 账号管理
 API 账号 · 最终兜底已关闭
 
 [R] 刷新  [A] 添加  [S] 设置  [P] API 账号  [O] 自动订阅账号
-[D] Jev / Clef  [H] 主登录  [C] 取消登录  [序号] 账号操作
+[M] 模型选择  [D] Jev / Clef  [H] 主登录  [C] 取消登录  [序号] 账号操作
 [G] 语言 / English  [Q] 退出
 请选择: 
 fixture · Pro (More)
@@ -107,6 +107,6 @@ API 账号 · 最终兜底已关闭
 账号信息已保存，运行中的客户端会同步更改。
 
 [R] 刷新  [A] 添加  [S] 设置  [P] API 账号  [O] 自动订阅账号
-[D] Jev / Clef  [H] 主登录  [C] 取消登录  [序号] 账号操作
+[M] 模型选择  [D] Jev / Clef  [H] 主登录  [C] 取消登录  [序号] 账号操作
 [G] 语言 / English  [Q] 退出
 请选择:
