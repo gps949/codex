@@ -55,6 +55,7 @@ mod account_config;
 mod account_manager_cmd;
 mod account_manager_tui;
 mod account_primary_cmd;
+mod account_routing_cmd;
 mod account_selector;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
@@ -590,6 +591,8 @@ enum AccountSubcommand {
     Primary(account_primary_cmd::AccountPrimaryArgs),
     /// Open the complete account manager in a paired browser.
     Manage(account_manager_cmd::AccountManageArgs),
+    /// View or change automatic model selection for new tasks and subagents.
+    Routing(account_routing_cmd::AccountRoutingArgs),
     /// Add another Codex account profile via ChatGPT login.
     #[command(after_help = "Example:\n  codex account add --label \"Work Pro\"\n\n\
             If this ChatGPT user+workspace is already in the pool, login refreshes\n\
@@ -1868,6 +1871,9 @@ async fn cli_main(
                 }
                 AccountSubcommand::Manage(args) => {
                     account_manager_cmd::run(account_cli.config_overrides, args).await?;
+                }
+                AccountSubcommand::Routing(args) => {
+                    account_routing_cmd::run(account_cli.config_overrides, args).await?;
                 }
                 AccountSubcommand::Add {
                     label,
