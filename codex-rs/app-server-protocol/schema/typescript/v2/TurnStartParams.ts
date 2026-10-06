@@ -7,11 +7,16 @@ import type { ReasoningSummary } from "../ReasoningSummary";
 import type { JsonValue } from "../serde_json/JsonValue";
 import type { ApprovalsReviewer } from "./ApprovalsReviewer";
 import type { AskForApproval } from "./AskForApproval";
+import type { ModelSelectionIntent } from "./ModelSelectionIntent";
 import type { SandboxPolicy } from "./SandboxPolicy";
 import type { TurnToolOutput } from "./TurnToolOutput";
 import type { UserInput } from "./UserInput";
 
 export type TurnStartParams = {threadId: string, /**
+ * Follow the saved selection, pin explicit settings, or restore automatic selection.
+ * Omission treats supplied model or effort settings as an explicit choice.
+ */
+modelSelectionIntent?: ModelSelectionIntent | null, /**
  * Replace this thread's disabled plugin IDs.
  * Omitted/null preserves the list; [] clears it.
  */

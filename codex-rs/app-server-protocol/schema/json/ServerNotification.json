@@ -3475,6 +3475,14 @@
       ],
       "type": "object"
     },
+    "ModelSelectionIntent": {
+      "enum": [
+        "followThread",
+        "explicit",
+        "automatic"
+      ],
+      "type": "string"
+    },
     "ModelVerification": {
       "enum": [
         "trustedAccessForCyber"
@@ -6345,6 +6353,16 @@
         },
         "modelProvider": {
           "type": "string"
+        },
+        "modelSelectionIntent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelSelectionIntent"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "personality": {
           "anyOf": [

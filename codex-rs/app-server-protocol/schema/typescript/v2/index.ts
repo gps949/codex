@@ -335,6 +335,7 @@ export type { ModelProviderCapabilitiesReadResponse } from "./ModelProviderCapab
 export type { ModelRerouteReason } from "./ModelRerouteReason";
 export type { ModelReroutedNotification } from "./ModelReroutedNotification";
 export type { ModelSafetyBufferingUpdatedNotification } from "./ModelSafetyBufferingUpdatedNotification";
+export type { ModelSelectionIntent } from "./ModelSelectionIntent";
 export type { ModelServiceTier } from "./ModelServiceTier";
 export type { ModelUpgradeInfo } from "./ModelUpgradeInfo";
 export type { ModelVerification } from "./ModelVerification";

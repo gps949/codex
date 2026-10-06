@@ -2322,6 +2322,14 @@
     "ModelProviderCapabilitiesReadParams": {
       "type": "object"
     },
+    "ModelSelectionIntent": {
+      "enum": [
+        "followThread",
+        "explicit",
+        "automatic"
+      ],
+      "type": "string"
+    },
     "MultiAgentMode": {
       "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
       "oneOf": [
@@ -5619,6 +5627,17 @@
             "string",
             "null"
           ]
+        },
+        "modelSelectionIntent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelSelectionIntent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Follow the saved selection, pin explicit settings, or restore automatic selection. Omission treats supplied model or effort settings as an explicit choice."
         },
         "outputSchema": {
           "description": "Optional JSON Schema used to constrain the final assistant message for this turn."

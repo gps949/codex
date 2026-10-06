@@ -2957,6 +2957,12 @@ class ModelSafetyBufferingUpdatedNotification(BaseModel):
     use_cases: Annotated[list[str], Field(alias="useCases")]
 
 
+class ModelSelectionIntent(Enum):
+    follow_thread = "followThread"
+    explicit = "explicit"
+    automatic = "automatic"
+
+
 class ModelServiceTier(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10282,6 +10288,9 @@ class ThreadSettings(BaseModel):
     effort: ReasoningEffort | None = None
     model: str
     model_provider: Annotated[str, Field(alias="modelProvider")]
+    model_selection_intent: Annotated[
+        ModelSelectionIntent | None, Field(alias="modelSelectionIntent")
+    ] = None
     personality: Annotated[
         Personality | None,
         Field(
@@ -12602,6 +12611,13 @@ class TurnStartParams(BaseModel):
     input: list[UserInput]
     model: Annotated[
         str | None, Field(description="Override the model for this turn and subsequent turns.")
+    ] = None
+    model_selection_intent: Annotated[
+        ModelSelectionIntent | None,
+        Field(
+            alias="modelSelectionIntent",
+            description="Follow the saved selection, pin explicit settings, or restore automatic selection. Omission treats supplied model or effort settings as an explicit choice.",
+        ),
     ] = None
     output_schema: Annotated[
         Any | None,

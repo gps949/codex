@@ -9,9 +9,10 @@ import type { ReasoningSummary } from "../ReasoningSummary";
 import type { ActivePermissionProfile } from "./ActivePermissionProfile";
 import type { ApprovalsReviewer } from "./ApprovalsReviewer";
 import type { AskForApproval } from "./AskForApproval";
+import type { ModelSelectionIntent } from "./ModelSelectionIntent";
 import type { SandboxPolicy } from "./SandboxPolicy";
 
-export type ThreadSettings = {/**
+export type ThreadSettings = {modelSelectionIntent: ModelSelectionIntent | null, /**
  * Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
  */
 disabledPluginIds: Array<string>, cwd: AbsolutePathBuf, approvalPolicy: AskForApproval, approvalsReviewer: ApprovalsReviewer, sandboxPolicy: SandboxPolicy, activePermissionProfile: ActivePermissionProfile | null, model: string, modelProvider: string, serviceTier: string | null, effort: ReasoningEffort | null, summary: ReasoningSummary | null, collaborationMode: CollaborationMode, /**

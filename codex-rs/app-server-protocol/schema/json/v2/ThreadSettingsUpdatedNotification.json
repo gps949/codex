@@ -107,6 +107,14 @@
       ],
       "type": "string"
     },
+    "ModelSelectionIntent": {
+      "enum": [
+        "followThread",
+        "explicit",
+        "automatic"
+      ],
+      "type": "string"
+    },
     "MultiAgentMode": {
       "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
       "oneOf": [
@@ -347,6 +355,16 @@
         },
         "modelProvider": {
           "type": "string"
+        },
+        "modelSelectionIntent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelSelectionIntent"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "personality": {
           "anyOf": [

@@ -16229,6 +16229,14 @@
         "title": "ModelSafetyBufferingUpdatedNotification",
         "type": "object"
       },
+      "ModelSelectionIntent": {
+        "enum": [
+          "followThread",
+          "explicit",
+          "automatic"
+        ],
+        "type": "string"
+      },
       "ModelServiceTier": {
         "properties": {
           "description": {
@@ -24766,6 +24774,16 @@
           "modelProvider": {
             "type": "string"
           },
+          "modelSelectionIntent": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ModelSelectionIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "personality": {
             "anyOf": [
               {
@@ -26122,6 +26140,17 @@
               "string",
               "null"
             ]
+          },
+          "modelSelectionIntent": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ModelSelectionIntent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Follow the saved selection, pin explicit settings, or restore automatic selection. Omission treats supplied model or effort settings as an explicit choice."
           },
           "outputSchema": {
             "description": "Optional JSON Schema used to constrain the final assistant message for this turn."
