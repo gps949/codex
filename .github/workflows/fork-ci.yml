@@ -48,6 +48,7 @@ jobs:
         run: |
           node codex-rs/app-server/src/account_management/web_lifecycle_browser_tests.cjs
           node codex-rs/app-server/src/account_management/web_reset_operations_tests.cjs
+          node codex-rs/app-server/src/account_management/web_routing_browser_tests.cjs
 
       - name: Fork installer and release gate regressions
         run: |
