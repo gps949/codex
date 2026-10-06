@@ -169,13 +169,33 @@ impl AccountManager {
             }
         }
         let document: toml_edit::DocumentMut = toml::to_string(&config)?.parse()?;
-        ConfigEditsBuilder::for_config(&self.config).with_edits([ConfigEdit::SetPath {
+        let previous = self.config.decision_advisor_snapshot().await?;
+        let routing = self.config.model_routing_snapshot().await?;
+        let reset_routing_consent = routing.source
+            == codex_config::ModelRoutingSource::DecisionService
+            && (previous.effective.provider != settings.provider
+                || previous.effective.endpoint != settings.endpoint
+                || matches!(credential, DecisionAdvisorCredentialAction::Remove));
+        let mut edits = vec![ConfigEdit::SetPath {
             segments: vec!["decision_advisor".into()],
             value: toml_edit::Item::Table(document.as_table().clone()),
-        }]).apply().await.map_err(|_| anyhow::anyhow!("Decision settings could not be saved. A requested credential change may already have been stored."))?;
+        }];
+        if reset_routing_consent {
+            edits.extend([
+                ConfigEdit::SetPath {
+                    segments: vec!["model_routing".into(), "mode".into()],
+                    value: toml_edit::value("off"),
+                },
+                ConfigEdit::SetPath {
+                    segments: vec!["model_routing".into(), "send_task_description".into()],
+                    value: toml_edit::value(false),
+                },
+            ]);
+        }
+        ConfigEditsBuilder::for_config(&self.config).with_edits(edits).apply().await.map_err(|_| anyhow::anyhow!("Decision settings could not be saved. A requested credential change may already have been stored."))?;
         let view = self.decision_advisor_view().await?;
         Ok(AccountManagerResult {
-            message: if view.overridden { "Decision settings saved locally. Higher-priority settings override this manager's effective configuration." } else { "Decision settings saved locally. Updated hosts read them on the next decision call; actual execution adoption has not been observed." }.into(),
+            message: if reset_routing_consent { "Decision service saved. Model routing is off until you confirm task sharing for the new service." } else if view.overridden { "Decision settings saved locally. Higher-priority settings override this manager's effective configuration." } else { "Decision settings saved locally. Updated hosts read them on the next decision call; actual execution adoption has not been observed." }.into(),
             data: serde_json::to_value(view)?,
         })
     }

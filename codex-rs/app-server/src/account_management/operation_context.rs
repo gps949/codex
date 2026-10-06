@@ -6,7 +6,13 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) enum AccountOperationContext {
     Independent,
+    // Retain cancellation-only scopes for legacy callers; they cannot select a thread.
+    #[allow(dead_code)]
     NativeMenu(CancellationToken),
+    ThreadMenu {
+        cancellation: CancellationToken,
+        thread: Arc<CodexThread>,
+    },
     AttachedMenu {
         cancellation: CancellationToken,
         thread: Arc<CodexThread>,
@@ -19,7 +25,7 @@ impl AccountOperationContext {
     pub(crate) async fn ensure_current(&self) -> anyhow::Result<()> {
         match self {
             Self::Independent => Ok(()),
-            Self::NativeMenu(cancellation) => {
+            Self::NativeMenu(cancellation) | Self::ThreadMenu { cancellation, .. } => {
                 anyhow::ensure!(
                     !cancellation.is_cancelled(),
                     "Account menu was closed before this operation was submitted"

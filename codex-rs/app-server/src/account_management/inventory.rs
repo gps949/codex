@@ -66,7 +66,14 @@ impl AccountManager {
                 resets_at: window.resets_at.map(|at| at.timestamp()),
                 window_minutes: window.window_minutes,
             };
-            let refresh = refreshes.get(record.profile.id.as_str()).cloned();
+            let refresh = self
+                .profile_identity(record.profile.id.as_str())
+                .ok()
+                .and_then(|owner| {
+                    refreshes
+                        .get(&(record.profile.id.to_string(), owner))
+                        .cloned()
+                });
             accounts.push(ManagedAccountView {
                 profile_id: record.profile.id.to_string(),
                 label: codex_login::account_display::account_display_name(
@@ -117,9 +124,10 @@ impl AccountManager {
             host_now: Utc::now().timestamp(),
             primary_login: Some(self.primary_login_view()),
             decision_advisor: self.decision_advisor_view().await.ok(),
+            model_routing: self.model_routing_view().await.ok(),
             reset_journals: reset_journal::inspect(&self.config.codex_home).unwrap_or_else(|_| vec![ResetJournalView {
                 file_name: String::new(), digest: String::new(), profile_id: None, attempted_at: None,
-                legacy: false, archive_available: false,
+                legacy: false, archive_available: false, manual: None,
                 message: "Reset records could not be inspected. Other account management remains available.".into(),
             }]),
             paused,

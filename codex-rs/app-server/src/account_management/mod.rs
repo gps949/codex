@@ -5,6 +5,9 @@ mod decision_advisor;
 pub use decision_advisor::DecisionAdvisorCredentialAction;
 pub use decision_advisor::DecisionAdvisorView;
 mod inventory;
+mod model_routing;
+pub use model_routing::ModelRoutingModelView;
+pub use model_routing::ModelRoutingView;
 mod login;
 mod operation_context;
 mod operations;
@@ -15,6 +18,7 @@ mod profile_identity;
 mod quota;
 mod reset_journal;
 mod selection;
+pub use crate::reset_credit_journal::ManualResetCreditReviewView;
 pub use reset_journal::ResetJournalView;
 mod warmup;
 pub use preferences::ManagerLanguage;
@@ -38,7 +42,7 @@ use tokio::sync::Mutex;
 /// Shared administration operations used by terminal and browser clients.
 pub struct AccountManager {
     config: Arc<Config>,
-    refreshes: Arc<std::sync::Mutex<HashMap<String, RefreshStatus>>>,
+    refreshes: Arc<std::sync::Mutex<HashMap<(String, String), RefreshStatus>>>,
     logins: Mutex<HashMap<String, login::LoginJob>>,
     login_shutdown: std::sync::atomic::AtomicBool,
 }
@@ -72,6 +76,7 @@ pub struct AccountManagerInventory {
     pub host_now: i64,
     pub primary_login: Option<PrimaryLoginView>,
     pub decision_advisor: Option<DecisionAdvisorView>,
+    pub model_routing: Option<ModelRoutingView>,
     pub reset_journals: Vec<ResetJournalView>,
     pub paused: bool,
     pub active_profile_id: Option<String>,
@@ -166,11 +171,35 @@ pub struct LoginProgress {
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AccountManagerOperation {
-    ResetJournalArchive {
-        file_name: String,
+    ThreadModelAutomatic,
+    ManualResetReview {
+        #[serde(rename = "ownerKey")]
+        owner_key: String,
+        #[serde(rename = "idempotencyKey")]
+        idempotency_key: String,
+        #[serde(rename = "expectedDigest")]
         expected_digest: String,
+        #[serde(rename = "acknowledgeUnconfirmed")]
         acknowledge_unconfirmed: bool,
     },
+    ResetJournalArchive {
+        #[serde(rename = "fileName", alias = "file_name")]
+        file_name: String,
+        #[serde(rename = "expectedDigest", alias = "expected_digest")]
+        expected_digest: String,
+        #[serde(rename = "acknowledgeUnconfirmed", alias = "acknowledge_unconfirmed")]
+        acknowledge_unconfirmed: bool,
+    },
+    RoutingSave {
+        config: codex_config::ModelRoutingConfigToml,
+        #[serde(default, rename = "expectedVersion")]
+        expected_version: Option<String>,
+    },
+    RoutingPreview {
+        task: String,
+        config: codex_config::ModelRoutingConfigToml,
+    },
+    RoutingRefreshModels,
     DecisionSave {
         config: codex_config::DecisionAdvisorConfigToml,
         credential: DecisionAdvisorCredentialAction,

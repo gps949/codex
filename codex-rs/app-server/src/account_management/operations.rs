@@ -24,6 +24,54 @@ impl AccountManager {
         context.ensure_current().await?;
         let mut data = serde_json::Value::Null;
         let message = match operation {
+            AccountManagerOperation::ThreadModelAutomatic => {
+                let thread = match context {
+                    AccountOperationContext::ThreadMenu { thread, .. }
+                    | AccountOperationContext::AttachedMenu { thread, .. } => thread,
+                    AccountOperationContext::Independent
+                    | AccountOperationContext::NativeMenu(_) => {
+                        anyhow::bail!(
+                            "Open this action in the account menu of the conversation to change."
+                        );
+                    }
+                };
+                thread
+                    .update_thread_settings(codex_protocol::protocol::ThreadSettingsOverrides {
+                        model_selection_intent: Some(
+                            codex_protocol::protocol::ModelSelectionIntent::Automatic,
+                        ),
+                        ..Default::default()
+                    })
+                    .await?;
+                "This thread follows the saved model policy for new tasks. Active work and the global policy are unchanged.".into()
+            }
+            AccountManagerOperation::RoutingSave {
+                config,
+                expected_version,
+            } => {
+                return self.save_model_routing(config, expected_version).await;
+            }
+            AccountManagerOperation::RoutingPreview { task, config } => {
+                return self.preview_model_routing(&task, config).await;
+            }
+            AccountManagerOperation::RoutingRefreshModels => {
+                return self.refresh_routing_models().await;
+            }
+            AccountManagerOperation::ManualResetReview {
+                owner_key,
+                idempotency_key,
+                expected_digest,
+                acknowledge_unconfirmed,
+            } => {
+                crate::reset_credit_journal::review_manual_reset(
+                    &self.config.codex_home,
+                    &owner_key,
+                    &idempotency_key,
+                    &expected_digest,
+                    acknowledge_unconfirmed,
+                )?;
+                "Original reset reviewed and backed up. Its outcome remains unknown; later operations may use another credit. Quota and account access were not changed.".into()
+            }
             AccountManagerOperation::ResetJournalArchive {
                 file_name,
                 expected_digest,
