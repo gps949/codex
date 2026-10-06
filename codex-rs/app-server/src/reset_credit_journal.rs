@@ -25,6 +25,11 @@ const BINDING_CHANGED: &str =
 const PENDING_OPERATION: &str =
     "an unconfirmed reset exists for this account; retry the original operation";
 
+#[path = "reset_credit_journal_review.rs"]
+mod review;
+pub use review::ManualResetCreditReviewView;
+pub(crate) use review::review_manual_reset;
+
 pub(crate) fn valid_owner_key(value: &str) -> bool {
     value.len() == 64
         && value
@@ -58,6 +63,11 @@ pub(crate) fn owner_key(base_url: &str, auth: &CodexAuth) -> Result<String, &'st
 #[serde(tag = "state", rename_all = "camelCase", deny_unknown_fields)]
 enum ManualResetCreditPhase {
     Pending,
+    /// An explicit acknowledgement releases new spending without claiming a backend result.
+    Reviewed {
+        #[serde(rename = "reviewedAt")]
+        reviewed_at: i64,
+    },
     Terminal {
         outcome: ConsumeAccountRateLimitResetCreditOutcome,
     },
@@ -81,6 +91,11 @@ impl ManualResetCreditRecord {
             && self.idempotency_key.len() <= MAX_IDEMPOTENCY_KEY_BYTES
             && !self.credit_id.is_empty()
             && self.credit_id.len() <= MAX_CREDIT_ID_BYTES
+            && match self.phase {
+                Some(ManualResetCreditPhase::Reviewed { reviewed_at }) => reviewed_at >= 0,
+                Some(ManualResetCreditPhase::Pending | ManualResetCreditPhase::Terminal { .. })
+                | None => true,
+            }
     }
 }
 
@@ -94,11 +109,18 @@ struct ManualResetCreditRecords {
 pub(crate) struct ManualResetCreditJournal {
     path: PathBuf,
     records: ManualResetCreditRecords,
+    source_bytes: Option<Vec<u8>>,
 }
 
 impl ManualResetCreditJournal {
     pub(crate) fn load(codex_home: &Path) -> Result<Self, &'static str> {
         let path = codex_home.join(JOURNAL_FILE_NAME);
+        if let Ok(metadata) = std::fs::symlink_metadata(&path)
+            && !metadata.is_file()
+        {
+            return Err(JOURNAL_UNAVAILABLE);
+        }
+        let mut source_bytes = None;
         let records = match std::fs::File::open(&path) {
             Ok(file) => {
                 let mut bytes = Vec::new();
@@ -124,6 +146,7 @@ impl ManualResetCreditJournal {
                 {
                     return Err(JOURNAL_INVALID);
                 }
+                source_bytes = Some(bytes);
                 records
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -134,7 +157,11 @@ impl ManualResetCreditJournal {
             }
             Err(_) => return Err(JOURNAL_UNAVAILABLE),
         };
-        Ok(Self { path, records })
+        Ok(Self {
+            path,
+            records,
+            source_bytes,
+        })
     }
 
     pub(crate) fn known_credit(
@@ -247,10 +274,14 @@ impl ManualResetCreditJournal {
             .iter()
             .position(|record| record.idempotency_key == idempotency_key)
         {
-            if self.records.operations[index].phase.is_none() {
+            if matches!(
+                self.records.operations[index].phase,
+                None | Some(ManualResetCreditPhase::Reviewed { .. })
+            ) {
+                let previous = self.records.operations[index].phase;
                 self.records.operations[index].phase = Some(ManualResetCreditPhase::Pending);
                 if let Err(error) = self.persist() {
-                    self.records.operations[index].phase = None;
+                    self.records.operations[index].phase = previous;
                     return Err(error);
                 }
             }
@@ -323,6 +354,7 @@ impl ManualResetCreditJournal {
         temporary
             .persist(&self.path)
             .map_err(|_| JOURNAL_UNAVAILABLE)?;
+        self.source_bytes = Some(bytes);
         #[cfg(unix)]
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())

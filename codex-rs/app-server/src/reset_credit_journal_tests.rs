@@ -238,3 +238,202 @@ fn latest_legacy_binding_requires_original_review_before_a_new_operation() {
         Ok(Some("old-credit"))
     );
 }
+
+#[test]
+fn explicit_review_releases_new_spending_without_inventing_a_terminal_outcome() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = "a".repeat(64);
+    let mut journal = ManualResetCreditJournal::load(home.path()).unwrap();
+    journal.remember(&owner, "original", "credit").unwrap();
+    let original = std::fs::read(home.path().join(JOURNAL_FILE_NAME)).unwrap();
+    let view = journal.review_views().unwrap().remove(0);
+    review_manual_reset(
+        home.path(),
+        &owner,
+        "original",
+        &view.digest,
+        /*acknowledge_unconfirmed*/ true,
+    )
+    .unwrap();
+    let mut reopened = ManualResetCreditJournal::load(home.path()).unwrap();
+    assert_eq!(reopened.pending_for_owner(&owner), None);
+    assert_eq!(reopened.terminal_outcome(&owner, "original"), Ok(None));
+    assert_eq!(
+        reopened.known_credit(&owner, "original", Some("credit")),
+        Ok(Some("credit"))
+    );
+    assert_eq!(
+        reopened.known_credit(&owner, "original", Some("another")),
+        Err(BINDING_CHANGED)
+    );
+    assert!(!codex_login::automatic_reset_spending_blocked(home.path()).unwrap());
+    let archived = std::fs::read_dir(home.path().join(".reset-credit-journal-archive"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        std::fs::read(archived.join(JOURNAL_FILE_NAME)).unwrap(),
+        original
+    );
+    reopened.remember(&owner, "replacement", "another").unwrap();
+}
+
+#[test]
+fn latest_legacy_review_keeps_older_bindings_and_rejects_stale_confirmation() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = "a".repeat(64);
+    let path = home.path().join(JOURNAL_FILE_NAME);
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({"version":1,"operations":[
+            {"ownerDigest":owner,"idempotencyKey":"old","creditId":"old-credit"},
+            {"ownerDigest":owner,"idempotencyKey":"latest","creditId":"latest-credit"}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let view = ManualResetCreditJournal::load(home.path())
+        .unwrap()
+        .review_views()
+        .unwrap()
+        .remove(0);
+    let original = std::fs::read(&path).unwrap();
+    assert!(
+        review_manual_reset(
+            home.path(),
+            &owner,
+            "latest",
+            &view.digest,
+            /*acknowledge_unconfirmed*/ false
+        )
+        .is_err()
+    );
+    assert!(
+        review_manual_reset(
+            home.path(),
+            &"b".repeat(64),
+            "latest",
+            &view.digest,
+            /*acknowledge_unconfirmed*/ true
+        )
+        .is_err()
+    );
+    assert!(
+        review_manual_reset(
+            home.path(),
+            &owner,
+            "old",
+            &view.digest,
+            /*acknowledge_unconfirmed*/ true
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    review_manual_reset(
+        home.path(),
+        &owner,
+        "latest",
+        &view.digest,
+        /*acknowledge_unconfirmed*/ true,
+    )
+    .unwrap();
+    assert!(
+        review_manual_reset(
+            home.path(),
+            &owner,
+            "latest",
+            &view.digest,
+            /*acknowledge_unconfirmed*/ true
+        )
+        .is_err()
+    );
+    let reopened = ManualResetCreditJournal::load(home.path()).unwrap();
+    assert!(reopened.review_views().unwrap().is_empty());
+    assert_eq!(
+        reopened.known_credit(&owner, "old", /*expected_credit_id*/ None),
+        Ok(Some("old-credit"))
+    );
+    assert!(!codex_login::automatic_reset_spending_blocked(home.path()).unwrap());
+}
+
+#[test]
+fn replay_of_a_reviewed_original_reestablishes_the_pending_barrier() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = "a".repeat(64);
+    let mut journal = ManualResetCreditJournal::load(home.path()).unwrap();
+    journal.remember(&owner, "original", "credit").unwrap();
+    let view = journal.review_views().unwrap().remove(0);
+    review_manual_reset(
+        home.path(),
+        &owner,
+        "original",
+        &view.digest,
+        /*acknowledge_unconfirmed*/ true,
+    )
+    .unwrap();
+    let mut journal = ManualResetCreditJournal::load(home.path()).unwrap();
+    journal.remember(&owner, "original", "credit").unwrap();
+    assert_eq!(
+        journal.pending_for_owner(&owner),
+        Some(PendingAccountRateLimitResetCredit {
+            owner_key: owner,
+            idempotency_key: "original".into(),
+            credit_id: Some("credit".into()),
+        })
+    );
+    assert!(codex_login::automatic_reset_spending_blocked(home.path()).unwrap());
+}
+
+#[test]
+fn manual_review_refuses_a_busy_lock_and_never_changes_auth_or_quota() {
+    let home = tempfile::tempdir().unwrap();
+    let owner = "a".repeat(64);
+    let mut journal = ManualResetCreditJournal::load(home.path()).unwrap();
+    journal.remember(&owner, "original", "credit").unwrap();
+    let original = std::fs::read(home.path().join(JOURNAL_FILE_NAME)).unwrap();
+    let view = journal.review_views().unwrap().remove(0);
+    std::fs::write(home.path().join("auth.json"), b"synthetic-auth-evidence").unwrap();
+    std::fs::write(
+        home.path().join("account-runtime-state.json"),
+        b"synthetic-quota-evidence",
+    )
+    .unwrap();
+    let store = codex_login::AccountRuntimeStateStore::new(home.path().to_path_buf());
+    let lock = store.try_lock_reset_credit().unwrap().unwrap();
+    assert!(
+        review_manual_reset(
+            home.path(),
+            &owner,
+            "original",
+            &view.digest,
+            /*acknowledge_unconfirmed*/ true
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(home.path().join(JOURNAL_FILE_NAME)).unwrap(),
+        original
+    );
+    assert!(!home.path().join(".reset-credit-journal-archive").exists());
+    drop(lock);
+    review_manual_reset(
+        home.path(),
+        &owner,
+        "original",
+        &view.digest,
+        /*acknowledge_unconfirmed*/ true,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            std::fs::read(home.path().join("auth.json")).unwrap(),
+            std::fs::read(home.path().join("account-runtime-state.json")).unwrap()
+        ),
+        (
+            b"synthetic-auth-evidence".to_vec(),
+            b"synthetic-quota-evidence".to_vec()
+        )
+    );
+}
