@@ -168,6 +168,7 @@ mod auth_keyring;
 mod decision_advisor;
 pub use decision_advisor::resolve as resolve_decision_advisor_settings;
 mod decision_advisor_current;
+mod model_routing;
 pub use decision_advisor_current::DecisionAdvisorSnapshot;
 pub mod edit;
 mod managed_features;
@@ -625,6 +626,10 @@ pub struct Config {
 
     /// Optional override of model selection.
     pub model: Option<String>,
+    /// Records an explicit startup model/effort choice before resolving catalog defaults.
+    pub model_selection_is_explicit: bool,
+    /// A request/CLI choice wins over resumed ownership; FollowThread marks restored metadata.
+    pub model_selection_override: Option<codex_protocol::protocol::ModelSelectionIntent>,
 
     /// Effective service tier request id preference for new turns.
     /// `default` means the user explicitly selected standard routing.
@@ -886,6 +891,7 @@ pub struct Config {
 
     /// Optional independent semantic ranking for deferred tool-search results.
     pub decision_advisor: codex_model_provider::DecisionAdvisorSettings,
+    pub model_routing: codex_config::ModelRoutingConfigToml,
     decision_advisor_source: Option<decision_advisor_current::DecisionAdvisorLocalSource>,
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
@@ -2644,6 +2650,7 @@ fn resolve_permission_config_syntax(
 #[derive(Default, Debug, Clone)]
 pub struct ConfigOverrides {
     pub model: Option<String>,
+    pub model_selection_intent: Option<codex_protocol::protocol::ModelSelectionIntent>,
     pub review_model: Option<String>,
     pub cwd: Option<PathBuf>,
     pub approval_policy: Option<AskForApproval>,
@@ -3341,6 +3348,7 @@ impl Config {
         // Destructure ConfigOverrides fully to ensure all overrides are applied.
         let ConfigOverrides {
             model,
+            model_selection_intent,
             review_model: override_review_model,
             cwd,
             approval_policy: approval_policy_override,
@@ -3366,6 +3374,15 @@ impl Config {
             additional_writable_roots,
             workspace_roots: workspace_roots_override,
         } = overrides;
+        let model_selection_override = model_selection_intent.or_else(|| {
+            (model.is_some() || model_provider.is_some()
+                || config_layer_stack.layers_low_to_high().any(|layer| {
+                    matches!(layer.name, codex_config::ConfigLayerSource::SessionFlags)
+                        && (layer.config.get("model").is_some()
+                            || layer.config.get("model_reasoning_effort").is_some())
+                }))
+                .then_some(codex_protocol::protocol::ModelSelectionIntent::Explicit)
+        });
         let bypass_hook_trust = bypass_hook_trust.unwrap_or_default();
 
         if bypass_hook_trust {
@@ -3978,6 +3995,7 @@ impl Config {
         let forced_login_method = cfg.forced_login_method;
 
         let model = model.or(cfg.model);
+        let model_selection_is_explicit = model.is_some() || cfg.model_reasoning_effort.is_some();
         let notices = cfg.notice.unwrap_or_default();
         let service_tier = match service_tier_override {
             Some(Some(service_tier)) => Some(service_tier),
@@ -4347,6 +4365,9 @@ impl Config {
                 ),
             },
             decision_advisor: decision_advisor::resolve(cfg.decision_advisor.as_ref())?,
+            model_routing: model_routing::resolve(cfg.model_routing.as_ref())?,
+            model_selection_is_explicit,
+            model_selection_override,
             decision_advisor_source: None,
             account_pool: cfg.account_pool.unwrap_or_default(),
             mcp_servers,

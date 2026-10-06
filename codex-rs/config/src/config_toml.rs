@@ -210,6 +210,9 @@ pub struct ConfigToml {
     /// Optional semantic tool-search advisor, disabled unless explicitly configured.
     pub decision_advisor: Option<DecisionAdvisorConfigToml>,
 
+    /// Independent task model selection, disabled by default.
+    pub model_routing: Option<crate::ModelRoutingConfigToml>,
+
     pub browser_use: Option<BrowserUseConfigToml>,
 
     pub computer_use: Option<ComputerUseConfigToml>,

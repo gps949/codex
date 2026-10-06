@@ -2958,6 +2958,100 @@
       },
       "type": "object"
     },
+    "ModelRoutingConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_models": {
+          "default": [],
+          "description": "Empty uses the supported catalog profiles; otherwise models must match exactly.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "local_fallback": {
+          "default": false,
+          "description": "Optional local decision when the selected decision service is unavailable.",
+          "type": "boolean"
+        },
+        "main_tasks": {
+          "default": true,
+          "description": "Select models for new root user tasks. Steering and recovery retain the admitted choice.",
+          "type": "boolean"
+        },
+        "max_effort": {
+          "default": "high",
+          "description": "Highest automatically selected effort; Ultra is never enabled automatically.",
+          "type": "string"
+        },
+        "mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ModelRoutingMode"
+            }
+          ],
+          "default": "off"
+        },
+        "model_roles": {
+          "additionalProperties": {
+            "$ref": "#/definitions/ModelRoutingRole"
+          },
+          "default": {},
+          "description": "Optional user-defined relative roles for exact model names.",
+          "type": "object"
+        },
+        "preference": {
+          "default": 50,
+          "description": "0 favors longer use; 100 favors capability. This is not a measured usage multiplier.",
+          "format": "uint8",
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "send_task_description": {
+          "default": false,
+          "description": "Independent consent to send a bounded task description to Jev/Clef.",
+          "type": "boolean"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ModelRoutingSource"
+            }
+          ],
+          "default": "local"
+        },
+        "subagents": {
+          "default": true,
+          "description": "Select models for fresh or partial-history children without explicit or role pins.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ModelRoutingMode": {
+      "enum": [
+        "off",
+        "preview",
+        "automatic"
+      ],
+      "type": "string"
+    },
+    "ModelRoutingRole": {
+      "enum": [
+        "economy",
+        "balanced",
+        "capability"
+      ],
+      "type": "string"
+    },
+    "ModelRoutingSource": {
+      "enum": [
+        "local",
+        "decision_service"
+      ],
+      "type": "string"
+    },
     "MultiAgentV2ConfigToml": {
       "additionalProperties": false,
       "properties": {
@@ -7693,6 +7787,14 @@
     },
     "model_reasoning_summary": {
       "$ref": "#/definitions/ReasoningSummary"
+    },
+    "model_routing": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ModelRoutingConfigToml"
+        }
+      ],
+      "description": "Independent task model selection, disabled by default."
     },
     "model_verbosity": {
       "allOf": [

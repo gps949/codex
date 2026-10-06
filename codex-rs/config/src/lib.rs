@@ -29,6 +29,7 @@ mod mcp_requirements;
 mod mcp_types;
 mod merge;
 mod model_provider_requirements;
+mod model_routing;
 mod overrides;
 mod path_context;
 pub mod permissions_toml;
@@ -235,3 +236,8 @@ pub use thread_config::ThreadConfigLoaderFuture;
 pub use thread_config::ThreadConfigSource;
 pub use thread_config::UserThreadConfig;
 pub use toml::Value as TomlValue;
+
+pub use model_routing::ModelRoutingConfigToml;
+pub use model_routing::ModelRoutingMode;
+pub use model_routing::ModelRoutingRole;
+pub use model_routing::ModelRoutingSource;
