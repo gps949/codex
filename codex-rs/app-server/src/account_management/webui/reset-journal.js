@@ -2,6 +2,25 @@
 
 (() => {
   const { t } = window.AccountManagerMessages;
+  function review(journal, api) {
+    const manual = journal.manual;
+    api.confirmOperation(
+      "Review unconfirmed reset?",
+      "Independently check the original account's quota and credit history first. This credit may already have been consumed. Review keeps the original account, credit and operation binding with a backup; the outcome stays unknown. Later operations may use another credit. Quota and account access stay unchanged.",
+      {
+        type: "manualResetReview",
+        ownerKey: manual.ownerKey,
+        idempotencyKey: manual.idempotencyKey,
+        expectedDigest: manual.digest,
+        acknowledgeUnconfirmed: true,
+      },
+      [
+        ["Operation ID", manual.idempotencyKey],
+        ["Credit ID", manual.creditId],
+        ["Outcome", t("Unknown; independent review required")],
+      ],
+    );
+  }
   function render(journals, api) {
     const panel = document.getElementById("reset-journals");
     panel.replaceChildren();
@@ -29,6 +48,14 @@
         ),
       );
       row.append(api.element("small", t(journal.message)));
+      if (journal.manual) {
+        row.append(api.element("small", journal.manual.idempotencyKey));
+        const action = api.button("Review unconfirmed reset", () =>
+          review(journal, api),
+        );
+        action.disabled = api.busy;
+        row.append(action);
+      }
       if (journal.archiveAvailable) {
         const archive = api.button("Archive reviewed record", () =>
           api.confirmOperation(
@@ -48,5 +75,5 @@
       panel.append(row);
     }
   }
-  window.AccountManagerResetJournal = Object.freeze({ render });
+  window.AccountManagerResetJournal = Object.freeze({ render, review });
 })();

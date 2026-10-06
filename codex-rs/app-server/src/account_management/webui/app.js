@@ -15,7 +15,6 @@
     inventoryKey: "",
     readFailed: false,
     page: 0,
-    redemption: null,
     sessionToken: "",
     stopped: false,
     preferencesLoaded: false,
@@ -23,6 +22,14 @@
     languageDirty: false,
   };
   const resetStorageKey = "codex.accountManager.resetOperation";
+  const resetOperations = window.AccountManagerResetOperations.create(
+    {
+      getItem: (key) => sessionStorage.getItem(key),
+      setItem: (key, value) => sessionStorage.setItem(key, value),
+      removeItem: (key) => sessionStorage.removeItem(key),
+    },
+    resetStorageKey,
+  );
   const sessionStorageKey = "codex.accountManager.sessionToken";
   const pageSize = 8;
   const statusNames = guidance.names;
@@ -445,6 +452,14 @@
       showResult,
       busy: state.busy,
     });
+    window.AccountManagerRouting.render(inventory.modelRouting, {
+      element,
+      field,
+      button,
+      perform,
+      operation,
+      busy: state.busy,
+    });
     window.AccountManagerPrimary.render(
       inventory.primaryLogin,
       confirmOperation,
@@ -505,7 +520,8 @@
       !inventory.accounts.some(
         (account) => contactAllowed(account) && !account.refresh?.inProgress,
       );
-    $("pending-reset").hidden = !state.redemption;
+    $("pending-reset").hidden =
+      !resetOperations.problem && resetOperations.all().length === 0;
     renderAccounts();
     renderLogins();
     renderApiAccounts();
@@ -1257,29 +1273,26 @@
             "The pending reset could not be verified. Reload credits before retrying.",
           ),
         );
-      if (recovered && !state.redemption) {
-        saveRedemption({
+      if (recovered) {
+        const existing = resetOperations.current(
+          id,
+          recovered.ownerKey,
+          recovered.idempotencyKey,
+        );
+        resetOperations.recover({
           profileId: id,
           creditId: recovered.creditId,
           idempotencyKey: recovered.idempotencyKey,
           ownerKey: recovered.ownerKey,
-          startedAt: readAt,
+          startedAt: existing?.startedAt ?? readAt,
         });
-      } else if (
-        recovered &&
-        state.redemption &&
-        ((!state.redemption.ownerKey && state.redemption.profileId === id) ||
-          state.redemption.ownerKey === recovered.ownerKey) &&
-        state.redemption.idempotencyKey === recovered.idempotencyKey &&
-        state.redemption.creditId === recovered.creditId
-      ) {
-        saveRedemption({
-          ...state.redemption,
-          profileId: id,
-          ownerKey: recovered.ownerKey,
-        });
+        $("pending-reset").hidden = false;
       }
-      const pending = state.redemption;
+      const pending = resetOperations.current(
+        id,
+        result.data.resetOwnerKey,
+        recovered?.idempotencyKey,
+      );
       const eligible = result.data.credits
         .filter(
           (credit) =>
@@ -1296,6 +1309,7 @@
       const selected = pending
         ? pending.profileId === id &&
           verifiedResetTuple(pending) &&
+          pending.ownerKey === result.data.resetOwnerKey &&
           (result.data.credits.find(
             (credit) => credit.id === pending.creditId,
           ) || {
@@ -1306,7 +1320,16 @@
             expiresAt: null,
           })
         : eligible[0];
-      if (selected) showRedemption(id, selected, { data: result.data, readAt });
+      const changedOwner = resetOperations
+        .all()
+        .some(
+          (record) =>
+            record.profileId === id &&
+            record.ownerKey &&
+            record.ownerKey !== result.data.resetOwnerKey,
+        );
+      if (selected && (!changedOwner || recovered))
+        showRedemption(id, selected, { data: result.data, readAt });
       else showCredits(id, result.data, readAt);
       if (
         result.data.inventoryError !== null &&
@@ -1344,7 +1367,11 @@
   }
   function showCredits(id, data, readAt) {
     const account = accountById(id);
-    const pending = state.redemption;
+    const pending = resetOperations.current(
+      id,
+      data.resetOwnerKey,
+      data.pendingResetCredit?.idempotencyKey,
+    );
     const inventoryWarning = creditInventoryWarning(data);
     openDialog(
       t("Choose a reset credit"),
@@ -1365,6 +1392,32 @@
           ]),
         );
         if (inventoryWarning) body.append(inventoryWarning);
+        for (const original of resetOperations
+          .all()
+          .filter(
+            (record) =>
+              record.profileId === id &&
+              record.ownerKey &&
+              (record.ownerKey !== data.resetOwnerKey ||
+                (data.pendingResetCredit &&
+                  record.idempotencyKey !==
+                    data.pendingResetCredit.idempotencyKey)),
+          )) {
+          body.append(
+            element(
+              "p",
+              t(
+                "An earlier original operation is retained separately. Review its account and outcome before clearing this browser's retry record.",
+              ),
+              "message warning",
+            ),
+          );
+          appendResetReview(body, original, {
+            ownerChanged: original.ownerKey !== data.resetOwnerKey,
+            serverDifferent: true,
+            readAt,
+          });
+        }
         if (!contactAllowed(account))
           body.append(
             element(
@@ -1402,6 +1455,7 @@
           );
           select.disabled =
             Boolean(inventoryWarning) ||
+            resetOperations.problem ||
             !contactAllowed(account) ||
             !creditValidity(credit).eligible ||
             Boolean(
@@ -1470,40 +1524,48 @@
       },
     );
   }
-  function verifiedResetTuple(value) {
-    return Boolean(
-      value &&
-        typeof value.ownerKey === "string" &&
-        /^[a-f0-9]{64}$/.test(value.ownerKey) &&
-        typeof value.creditId === "string" &&
-        value.creditId.length > 0 &&
-        value.creditId.length <= 256 &&
-        typeof value.idempotencyKey === "string" &&
-        value.idempotencyKey.length > 0 &&
-        value.idempotencyKey.length <= 128,
-    );
-  }
+  const verifiedResetTuple = window.AccountManagerResetOperations.verified;
   function saveRedemption(value) {
-    if (value && !verifiedResetTuple(value))
-      throw new Error(
-        t(
-          "The pending reset could not be verified. Reload credits before retrying.",
+    resetOperations.put(value);
+    $("pending-reset").hidden = false;
+  }
+  function clearRedemption(value) {
+    resetOperations.remove(value);
+    $("pending-reset").hidden = resetOperations.all().length === 0;
+  }
+  function appendResetReview(body, pending, evidence) {
+    const journal = state.inventory?.resetJournals?.find(
+      (record) =>
+        record.manual?.ownerKey === pending.ownerKey &&
+        record.manual.idempotencyKey === pending.idempotencyKey,
+    );
+    if (journal)
+      body.append(
+        button("Review original server operation", () =>
+          window.AccountManagerResetJournal.review(journal, {
+            confirmOperation,
+          }),
         ),
       );
-    try {
-      if (value) sessionStorage.setItem(resetStorageKey, JSON.stringify(value));
-      else sessionStorage.removeItem(resetStorageKey);
-    } catch {
-      throw new Error(
-        t(
-          "Browser session storage is unavailable. Enable it before consuming a credit so an uncertain operation can be retried safely.",
+    if (
+      evidence.profileMissing ||
+      evidence.ownerChanged ||
+      evidence.serverDifferent ||
+      (evidence.serverHasNoPending && !journal) ||
+      !verifiedResetTuple(pending)
+    )
+      body.append(
+        button("Clear reviewed operation", () =>
+          confirmOperationClear(pending, evidence),
         ),
       );
-    }
-    state.redemption = value;
-    $("pending-reset").hidden = !value;
   }
   function showRedemption(id, credit, context = null) {
+    const original = resetOperations.current(
+      id,
+      context?.data?.resetOwnerKey,
+      context?.data?.pendingResetCredit?.idempotencyKey,
+    );
     const inventoryWarning = creditInventoryWarning(context?.data);
     openDialog(
       t("Use this reset credit"),
@@ -1521,13 +1583,46 @@
           ]),
         );
         if (inventoryWarning) body.append(inventoryWarning);
-        if (state.redemption)
+        if (original)
           body.append(
-            definitions([
-              ["Existing operation ID", state.redemption.idempotencyKey],
-            ]),
+            definitions([["Existing operation ID", original.idempotencyKey]]),
           );
-        if (context && !state.redemption) {
+        if (original && context)
+          appendResetReview(body, original, {
+            serverHasNoPending:
+              !inventoryWarning &&
+              context.data.pendingResetCredit === null &&
+              context.data.resetOwnerKey === original.ownerKey,
+            credit,
+            readAt: context.readAt,
+          });
+        for (const prior of resetOperations
+          .all()
+          .filter(
+            (record) =>
+              record.profileId === id &&
+              record.ownerKey &&
+              (record.ownerKey !== context?.data?.resetOwnerKey ||
+                (context?.data?.pendingResetCredit &&
+                  record.idempotencyKey !==
+                    context.data.pendingResetCredit.idempotencyKey)),
+          )) {
+          body.append(
+            element(
+              "p",
+              t(
+                "An earlier original operation is retained separately. Review its account and outcome before clearing this browser's retry record.",
+              ),
+              "message warning",
+            ),
+          );
+          appendResetReview(body, prior, {
+            ownerChanged: prior.ownerKey !== context?.data?.resetOwnerKey,
+            serverDifferent: true,
+            readAt: context?.readAt,
+          });
+        }
+        if (context && !original) {
           body.append(
             element(
               "p",
@@ -1553,11 +1648,8 @@
       },
       async () => {
         const replay =
-          state.redemption?.profileId === id &&
-          state.redemption.creditId === credit.id;
-        const owner = replay
-          ? state.redemption.ownerKey
-          : context?.data?.resetOwnerKey;
+          original?.profileId === id && original.creditId === credit.id;
+        const owner = replay ? original.ownerKey : context?.data?.resetOwnerKey;
         if (
           typeof owner !== "string" ||
           !/^[a-f0-9]{64}$/.test(owner) ||
@@ -1577,7 +1669,23 @@
               "This credit or account is no longer eligible. Read the current details first.",
             ),
           );
-        let pending = state.redemption;
+        let pending = resetOperations.current(
+          id,
+          owner,
+          original?.idempotencyKey,
+        );
+        if (
+          original &&
+          (!pending ||
+            pending.idempotencyKey !== original.idempotencyKey ||
+            pending.creditId !== original.creditId ||
+            pending.ownerKey !== original.ownerKey)
+        )
+          throw new Error(
+            t(
+              "The pending reset operation changed. Review its current record again.",
+            ),
+          );
         if (
           pending &&
           (pending.profileId !== id || pending.creditId !== credit.id)
@@ -1611,7 +1719,7 @@
             idempotencyKey: pending.idempotencyKey,
             expectedOwnerKey: pending.ownerKey,
           });
-          saveRedemption(null);
+          clearRedemption(pending);
         } catch (error) {
           throw new Error(
             t(
@@ -1621,9 +1729,7 @@
           );
         }
       },
-      state.redemption
-        ? "Retry same credit operation"
-        : "Consume selected credit",
+      original ? "Retry same credit operation" : "Consume selected credit",
     );
   }
   function confirmOperationClear(pending, evidence) {
@@ -1635,7 +1741,13 @@
         ? "A fresh account read shows the original profile is no longer enrolled. Its redemption outcome cannot be checked here. Clear only this browser's retry record after reviewing the uncertainty; no credit will be consumed."
         : !verifiedResetTuple(pending)
           ? "This legacy retry record has no verified account binding. Review the original outcome before clearing this local record. No credit is consumed."
-          : "The latest successful credit read shows this credit is absent or unavailable. This does not prove whether the earlier operation consumed it. Clear only this browser's retry record; no credit will be consumed.",
+          : evidence.ownerChanged
+            ? "The profile now belongs to another account identity. Clear only this browser's retry record after independently reviewing the original outcome. Server spending restrictions remain until its record is explicitly reviewed. No credit is consumed."
+            : evidence.serverDifferent
+              ? "The server reports a different original operation. This browser's older record is retained separately. Clear only its browser retry record after independently checking the earlier outcome. Server spending restrictions remain unchanged. No credit is consumed."
+              : evidence.serverHasNoPending
+                ? "The latest account read reports no unresolved original reset. This does not prove whether it consumed a credit. Clear only this browser's retained retry record after independently reviewing its outcome. Server history and spending restrictions remain unchanged. No credit is consumed."
+                : "The latest successful credit read shows this credit is absent or unavailable. This does not prove whether the earlier operation consumed it. Clear only this browser's retry record; no credit will be consumed.",
       (body) => {
         body.append(
           definitions([
@@ -1645,13 +1757,21 @@
               "Review evidence",
               evidence.profileMissing
                 ? t("Profile absent from current inventory")
-                : !verifiedResetTuple(pending)
-                  ? t("Retry record has no verified account binding")
-                  : credit
-                    ? t("Credit unavailable ({status})", {
-                        status: credit.status,
-                      })
-                    : t("Credit absent from latest returned list"),
+                : evidence.ownerChanged
+                  ? t("Profile now belongs to another account identity")
+                  : evidence.serverDifferent
+                    ? t("Server reports a different original operation")
+                    : evidence.serverHasNoPending
+                      ? t(
+                          "No unresolved original reset returned by the latest account read",
+                        )
+                      : !verifiedResetTuple(pending)
+                        ? t("Retry record has no verified account binding")
+                        : credit
+                          ? t("Credit unavailable ({status})", {
+                              status: credit.status,
+                            })
+                          : t("Credit absent from latest returned list"),
             ],
             [
               "Validity",
@@ -1667,7 +1787,7 @@
           "I reviewed this operation and accept that its outcome may remain unknown. Clear its retry record.",
           "checkbox",
           false,
-          "Clearing allows a different manual credit operation. The old operation will not be retried or consumed by this action.",
+          "Clearing only removes this browser's retry record. Server spending restrictions remain until the original operation is completed or explicitly reviewed. No credit is consumed.",
           { required: true },
         );
       },
@@ -1678,7 +1798,16 @@
               "Acknowledge the unconfirmed outcome before clearing this record.",
             ),
           );
-        if (state.redemption?.idempotencyKey !== pending.idempotencyKey)
+        if (
+          !resetOperations
+            .all()
+            .some(
+              (record) =>
+                record.idempotencyKey === pending.idempotencyKey &&
+                record.ownerKey === pending.ownerKey &&
+                record.creditId === pending.creditId,
+            )
+        )
           throw new Error(
             t(
               "The pending reset operation changed. Review its current record again.",
@@ -1690,7 +1819,7 @@
               "This profile has reappeared. Inspect its current credits before clearing the record.",
             ),
           );
-        saveRedemption(null);
+        clearRedemption(pending);
         dialogCompleted = true;
         showResult("Reviewed operation record cleared.");
         $("dialog-submit").disabled = true;
@@ -1699,59 +1828,64 @@
     );
   }
   async function showPendingReset() {
-    const pending = state.redemption;
-    if (!pending) return;
-    openDialog(
-      t("Unconfirmed reset operation"),
-      "Reading current account status before reviewing this operation…",
-      (body) =>
-        body.append(
-          definitions([
-            ["Profile ID", pending.profileId],
-            ["Credit ID", pending.creditId],
-            ["Operation ID", pending.idempotencyKey],
-          ]),
-        ),
-    );
+    if (resetOperations.problem) {
+      openDialog(
+        t("Unconfirmed reset operation"),
+        "Stored reset operations could not be verified. Review the original records before starting another reset.",
+        (body) =>
+          body.append(
+            element(
+              "p",
+              t(
+                "Use the interrupted reset records below to review server operations. Browser storage must be repaired before new reset operations can be saved.",
+              ),
+            ),
+          ),
+      );
+      return;
+    }
+    const pending = resetOperations.all();
+    if (!pending.length) return;
     setBusy(true);
     try {
       await readInventory();
     } catch (error) {
       setBusy(false);
-      showResult(error.message, true);
+      notice(error.message, true);
       return;
     }
     setBusy(false);
-    const account = accountById(pending.profileId);
-    const readAt = Math.floor(state.lastRead / 1000);
     openDialog(
-      t("Unconfirmed reset operation"),
-      "It may have reached the backend. Refresh quota and inspect the credit status before retrying. A retry keeps this operation ID.",
+      t("Unconfirmed reset operations"),
+      "Each original account and operation is retained separately. Inspect its current quota and credit history before explicitly retrying or reviewing it.",
       (body) => {
-        body.append(
-          definitions([
-            ["Account", account?.label || t("Profile no longer enrolled")],
-            ["Profile ID", pending.profileId],
-            ["Credit ID", pending.creditId],
-            ["Operation ID", pending.idempotencyKey],
-            ["Started", date(pending.startedAt)],
-          ]),
-        );
-        const actions = element("div", "", "actions");
-        if (account)
-          actions.append(
-            button("Refresh quota", () => refreshQuota([pending.profileId])),
-            button("Inspect credit status", () =>
-              loadCredits(pending.profileId),
-            ),
+        for (const record of pending) {
+          const account = accountById(record.profileId);
+          const section = element("div", "", "credit-choice");
+          section.append(
+            definitions([
+              ["Account", account?.label || t("Profile no longer enrolled")],
+              ["Profile ID", record.profileId],
+              ["Credit ID", record.creditId],
+              ["Operation ID", record.idempotencyKey],
+              ["Started", date(record.startedAt)],
+            ]),
           );
-        else
-          actions.append(
-            button("Clear reviewed operation", () =>
-              confirmOperationClear(pending, { profileMissing: true, readAt }),
-            ),
-          );
-        body.append(actions);
+          const actions = element("div", "", "actions");
+          if (contactAllowed(account))
+            actions.append(
+              button("Refresh quota", () => refreshQuota([record.profileId])),
+              button("Inspect credit status", () =>
+                loadCredits(record.profileId),
+              ),
+            );
+          appendResetReview(actions, record, {
+            profileMissing: !account,
+            readAt: Math.floor(state.lastRead / 1000),
+          });
+          section.append(actions);
+          body.append(section);
+        }
       },
     );
   }
@@ -2666,19 +2800,6 @@
     else sessionStorage.removeItem(sessionStorageKey);
   } catch {
     /* Pairing can stay in memory when session storage is unavailable. */
-  }
-  try {
-    const saved = JSON.parse(sessionStorage.getItem(resetStorageKey) || "null");
-    if (
-      saved &&
-      [saved.profileId, saved.creditId, saved.idempotencyKey].every(
-        (value) =>
-          typeof value === "string" && value.length > 0 && value.length <= 256,
-      )
-    )
-      state.redemption = saved;
-  } catch {
-    /* Pairing and browsing do not require session storage. */
   }
   window.AccountManagerUI = Object.freeze({
     element,
