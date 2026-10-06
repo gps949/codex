@@ -140,11 +140,47 @@ fn router(state: WebState) -> Router {
             }),
         )
         .route(
+            "/routing.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/routing.js"),
+                )
+            }),
+        )
+        .route(
+            "/routing-messages.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/routing-messages.js"),
+                )
+            }),
+        )
+        .route(
+            "/routing.css",
+            get(|| async {
+                (
+                    [("content-type", "text/css; charset=utf-8")],
+                    include_str!("webui/routing.css"),
+                )
+            }),
+        )
+        .route(
             "/reset-journal.js",
             get(|| async {
                 (
                     [("content-type", "text/javascript; charset=utf-8")],
                     include_str!("webui/reset-journal.js"),
+                )
+            }),
+        )
+        .route(
+            "/reset-operations.js",
+            get(|| async {
+                (
+                    [("content-type", "text/javascript; charset=utf-8")],
+                    include_str!("webui/reset-operations.js"),
                 )
             }),
         )
@@ -378,6 +414,7 @@ async fn operation(
     let result = match operation {
         operation @ (AccountManagerOperation::Refresh { .. }
         | AccountManagerOperation::Credits { .. }
+        | AccountManagerOperation::RoutingRefreshModels
         | AccountManagerOperation::DecisionProbe { .. }) => {
             tokio::select! {
                 result = state.manager.execute(operation) => result,

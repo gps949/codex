@@ -1,0 +1,53 @@
+#model-routing .routing-form {
+  margin-top: 16px;
+}
+#model-routing .routing-switches,
+#model-routing .routing-scale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+#model-routing input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+  padding: 0;
+  min-height: 32px;
+}
+#model-routing .routing-scale {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+#model-routing output {
+  min-width: 3ch;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+#model-routing .routing-model {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+}
+#model-routing .routing-model label {
+  overflow-wrap: anywhere;
+}
+#model-routing .routing-model .form-field {
+  min-width: 0;
+}
+#model-routing .routing-conflict {
+  margin-top: 12px;
+}
+@media (max-width: 560px) {
+  #model-routing .routing-switches {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0;
+  }
+  #model-routing .routing-model {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+}

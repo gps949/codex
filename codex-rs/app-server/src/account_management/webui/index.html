@@ -6,13 +6,17 @@
     <meta name="color-scheme" content="light dark" />
     <title data-i18n="Codex Accounts">Codex Accounts</title>
     <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/routing.css" />
     <script src="/messages.js" defer></script>
     <script src="/guidance.js" defer></script>
     <script src="/lifecycle.js" defer></script>
     <script src="/primary.js" defer></script>
     <script src="/warmup.js" defer></script>
     <script src="/decision.js" defer></script>
+    <script src="/routing-messages.js" defer></script>
+    <script src="/routing.js" defer></script>
     <script src="/reset-journal.js" defer></script>
+    <script src="/reset-operations.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -101,7 +105,6 @@
       </section>
       <div id="dashboard" hidden>
         <section id="host-login" class="panel" hidden></section>
-        <section id="decision-assistance" class="panel"></section>
         <section id="reset-journals" class="panel" hidden></section>
         <section class="selection panel" aria-labelledby="selection-title">
           <div>
@@ -342,6 +345,8 @@
             Edit pool settings
           </button>
         </section>
+        <section id="model-routing" class="panel" hidden></section>
+        <section id="decision-assistance" class="panel"></section>
         <details id="activity" class="activity">
           <summary data-i18n="Recent results">Recent results</summary>
           <ol id="activity-list"></ol>
