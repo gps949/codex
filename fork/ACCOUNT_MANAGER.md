@@ -81,9 +81,11 @@ Earlier accounts can re-enter during the same long task when their cooldown ends
 
 If a new refusal or relogin races a refresh, the newer account state wins. The next fresh check can retry. A workspace entitlement or login failure is not treated as ordinary quota recovery.
 
-To redeem through the manager, open the exact account's **Use reset credit** view, select an available credit, review the target and confirm. The operation does not globally switch your active account first. Expired or unavailable credits cannot be chosen. If the result is unconfirmed after a connection interruption, refresh quota and review the same operation before retrying; the browser preserves its operation ID, not your credentials.
+To redeem through the manager, choose **Use reset credit** for the exact account, review the automatically selected earliest-expiring eligible credit, and confirm. The operation does not globally switch your active account first. Expired or unavailable credits cannot be chosen. If the result is unconfirmed after a connection interruption, refresh quota and review the same operation before retrying; the browser preserves its operation ID, not your credentials.
 
 **Refresh**, **Retry**, and **Redeem** have different effects. Redeem spends a credit; the other two do not. Returning to automatic subscriptions keeps valid cooldowns.
+
+If an interrupted original operation remains unconfirmed, **Interrupted resets** offers an explicit review in the browser, terminal **J** page and phone menu. Review retains its account/credit/operation binding and a backup; the credit may already have been consumed and the outcome stays unknown. It permits later operations without restoring quota. The original account can be removed or inaccessible. Browser retry records are independent: after fresh review, use the acknowledged **Clear reviewed operation** action to remove only that browser record without spending a credit.
 
 ## Manage logins and accounts
 
@@ -117,6 +119,12 @@ Stored host credentials being available is a local status, not confirmation of a
 ## Choose settings without learning the config format
 
 The browser offers **Prefer earlier resets** and **Reduce standby requests** with a preview of changed fields. The terminal uses named settings and **Balanced** / **Longer standby** presets; these enable small standby warmup requests and show the exact configuration before applying it. All presets preserve your reset-credit and paid-API permissions. Saving requires confirmation. Advanced settings remain available for individual tuning.
+
+## Select models for new tasks
+
+**Automatic model selection** is separate from account rotation and **Decision assistance**. Set Off, Preview or Automatic, choose main tasks/subagents, and adjust the 0–100 endurance/capability preference directly in the browser panel. Terminal **M**, phone **Model selection** and `codex account routing` provide equivalent policy controls. Local simulation sends no external request. Jev/Clef task classification requires its own task-sharing consent; tool ranking may remain off.
+
+Manual model choices take priority. Use `/model auto` in the conversation or **Use auto for this thread** in the phone menu to release its pin without changing global settings. [Model-selection guide](MODEL_ROUTING_DESIGN.md) explains candidates, thinking limits, privacy and the lack of measured savings.
 
 ## API accounts and paid fallback
 

@@ -243,4 +243,4 @@ The [Jev/Clef decision-model research](DECISION_MODELS.md) explains potential to
 
 Cross-workspace concurrent routing, automatic migration of old opaque compacted history, and real Personal/Business/mobile acceptance still need further work. Automated fixture coverage and release archive checks do not establish those real-account behaviors.
 
-[Automatic model selection design](MODEL_ROUTING_DESIGN.md) describes a proposed on/off mode and 0–100 preference for main tasks and subagents. Automatic model selection is not implemented in this release.
+[Automatic model selection](MODEL_ROUTING_DESIGN.md) provides Off, Preview and Automatic modes, separate main-task/subagent switches and a 0–100 preference. Configure it in the browser manager, terminal manager's **M** page, phone **Model selection** menu or `codex account routing`. It starts off and keeps manual model choices ahead of automatic policy. Local rules and an independently consented Jev/Clef assessment are alternatives; subscription savings remain unmeasured.
