@@ -123,6 +123,9 @@ uuid = { workspace = true, features = ["serde", "v7"] }
 [target.'cfg(all(target_os = "linux", target_env = "musl", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 tikv-jemallocator = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 codex-windows-sandbox = { workspace = true }
 
@@ -141,7 +144,11 @@ core_test_support = { workspace = true }
 flate2 = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
+<<<<<<< HEAD
 insta = { workspace = true }
+=======
+keyring = { workspace = true }
+>>>>>>> rust-v0.162.1
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 pretty_assertions = { workspace = true }

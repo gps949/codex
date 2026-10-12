@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -32,6 +30,7 @@ impl SelectionDescriptionLayout {
     }
 }
 
+<<<<<<< HEAD
 pub(super) fn line_to_owned(line: Line<'_>) -> Line<'static> {
     Line {
         style: line.style,
@@ -48,6 +47,9 @@ pub(super) fn line_to_owned(line: Line<'_>) -> Line<'static> {
 }
 
 pub(super) fn combined_description_line(
+=======
+fn combined_description(
+>>>>>>> rust-v0.162.1
     row: &GenericDisplayRow,
     description_layout: SelectionDescriptionLayout,
 ) -> Option<Line<'static>> {
