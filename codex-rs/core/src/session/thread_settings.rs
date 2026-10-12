@@ -4,8 +4,10 @@
 use super::session::Session;
 use super::session::SessionSettingsUpdate;
 use super::step_settings::StepSettingsUpdate;
+use crate::WithTurnExtensionData;
 use crate::config::ConstraintResult;
 use codex_history::RolloutItem;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
@@ -31,9 +33,9 @@ impl Session {
 /// Applies standalone thread settings. The caller holds the persistence permit through notification.
 pub(super) async fn update(
     session: &Session,
-    overrides: ThreadSettingsOverrides,
+    overrides: impl Into<WithTurnExtensionData<ThreadSettingsOverrides>>,
 ) -> ConstraintResult<ThreadSettingsSnapshot> {
-    let updates = prepare_update(overrides);
+    let updates = prepare_update(overrides, &session.services.selected_capability_roots);
     let commit = session.update_settings(updates).await?;
     // Standalone settings changes supersede a pending automatic continuation.
     session.state.lock().await.last_started_turn_id = None;
@@ -41,10 +43,21 @@ pub(super) async fn update(
 }
 
 /// Converts protocol overrides into the internal settings update shape.
-pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSettingsUpdate {
+pub(super) fn prepare_update(
+    overrides: impl Into<WithTurnExtensionData<ThreadSettingsOverrides>>,
+    roots: &[SelectedCapabilityRoot],
+) -> SessionSettingsUpdate {
+    let WithTurnExtensionData {
+        request: overrides,
+        turn_extension_init,
+    } = overrides.into();
     let ThreadSettingsOverrides {
+<<<<<<< HEAD
         model_selection_intent,
         environments,
+=======
+        environments: environment_requests,
+>>>>>>> rust-v0.162.1
         runtime_workspace_roots,
         profile_workspace_roots,
         approval_policy,
@@ -62,7 +75,11 @@ pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSetti
         disabled_plugin_ids,
     } = overrides;
     SessionSettingsUpdate {
+<<<<<<< HEAD
         model_selection_intent,
+=======
+        turn_extension_init,
+>>>>>>> rust-v0.162.1
         step_settings: StepSettingsUpdate {
             model,
             effort,
@@ -73,7 +90,7 @@ pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSetti
             approval_policy,
             approvals_reviewer,
         },
-        environments,
+        environments: environment_requests.map(|requests| requests.select(roots)),
         runtime_workspace_roots,
         profile_workspace_roots,
         sandbox_policy,

@@ -3,6 +3,10 @@ use super::disconnect::serve_reconnect_requests;
 use super::*;
 use crate::app_server_session::ThreadParamsMode;
 use crate::security_setup::Identity;
+<<<<<<< HEAD
+=======
+use crate::status::StatusAccountDisplay;
+>>>>>>> rust-v0.162.1
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::write_chatgpt_auth;
 use codex_app_server_client::AppServerEvent;
@@ -27,6 +31,10 @@ async fn security_setup_fetch_with_default_features_uses_authenticated_codex_end
     write_chatgpt_auth(
         &app.config.codex_home,
         ChatGptAuthFixture::new("test-token")
+<<<<<<< HEAD
+=======
+            .email("user@example.com")
+>>>>>>> rust-v0.162.1
             .account_id("account")
             .chatgpt_user_id("user"),
         AuthCredentialsStoreMode::File,
@@ -111,7 +119,10 @@ async fn security_setup_fetch_with_default_features_uses_authenticated_codex_end
             &server,
             AppServerEvent::ServerNotification(Box::new(ServerNotification::AccountUpdated(
                 AccountUpdatedNotification {
+<<<<<<< HEAD
                     account_pool: None,
+=======
+>>>>>>> rust-v0.162.1
                     auth_mode: Some(AuthMode::Chatgpt),
                     plan_type: None,
                 },
@@ -142,9 +153,20 @@ async fn security_setup_fetch_with_default_features_uses_authenticated_codex_end
         );
         app.replace_chat_widget(ChatWidget::new_with_app_event(init));
         let event = tokio::time::timeout(Duration::from_secs(5), async {
+<<<<<<< HEAD
             loop {
                 let event = events.recv().await.unwrap();
                 if let AppEvent::SecuritySetupLoaded {
+=======
+            let mut security_notice = None;
+            let mut email_loaded = false;
+            loop {
+                let event = events.recv().await.unwrap();
+                if matches!(event, AppEvent::AccountEmailLoaded { .. }) {
+                    app.handle_event(&mut tui, &mut server, event).await?;
+                    email_loaded = true;
+                } else if let AppEvent::SecuritySetupLoaded {
+>>>>>>> rust-v0.162.1
                     request_id: actual,
                     identity: actual_identity,
                     ..
@@ -152,11 +174,38 @@ async fn security_setup_fetch_with_default_features_uses_authenticated_codex_end
                 {
                     assert_eq!(*actual, request_id);
                     assert_eq!(actual_identity, &identity);
+<<<<<<< HEAD
                     break event;
                 }
             }
         })
         .await?;
+=======
+                    security_notice = Some(event);
+                }
+                if email_loaded && let Some(event) = security_notice.take() {
+                    break Result::<AppEvent>::Ok(event);
+                }
+            }
+        })
+        .await??;
+        app.handle_event(
+            &mut tui,
+            &mut server,
+            AppEvent::AccountEmailLoaded {
+                request_id: uuid::Uuid::new_v4(),
+                email: Some("stale@example.com".into()),
+            },
+        )
+        .await?;
+        assert_eq!(
+            app.chat_widget.status_account_display(),
+            Some(&StatusAccountDisplay::ChatGpt {
+                email: Some("user@example.com".into()),
+                plan: None,
+            })
+        );
+>>>>>>> rust-v0.162.1
         app.handle_event(&mut tui, &mut server, event).await?;
         assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 70).contains("Set up security"));
     }
