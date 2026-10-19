@@ -13,6 +13,7 @@ pub enum SlashCommand {
     // DO NOT ALPHA-SORT! Enum order is presentation order in the popup, so
     // more frequently used commands should be listed first.
     Model,
+    Daybreak,
     Ide,
     Permissions,
     Keymap,
@@ -37,6 +38,7 @@ pub enum SlashCommand {
     App,
     Init,
     Compact,
+    Config,
     Recap,
     Plan,
     Voice,
@@ -91,10 +93,14 @@ impl SlashCommand {
     /// User-visible description shown in the popup.
     pub fn description(self) -> &'static str {
         match self {
+<<<<<<< HEAD
             SlashCommand::Account => "view or switch the active multi-account pool profile",
             SlashCommand::Warmup => {
                 "dump standby window-warmup debug details; /warmup now requests one pass"
             }
+=======
+            SlashCommand::Config => "configure Codex preferences",
+>>>>>>> rust-v0.163.0
             SlashCommand::Feedback => "send logs to maintainers",
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
@@ -135,6 +141,7 @@ impl SlashCommand {
             SlashCommand::MemoryDrop => "DO NOT USE",
             SlashCommand::MemoryUpdate => "DO NOT USE",
             SlashCommand::Model => "choose what model and reasoning effort to use",
+            SlashCommand::Daybreak => "turn Daybreak on or off",
             SlashCommand::Ide => {
                 "include current selection, open files, and other context from your IDE"
             }
@@ -153,7 +160,7 @@ impl SlashCommand {
             SlashCommand::Experimental => "toggle experimental features",
             SlashCommand::AutoReview => "approve one retry of a recent auto-review denial",
             SlashCommand::Memories => "configure memory use and generation",
-            SlashCommand::Mcp => "list configured MCP tools; use /mcp verbose for details",
+            SlashCommand::Mcp => "list MCP tools; use /mcp verbose or /mcp login <name>",
             SlashCommand::Apps => "manage apps",
             SlashCommand::Plugins => "browse plugins",
             SlashCommand::Logout => "log out of Codex",
@@ -247,7 +254,6 @@ impl SlashCommand {
     pub fn available_during_task(self) -> bool {
         match self {
             SlashCommand::New
-            | SlashCommand::Archive
             | SlashCommand::Delete
             | SlashCommand::Fork
             | SlashCommand::Worktree
@@ -270,8 +276,10 @@ impl SlashCommand {
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate => false,
             SlashCommand::Diff
+            | SlashCommand::Archive
             | SlashCommand::Resume
             | SlashCommand::Model
+            | SlashCommand::Daybreak
             | SlashCommand::Permissions
             | SlashCommand::Copy
             | SlashCommand::Raw
@@ -307,7 +315,7 @@ impl SlashCommand {
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
             SlashCommand::Agents | SlashCommand::MultiAgents => true,
-            SlashCommand::Theme | SlashCommand::Pets => false,
+            SlashCommand::Config | SlashCommand::Theme | SlashCommand::Pets => false,
         }
     }
 

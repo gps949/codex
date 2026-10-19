@@ -13,5 +13,6 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
 ›    Install latest public stable (disabled)  Official updates would replace
                                               this fork
      Use this CLI build
+     Restart background server
 
   enter select · esc back
