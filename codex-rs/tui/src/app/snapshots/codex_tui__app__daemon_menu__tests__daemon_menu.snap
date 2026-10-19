@@ -8,8 +8,14 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
   Fork releases: https://github.com/gps949/codex/releases
 
 
+<<<<<<< HEAD
      Install latest public stable (disabled)  Official updates would replace
                                               this fork
 › 1. Use this CLI build
+=======
+› 1. Install latest public stable
+  2. Use this CLI build
+  3. Restart background server
+>>>>>>> rust-v0.163.0
 
   enter select · esc back

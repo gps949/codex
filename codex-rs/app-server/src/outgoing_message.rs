@@ -213,6 +213,7 @@ impl ThreadScopedOutgoingMessageSender {
             );
     }
 
+<<<<<<< HEAD
     /// Finish native controls before forwarding a real turn, including queued work.
     pub(crate) fn cancel_attached_account_menu(&self, turn_id: &str) {
         self.outgoing
@@ -235,6 +236,12 @@ impl ThreadScopedOutgoingMessageSender {
             tracing::warn!(%error, "waiting for native account controls to finish before a real turn");
         }
         ordering
+=======
+    pub(crate) fn track_realtime_session_updated(&self, realtime_session_id: String) {
+        self.outgoing
+            .analytics_events_client
+            .track_realtime_session_updated(self.thread_id.to_string(), realtime_session_id);
+>>>>>>> rust-v0.163.0
     }
 
     pub(crate) async fn send_server_notification(&self, notification: ServerNotification) {

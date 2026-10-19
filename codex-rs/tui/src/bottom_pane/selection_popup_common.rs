@@ -17,13 +17,21 @@ use crate::render::Insets;
 use crate::render::RectExt as _;
 use crate::style::accent_style;
 use crate::style::user_message_style;
-use crate::width::display_width;
 
 use super::scroll_state::ScrollState;
 use super::selection_row_layout::SelectionDescriptionLayout;
 use super::selection_row_layout::build_full_line;
+<<<<<<< HEAD
 use super::selection_row_layout::combined_description_line;
 use super::selection_row_layout::line_to_owned;
+=======
+#[path = "selection_row_links.rs"]
+mod hyperlinks;
+use hyperlinks::full_hyperlink_row;
+use hyperlinks::wrap_row_lines;
+#[cfg(test)]
+use hyperlinks::wrap_two_column_row;
+>>>>>>> rust-v0.163.0
 
 /// Render-ready representation of one row in a selection popup.
 ///
@@ -174,12 +182,30 @@ fn compute_desc_col(
         .min(max_auto_desc_col);
     if column_width
         .description_layout
-        .should_hide(content_width, desc_col)
+        .should_hide_column(content_width, desc_col)
     {
         0
     } else {
         desc_col
     }
+}
+
+pub(super) fn should_show_selected_description_below(
+    rows_all: &[GenericDisplayRow],
+    state: &ScrollState,
+    max_results: usize,
+    width: u16,
+    column_width: ColumnWidthConfig,
+) -> bool {
+    if rows_all.is_empty() {
+        return false;
+    }
+    let visible_items = max_results.min(rows_all.len());
+    let start_idx = compute_item_window_start(rows_all, state, visible_items);
+    let desc_col = compute_desc_col(rows_all, start_idx, visible_items, width, column_width);
+    column_width
+        .description_layout
+        .should_show_selected_below(width, desc_col)
 }
 
 /// Determine how many spaces to indent wrapped lines for a row.
@@ -212,6 +238,7 @@ fn should_wrap_name_in_column(row: &GenericDisplayRow) -> bool {
         && row.name_prefix_spans.is_empty()
 }
 
+<<<<<<< HEAD
 fn wrap_two_column_row(row: &GenericDisplayRow, desc_col: usize, width: u16) -> Vec<Line<'static>> {
     use crate::wrapping::RtOptions;
     use crate::wrapping::word_wrap_line;
@@ -315,6 +342,8 @@ fn wrap_row_lines(
     wrap_standard_row(row, desc_col, width, description_layout)
 }
 
+=======
+>>>>>>> rust-v0.163.0
 fn apply_row_state_style(
     lines: &mut [Line<'static>],
     selected: bool,
@@ -540,6 +569,7 @@ fn render_rows_inner(
         let mut wrapped =
             wrap_row_lines(row, desc_col, area.width, column_width.description_layout);
         clipped |= wrapped.len() > usize::from(area.bottom().saturating_sub(cur_y));
+<<<<<<< HEAD
         apply_row_state_style(
             &mut wrapped,
             Some(i) == state.selected_idx && !row.is_disabled,
@@ -547,6 +577,16 @@ fn render_rows_inner(
             row.selection_style,
             (!row.description_spans.is_empty()).then_some(desc_col),
         );
+=======
+        for line in &mut wrapped {
+            apply_row_state_style(
+                std::slice::from_mut(&mut line.line),
+                Some(i) == state.selected_idx && !row.is_disabled,
+                row.is_disabled,
+                row.selection_style,
+            );
+        }
+>>>>>>> rust-v0.163.0
 
         // Render the wrapped lines.
         let mut rendered_item = false;
@@ -554,7 +594,7 @@ fn render_rows_inner(
             if cur_y >= area.y + area.height {
                 break;
             }
-            line.render(
+            (&line).render(
                 Rect {
                     x: area.x,
                     y: cur_y,
@@ -698,8 +738,16 @@ pub(crate) fn render_rows_single_line_with_col_width_mode(
             (!row.description_spans.is_empty()).then_some(desc_col),
         );
 
-        let full_line = truncate_line_with_ellipsis_if_overflow(full_line, area.width as usize);
-        full_line.render(
+        let mut full_line = full_hyperlink_row(row, full_line);
+        let clipped = line_width(&full_line.line) > usize::from(area.width);
+        full_line.line =
+            truncate_line_with_ellipsis_if_overflow(full_line.line, area.width as usize);
+        let visible_width = line_width(&full_line.line).saturating_sub(usize::from(clipped));
+        full_line.hyperlinks.retain_mut(|link| {
+            link.columns.end = link.columns.end.min(visible_width);
+            !link.columns.is_empty()
+        });
+        (&full_line).render(
             Rect {
                 x: area.x,
                 y: cur_y,
@@ -1054,7 +1102,7 @@ mod tests {
 
         let rendered = wrap_two_column_row(&row, /*desc_col*/ 8, /*width*/ 24)
             .into_iter()
-            .map(|line| line.to_string())
+            .map(|line| line.line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
 
