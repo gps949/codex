@@ -9,6 +9,8 @@ use super::*;
 fn user_history(metadata: Option<CodexHarnessMetadata>) -> Vec<ResponseItemEnvelope> {
     vec![ResponseItemEnvelope {
         item: ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {

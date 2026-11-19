@@ -175,6 +175,8 @@ async fn ensure_from_config_registers_profiles_added_after_install() -> anyhow::
             auth_mode: Some(AuthMode::Chatgpt),
             openai_api_key: None,
             tokens: Some(TokenData {
+                oauth_provenance: None,
+                login_owner_id: None,
                 id_token: parse_chatgpt_jwt_claims(&fake_jwt).expect("jwt"),
                 access_token: format!("{account_id}-access"),
                 refresh_token: format!("{account_id}-refresh"),

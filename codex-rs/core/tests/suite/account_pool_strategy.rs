@@ -41,7 +41,11 @@ async fn account_pool_strategy_refresh_changes_next_automatic_execution() -> any
     let mut next = fixture.config.clone();
     next.account_pool.rotation_strategy =
         Some(codex_config::AccountPoolRotationStrategy::EarliestReset);
-    fixture.codex.refresh_runtime_config(next).await;
+    let current = fixture.codex.config().await;
+    assert_eq!(
+        fixture.codex.refresh_runtime_config(current, next).await,
+        codex_core::ConfigRefreshOutcome::Published
+    );
     let effective = fixture.codex.config().await;
     assert_eq!(
         effective.account_pool.effective_rotation_strategy(),

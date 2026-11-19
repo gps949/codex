@@ -26,6 +26,7 @@ impl AuthConfig {
             self.keyring_backend_kind,
             /*agent_identity_authapi_base_url*/ None,
             &self.auth_route_config,
+            /*cached_auth*/ None,
         )
         .await?;
         Ok(self.allows_auth(&auth).then_some(auth))
@@ -117,6 +118,7 @@ impl AuthManager {
             /*enable_codex_api_key_env*/ false,
             /*managed_auth*/ None,
             CredentialSource::Standard,
+            /*allowed_auth_modes*/ None,
         );
         manager.workload_identity_selected = external_auth.is_some();
         let manager = Arc::new(manager);
@@ -140,6 +142,7 @@ impl AuthManager {
             /*enable_codex_api_key_env*/ false,
             auth,
             CredentialSource::ManagedProfile,
+            /*allowed_auth_modes*/ None,
         ))
     }
 }

@@ -15,7 +15,10 @@ impl NativeAccountManager {
         let thread_id = menu.thread_id;
         let question_id = Uuid::now_v7().to_string();
         let item_id = match item {
-            ThreadItem::AgentMessage { id, .. } => id.clone(),
+            ThreadItem {
+                payload: codex_app_server_protocol::ThreadItemPayload::AgentMessage { id, .. },
+                ..
+            } => id.clone(),
             _ => unreachable!("menu questions attach to their emitted instruction"),
         };
         let payload = ServerRequestPayload::ToolRequestUserInput(ToolRequestUserInputParams {

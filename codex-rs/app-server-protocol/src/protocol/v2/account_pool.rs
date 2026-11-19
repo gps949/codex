@@ -6,6 +6,7 @@ use serde::Serialize;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
+#[schemars(title = "AccountPoolReadResponse")]
 #[ts(export_to = "v2/")]
 pub struct AccountPoolReadResponse {
     pub enabled: bool,

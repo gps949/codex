@@ -269,7 +269,10 @@ fn agent_text(items: &[ThreadItem]) -> String {
     items
         .iter()
         .filter_map(|item| match item {
-            ThreadItem::AgentMessage { text, .. } => Some(text.as_str()),
+            ThreadItem {
+                payload: codex_app_server_protocol::ThreadItemPayload::AgentMessage { text, .. },
+                ..
+            } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()

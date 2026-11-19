@@ -44,6 +44,8 @@ pub(super) fn chatgpt_auth_with_ids(
         auth_mode: Some(AuthMode::Chatgpt),
         openai_api_key: None,
         tokens: Some(TokenData {
+            oauth_provenance: None,
+            login_owner_id: None,
             id_token: parse_chatgpt_jwt_claims(&fake_jwt).expect("fake jwt should parse"),
             access_token: format!("{chatgpt_user_id}-access"),
             refresh_token: format!("{chatgpt_user_id}-refresh"),

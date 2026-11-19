@@ -56,6 +56,8 @@ fn chatgpt_auth(account_id: &str, refresh_token: &str) -> AuthDotJson {
         auth_mode: Some(AuthMode::Chatgpt),
         openai_api_key: None,
         tokens: Some(TokenData {
+            oauth_provenance: None,
+            login_owner_id: None,
             id_token: parse_chatgpt_jwt_claims(&fake_jwt).expect("fake jwt"),
             access_token: format!("{account_id}-access"),
             refresh_token: refresh_token.to_string(),

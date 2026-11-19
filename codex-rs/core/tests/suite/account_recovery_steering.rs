@@ -92,7 +92,11 @@ async fn steering_during_credit_lock_wait_retains_input_without_spending() -> an
             text_elements: Vec::new(),
         }]))
         .await?;
-    let TurnInputSubmission::Started { turn_id } = started else {
+    let TurnInputSubmission::Started {
+        turn_id,
+        root_turn_id,
+    } = started
+    else {
         anyhow::bail!("expected a new recovery turn");
     };
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -125,6 +129,7 @@ async fn steering_during_credit_lock_wait_retains_input_without_spending() -> an
             },]))
             .await?,
         TurnInputSubmission::Steered {
+            root_turn_id,
             turn_id: turn_id.clone()
         }
     );

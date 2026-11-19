@@ -36,6 +36,13 @@
               ],
               "title": "ChatgptAccountType",
               "type": "string"
+            },
+            "workspaceName": {
+              "description": "Display name of the selected ChatGPT workspace, when available.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -65,8 +72,338 @@
           ],
           "title": "AmazonBedrockAccount",
           "type": "object"
+        },
+        {
+          "description": "Google Cloud Vertex AI with externally managed credentials.",
+          "properties": {
+            "type": {
+              "enum": [
+                "gcp"
+              ],
+              "title": "GcpAccountType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "GcpAccount",
+          "type": "object"
         }
       ]
+    },
+    "AccountPoolAccount": {
+      "properties": {
+        "availability": {
+          "$ref": "#/definitions/AccountPoolAvailability"
+        },
+        "backendResetsAt": {
+          "default": null,
+          "description": "Backend evidence of a natural reset, independent of the scheduler retry deadline.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planType": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PlanType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "profileId": {
+          "type": "string"
+        },
+        "rateLimits": {
+          "$ref": "#/definitions/AccountPoolRateLimits"
+        },
+        "windowWarmup": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountPoolWindowWarmup"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Latest identity-preserving 5h-window warmup observation for standby accounts."
+        }
+      },
+      "required": [
+        "availability",
+        "isActive",
+        "priority",
+        "profileId",
+        "rateLimits"
+      ],
+      "type": "object"
+    },
+    "AccountPoolAvailability": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "available"
+              ],
+              "title": "AvailableAccountPoolAvailabilityType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "AvailableAccountPoolAvailability",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "resets_at": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "exhausted"
+              ],
+              "title": "ExhaustedAccountPoolAvailabilityType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "ExhaustedAccountPoolAvailability",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "authenticationUnavailable"
+              ],
+              "title": "AuthenticationUnavailableAccountPoolAvailabilityType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "type"
+          ],
+          "title": "AuthenticationUnavailableAccountPoolAvailability",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "disabled"
+              ],
+              "title": "DisabledAccountPoolAvailabilityType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "DisabledAccountPoolAvailability",
+          "type": "object"
+        }
+      ]
+    },
+    "AccountPoolRateLimitWindow": {
+      "properties": {
+        "resetsAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usedPercent": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "usedPercent"
+      ],
+      "type": "object"
+    },
+    "AccountPoolRateLimits": {
+      "properties": {
+        "observedAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "primary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountPoolRateLimitWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "primaryObservedAt": {
+          "default": null,
+          "description": "Time of accepted primary evidence; null stays unknown rather than borrowing the watermark.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "secondary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountPoolRateLimitWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secondaryObservedAt": {
+          "default": null,
+          "description": "Time of accepted secondary evidence; omitted windows keep their previous time.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AccountPoolReadResponse": {
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/definitions/AccountPoolAccount"
+          },
+          "type": "array"
+        },
+        "activeGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "activeProfileId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "accounts",
+        "enabled"
+      ],
+      "title": "AccountPoolReadResponse",
+      "type": "object"
+    },
+    "AccountPoolWindowWarmup": {
+      "properties": {
+        "attemptedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "consecutiveFailures": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/definitions/AccountPoolWindowWarmupOutcome"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountPoolWindowWarmupPhase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Additive attempt phase; legacy clients can continue reading `outcome`."
+        },
+        "retryAfter": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attemptedAt",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "AccountPoolWindowWarmupOutcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "skippedNoAuth"
+      ],
+      "type": "string"
+    },
+    "AccountPoolWindowWarmupPhase": {
+      "description": "Distinguishes an ongoing or completed-but-unconfirmed attempt from a request failure.",
+      "enum": [
+        "inProgress",
+        "unconfirmed"
+      ],
+      "type": "string"
     },
     "AccountRoutingOverride": {
       "description": "Backend routing policy. Wire values match the accounts/check contract.",
@@ -96,6 +433,8 @@
         "edu",
         "edu_plus",
         "edu_pro",
+        "sci",
+        "sci_plus",
         "unknown"
       ],
       "type": "string"
@@ -134,20 +473,28 @@
     "accountPool": {
       "anyOf": [
         {
-          "type": "null"
+          "$ref": "#/definitions/AccountPoolReadResponse"
         },
         {
-          "$ref": "#/definitions/AccountPoolReadResponse"
+          "type": "null"
         }
       ],
+      "default": null,
       "description": "Native multi-account pool snapshot when `[account_pool]` is configured.\n\nStable clients (including mobile) can use this field from `account/read` instead of the experimental `accountPool/read` RPC to show per-profile availability and cooldowns."
     },
     "requiresOpenaiAuth": {
       "type": "boolean"
+    },
+    "userId": {
+      "default": null,
+      "description": "ChatGPT user ID belonging to this account response, when available.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
-    "accountPool",
     "requiresOpenaiAuth"
   ],
   "title": "GetAccountResponse",

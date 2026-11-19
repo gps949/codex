@@ -17,6 +17,8 @@ pub const ACCOUNT_ROUTING_HEADER: &str = "x-openai-account-routing-override";
 #[derive(Clone, Debug)]
 pub struct WorkspaceRoutingContext {
     pub(crate) chatgpt_base_url: String,
+    /// Application policy owner for a separately captured inference credential.
+    pub routing_owner: Option<Arc<codex_login::AuthManager>>,
     pub(crate) previously_routed: Arc<Mutex<bool>>,
     pub(crate) session: Option<Arc<WorkspaceRoutingSession>>,
 }
@@ -25,6 +27,7 @@ impl WorkspaceRoutingContext {
     pub fn new(chatgpt_base_url: String) -> Self {
         Self {
             chatgpt_base_url,
+            routing_owner: None,
             previously_routed: Arc::new(Mutex::new(/*t*/ false)),
             session: None,
         }
@@ -85,7 +88,7 @@ pub struct ResolvedResponsesProvider {
 }
 
 /// Effective destination and credentials that permit reusing a Responses socket.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResponsesConnectionKey {
     base_url: String,
     routing_header: Option<HeaderValue>,
@@ -102,47 +105,6 @@ impl ResponsesConnectionKey {
     }
 }
 
-/// Separates request credentials from the owner of account-scoped discovery.
-#[expect(
-    clippy::await_holding_invalid_type,
-    reason = "serialize discovery and the session's first successful routing transition"
-)]
-pub(crate) fn resolve_responses_provider<'a, P: crate::ModelProvider + ?Sized>(
-    model_provider: &'a P,
-    routing_context: &'a WorkspaceRoutingContext,
-    routing_owner: &'a codex_login::AuthManager,
-) -> crate::ModelProviderFuture<'a, codex_protocol::error::Result<ResolvedResponsesProvider>> {
-    Box::pin(async move {
-        let mut provider = model_provider.api_provider().await?;
-        let mut redirect_policy = ClientRedirectPolicy::Default;
-        if crate::provider::provider_uses_first_party_auth_path(model_provider.info())
-            && model_provider.info().supports_codex_backend_routes()
-            && let Some(auth) = model_provider
-                .auth()
-                .await
-                .filter(codex_login::CodexAuth::is_chatgpt_auth)
-        {
-            let mut previously_routed = routing_context.previously_routed.lock().await;
-            if let Some(routing) = routing_owner
-                .workspace_routing(
-                    &auth,
-                    codex_login::WorkspaceRoutingRequest {
-                        provider_base_url: provider.base_url.clone(),
-                        chatgpt_base_url: routing_context.chatgpt_base_url.clone(),
-                        previously_routed: *previously_routed,
-                        session: routing_context.session.clone(),
-                    },
-                )
-                .await?
-            {
-                crate::workspace_routing::apply_workspace_routing(&mut provider, routing)?;
-                redirect_policy = ClientRedirectPolicy::Reject;
-                *previously_routed = true;
-            }
-        }
-        Ok(ResolvedResponsesProvider {
-            provider,
-            redirect_policy,
-        })
-    })
-}
+#[cfg(test)]
+#[path = "workspace_routing_tests.rs"]
+mod workspace_routing_tests;

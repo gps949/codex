@@ -106,7 +106,7 @@ async fn discover(
         .thread_manager
         .start_thread(StartThreadOptions {
             dynamic_tools: tools,
-            environments: Some(vec![test.executor_environment().selection().clone()]),
+            environments: Some(vec![test.executor_environment().request()]),
             ..StartThreadOptions::new(test.config.clone())
         })
         .await?;
@@ -206,7 +206,7 @@ async fn decision_advisor_tool_search_applies_off_rank_off_without_restarting_th
         .thread_manager
         .start_thread(StartThreadOptions {
             dynamic_tools: tools,
-            environments: Some(vec![test.executor_environment().selection().clone()]),
+            environments: Some(vec![test.executor_environment().request()]),
             ..StartThreadOptions::new(test.config.clone())
         })
         .await?;

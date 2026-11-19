@@ -133,6 +133,7 @@ impl NativeAccountManager {
             outgoing,
             menu.owner,
             ServerNotification::ItemCompleted(ItemCompletedNotification {
+                content_token_count: None,
                 item,
                 thread_id: thread_id.to_string(),
                 turn_id: menu.turn_id.clone(),
@@ -357,14 +358,15 @@ impl NativeAccountManager {
                                         outgoing,
                                         menu,
                                         menu.thread_id,
-                                        ThreadItem::AgentMessage {
+                                        ThreadItem::untimed(codex_app_server_protocol::ThreadItemPayload::AgentMessage {
+                                                                moderation: None,
                                             id: Uuid::now_v7().to_string(),
                                             text: message,
                                             phase: None,
                                             memory_citation: None,
                                             delivery: None,
                                             questions: None,
-                                        },
+                                        }),
                                     )
                                     .await;
                             }
@@ -395,14 +397,17 @@ impl NativeAccountManager {
                             outgoing,
                             menu,
                             menu.thread_id,
-                            ThreadItem::AgentMessage {
-                                id: Uuid::now_v7().to_string(),
-                                text: message,
-                                phase: None,
-                                memory_citation: None,
-                                delivery: None,
-                                questions: None,
-                            },
+                            ThreadItem::untimed(
+                                codex_app_server_protocol::ThreadItemPayload::AgentMessage {
+                                    moderation: None,
+                                    id: Uuid::now_v7().to_string(),
+                                    text: message,
+                                    phase: None,
+                                    memory_citation: None,
+                                    delivery: None,
+                                    questions: None,
+                                },
+                            ),
                         )
                         .await;
                     break;
@@ -419,12 +424,13 @@ impl NativeAccountManager {
 }
 
 fn menu_anchor(language: NativeAccountLanguage) -> ThreadItem {
-    ThreadItem::AgentMessage {
+    ThreadItem::untimed(codex_app_server_protocol::ThreadItemPayload::AgentMessage {
+        moderation: None,
         id: Uuid::now_v7().to_string(),
         text: language.text("Account controls", "账号管理").into(),
         phase: None,
         memory_citation: None,
         delivery: None,
         questions: None,
-    }
+    })
 }

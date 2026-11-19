@@ -158,7 +158,7 @@ async fn portable_manual_compaction_keeps_captured_auth_when_the_pool_switches()
             RolloutItem::ResponseItem(envelope)
                 if matches!(&envelope.item, ResponseItem::Message { role, content, .. }
                     if role == "assistant" && content.iter().any(|part|
-                        matches!(part, ContentItem::OutputText { text }
+                        matches!(part, ContentItem::OutputText { text, .. }
                             if text == "Captured primary account summary"))) =>
             {
                 envelope.metadata

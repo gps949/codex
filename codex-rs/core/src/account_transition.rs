@@ -373,7 +373,12 @@ fn sanitize_function_output(
         .saturating_add(removed);
 
     if items.is_empty() && removed > 0 {
-        output.body = FunctionCallOutputBody::Text(AccountTransitionToolOutputNotice.render());
+        output.body = FunctionCallOutputBody::Text(
+            AccountTransitionToolOutputNotice
+                .render()
+                .into_text()
+                .unwrap_or_default(),
+        );
     }
 }
 

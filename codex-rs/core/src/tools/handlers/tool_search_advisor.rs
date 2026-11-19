@@ -39,10 +39,11 @@ pub(super) async fn ranked_ids(
         return baseline.to_vec();
     }
     let mut indices = handler
-        .search_engine
-        .search(query, DECISION_ADVISOR_MAX_CANDIDATES)
+        .search_scorer
+        .matches(&handler.search_embedder.embed(query))
         .into_iter()
-        .map(|result| result.document.id)
+        .take(DECISION_ADVISOR_MAX_CANDIDATES)
+        .map(|result| result.id)
         .collect::<Vec<_>>();
     // Small catalogs can be considered in full even when lexical search misses synonyms or
     // Chinese queries. Crowded catalogs reserve a few slots for deterministic catalog coverage.

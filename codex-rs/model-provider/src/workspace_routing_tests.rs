@@ -214,11 +214,9 @@ async fn captured_profile_uses_application_routing_owner() {
         ModelProviderInfo::create_openai_provider(/*base_url*/ None),
         Some(profile),
     );
-    let routing = WorkspaceRoutingContext::new("https://chatgpt.com/backend-api".into());
-    let resolved = provider
-        .responses_api_provider_with_routing_owner(&routing, &owner)
-        .await
-        .unwrap();
+    let mut routing = WorkspaceRoutingContext::new("https://chatgpt.com/backend-api".into());
+    routing.routing_owner = Some(owner);
+    let resolved = provider.responses_api_provider(&routing).await.unwrap();
     assert_eq!(
         (resolved.provider.base_url, resolved.redirect_policy),
         (

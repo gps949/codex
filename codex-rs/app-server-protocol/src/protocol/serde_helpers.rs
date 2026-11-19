@@ -12,33 +12,6 @@ pub(crate) fn nullable_string_schema(
     generator.subschema_for::<Option<String>>()
 }
 
-#[allow(dead_code)]
-pub(crate) fn optional_account_pool_read_response_schema(
-    _generator: &mut schemars::r#gen::SchemaGenerator,
-) -> schemars::schema::Schema {
-    use schemars::schema::InstanceType;
-    use schemars::schema::Schema;
-    use schemars::schema::SchemaObject;
-    use schemars::schema::SubschemaValidation;
-
-    Schema::Object(SchemaObject {
-        subschemas: Some(Box::new(SubschemaValidation {
-            any_of: Some(vec![
-                Schema::Object(SchemaObject {
-                    instance_type: Some(InstanceType::Null.into()),
-                    ..Default::default()
-                }),
-                Schema::Object(SchemaObject {
-                    reference: Some("#/definitions/AccountPoolReadResponse".to_string()),
-                    ..Default::default()
-                }),
-            ]),
-            ..Default::default()
-        })),
-        ..Default::default()
-    })
-}
-
 pub fn deserialize_empty_path_as_none<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
 where
     D: Deserializer<'de>,

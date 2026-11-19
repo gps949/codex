@@ -22,6 +22,8 @@ fn credentials(user: &str, workspace: &str, refresh: &str) -> AuthDotJson {
     AuthDotJson {
         auth_mode: Some(AuthMode::Chatgpt),
         tokens: Some(TokenData {
+            oauth_provenance: None,
+            login_owner_id: None,
             id_token: parse_chatgpt_jwt_claims(&format!("e30.{encoded}.sig")).unwrap(),
             access_token: "test-access".into(),
             refresh_token: refresh.into(),

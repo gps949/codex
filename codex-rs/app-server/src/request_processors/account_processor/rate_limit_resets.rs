@@ -110,10 +110,10 @@ impl AccountRequestProcessor {
             ));
         }
 
-        let (client, auth, profile, owner_generation) =
+        let (client, backend_base_url, auth, profile, owner_generation) =
             self.rate_limit_reset_backend_client().await?;
-        let owner_digest = reset_credit_journal::owner_key(&self.config.chatgpt_base_url, &auth)
-            .map_err(invalid_request)?;
+        let owner_digest =
+            reset_credit_journal::owner_key(&backend_base_url, &auth).map_err(invalid_request)?;
         if params
             .expected_owner_key
             .as_deref()
@@ -352,6 +352,7 @@ impl AccountRequestProcessor {
     ) -> Result<
         (
             BackendClient,
+            String,
             codex_login::CodexAuth,
             Option<ResetProfileIdentity>,
             u64,
@@ -435,16 +436,10 @@ impl AccountRequestProcessor {
         } else {
             None
         };
-        Ok((
-            BackendClient::from_auth(
-                self.config.chatgpt_base_url.clone(),
-                &auth,
-                http_client_factory,
-            ),
-            auth,
-            profile,
-            owner_generation,
-        ))
+        let (client, backend_base_url) = self
+            .backend_client_with_endpoint(&auth, http_client_factory)
+            .await?;
+        Ok((client, backend_base_url, auth, profile, owner_generation))
     }
 }
 

@@ -14,7 +14,8 @@ fn skill(home: &std::path::Path, name: &str) -> SkillMetadata {
         dependencies: None,
         policy: None,
         path_to_skills_md: AbsolutePathBuf::from_absolute_path(home.join(name).join("SKILL.md"))
-            .unwrap(),
+            .unwrap()
+            .into(),
         scope: SkillScope::Repo,
         plugin_id: None,
         remote_plugin_id: None,

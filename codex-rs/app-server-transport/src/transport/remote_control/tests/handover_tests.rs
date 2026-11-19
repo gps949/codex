@@ -67,6 +67,7 @@ impl HandoverFixture {
         let (events, _receiver) = mpsc::channel(CHANNEL_CAPACITY);
         let (task, handle) = start_remote_control(
             RemoteControlStartConfig {
+                runtime_auth: None,
                 remote_control_url: TEST_REMOTE_CONTROL_URL.into(),
                 installation_id: TEST_INSTALLATION_ID.into(),
                 policy: RemoteControlPolicy::Allowed,

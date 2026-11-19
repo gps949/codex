@@ -203,7 +203,7 @@ pub(super) fn assistant_execution_provenance(
                     ResponseItem::Message { role, content, .. }
                         if role == "assistant"
                             && content.iter().any(|item| {
-                                matches!(item, ContentItem::OutputText { text } if text == expected_text)
+                                matches!(item, ContentItem::OutputText { text, .. } if text == expected_text)
                             })
                 ) => Some(envelope),
             _ => None,

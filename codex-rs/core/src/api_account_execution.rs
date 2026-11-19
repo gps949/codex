@@ -214,7 +214,6 @@ fn apply_api_capabilities(model_info: &mut ModelInfo, context_window: i64, image
     model_info.default_reasoning_summary = ReasoningSummary::None;
     model_info.node_repl_disabled = true;
     model_info.tool_mode = Some(ToolMode::Direct);
-    model_info.used_fallback_model_metadata = false;
 }
 
 /// Treat every API boundary as a foreign account boundary, including legacy unattributed state.
@@ -247,7 +246,11 @@ pub(crate) async fn activate_api_target(
     project_api_history(
         sess.clone_history()
             .await
-            .for_prompt_annotated(&target.model_info.input_modalities),
+            .for_prompt_annotated(
+                &target.model_info.input_modalities,
+                sess.services.image_store.as_ref(),
+            )
+            .await,
     )?;
     let rebound = Arc::new(turn.with_api_target(target)?);
     rebound

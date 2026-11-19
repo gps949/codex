@@ -244,6 +244,7 @@ impl Harness {
         let (transport_event_tx, transport_events) = mpsc::channel(32);
         let (remote_task, remote) = start_remote_control(
             RemoteControlStartConfig {
+                runtime_auth: None,
                 remote_control_url: destination.clone(),
                 installation_id: "11111111-1111-4111-8111-111111111111".into(),
                 policy: RemoteControlPolicy::Allowed,

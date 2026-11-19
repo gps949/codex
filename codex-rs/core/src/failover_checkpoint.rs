@@ -238,6 +238,8 @@ mod tests {
         let before = Vec::<ResponseItemEnvelope>::new();
         let cursor = SamplingHistoryCursor::from_history(0, &before);
         let after = vec![envelope(ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: Vec::new(),
@@ -255,6 +257,8 @@ mod tests {
     fn unmatched_function_call_requires_reconciliation() {
         let cursor = SamplingHistoryCursor::new(0, 0);
         let after = vec![envelope(ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: "write_file".to_string(),
             namespace: None,

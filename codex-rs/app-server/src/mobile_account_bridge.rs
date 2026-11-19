@@ -173,6 +173,7 @@ pub(crate) async fn complete_mobile_slash_turn(
     outgoing.record_request_turn_id(request_id, &turn_id).await;
 
     let in_progress_turn = Turn {
+        root_turn_id: Some(turn_id.clone()),
         id: turn_id.clone(),
         items: vec![],
         items_view: TurnItemsView::NotLoaded,
@@ -192,14 +193,15 @@ pub(crate) async fn complete_mobile_slash_turn(
         )
         .await;
 
-    let user_item = ThreadItem::UserMessage {
-        id: user_item_id.clone(),
-        client_id: params.client_user_message_id.clone(),
-        content: vec![V2UserInput::Text {
-            text: user_text.clone(),
-            text_elements: Vec::new(),
-        }],
-    };
+    let user_item =
+        ThreadItem::untimed(codex_app_server_protocol::ThreadItemPayload::UserMessage {
+            id: user_item_id.clone(),
+            client_id: params.client_user_message_id.clone(),
+            content: vec![V2UserInput::Text {
+                text: user_text.clone(),
+                text_elements: Vec::new(),
+            }],
+        });
     emit_item_lifecycle(
         outgoing,
         &connection_ids,
@@ -210,14 +212,16 @@ pub(crate) async fn complete_mobile_slash_turn(
     )
     .await;
 
-    let agent_item = ThreadItem::AgentMessage {
-        id: agent_item_id.clone(),
-        text: agent_text.clone(),
-        phase: None,
-        memory_citation: None,
-        delivery: None,
-        questions: None,
-    };
+    let agent_item =
+        ThreadItem::untimed(codex_app_server_protocol::ThreadItemPayload::AgentMessage {
+            moderation: None,
+            id: agent_item_id.clone(),
+            text: agent_text.clone(),
+            phase: None,
+            memory_citation: None,
+            delivery: None,
+            questions: None,
+        });
     emit_item_lifecycle(
         outgoing,
         &connection_ids,
@@ -230,6 +234,7 @@ pub(crate) async fn complete_mobile_slash_turn(
 
     let completed_at_ms = now_unix_timestamp_ms();
     let completed_turn = Turn {
+        root_turn_id: Some(turn_id.clone()),
         id: turn_id.clone(),
         items: vec![agent_item.clone()],
         items_view: TurnItemsView::Summary,
@@ -297,6 +302,7 @@ async fn emit_item_lifecycle(
         .send_server_notification_to_connections(
             connection_ids,
             ServerNotification::ItemCompleted(ItemCompletedNotification {
+                content_token_count: None,
                 item,
                 thread_id: thread_id.to_string(),
                 turn_id: turn_id.to_string(),

@@ -33,7 +33,9 @@ fn popup_pool() -> AccountPoolReadResponse {
 
 fn popup_account_response(pool: &AccountPoolReadResponse) -> GetAccountResponse {
     GetAccountResponse {
+        user_id: None,
         account: Some(Account::Chatgpt {
+            workspace_name: None,
             email: Some("work@example.com".into()),
             plan_type: codex_protocol::account::PlanType::Pro,
         }),
@@ -50,6 +52,7 @@ fn native_status_account_field_previews_current_and_standby_accounts() {
     let mut expected = response.clone();
     let preview = "Pool · 2/5 ready | Work · Current · Ready | Backup · Ready | +3 more · /account";
     expected.account = Some(Account::Chatgpt {
+        workspace_name: None,
         email: Some(preview.into()),
         plan_type: codex_protocol::account::PlanType::Pro,
     });
@@ -93,6 +96,7 @@ fn native_status_account_preview_reports_each_availability() {
             response.account,
             Some(Account::Chatgpt {
                 email: Some(expected.into()),
+                workspace_name: None,
                 plan_type: codex_protocol::account::PlanType::Pro,
             })
         );
