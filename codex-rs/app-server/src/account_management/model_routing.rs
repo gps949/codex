@@ -174,8 +174,7 @@ impl AccountManager {
                 .models
                 .into_iter()
                 .filter(|model| {
-                    !model.used_fallback_model_metadata
-                        && model.model_specialty.is_none()
+                    model.model_specialty.is_none()
                         && available
                             .iter()
                             .any(|preset| preset.model == model.slug && preset.show_in_picker)
@@ -284,7 +283,11 @@ impl AccountManager {
                         codex_config::ModelRoutingRole::Capability => RoutingModelRole::Capability,
                     })
                     .or_else(|| default_routing_role(&model))?;
-                Some(RoutingCandidate { model, role })
+                Some(RoutingCandidate {
+                    model,
+                    role,
+                    origin: codex_protocol::openai_models::ModelOrigin::Provider,
+                })
             })
             .collect::<Vec<_>>();
         let selected = choose_task_model(

@@ -132,6 +132,7 @@ async fn account_read_reports_chatgpt_when_only_pool_profile_has_credentials() -
     assert_eq!(
         account.account,
         Some(Account::Chatgpt {
+            workspace_name: None,
             email: Some("selected-acct@example.com".to_string()),
             plan_type: AccountPlanType::Pro,
         })
@@ -300,6 +301,7 @@ async fn account_pool_external_selection_updates_running_server() -> Result<()> 
             if after.is_some_and(|after| {
                 after.account
                     == Some(Account::Chatgpt {
+                        workspace_name: None,
                         email: Some("second@example.com".to_string()),
                         plan_type: AccountPlanType::Pro,
                     })
@@ -433,7 +435,10 @@ async fn account_pool_mobile_query_does_not_add_model_history(command: &str) -> 
         .items
         .iter()
         .find_map(|item| match item {
-            ThreadItem::AgentMessage { text, .. } => Some(text.as_str()),
+            ThreadItem {
+                payload: codex_app_server_protocol::ThreadItemPayload::AgentMessage { text, .. },
+                ..
+            } => Some(text.as_str()),
             _ => None,
         })
         .expect("local /account status message");
@@ -584,8 +589,10 @@ async fn account_pool_mobile_controls_select_and_save_strategy(overridden: bool)
         let text = serde_json::to_string(&reply.turn.items)?;
         assert!(text.contains(expected), "{command}: {text}");
         if command == "/account list 0" || command == "/status pool 0" {
-            let Some(codex_app_server_protocol::ThreadItem::AgentMessage { text, .. }) =
-                reply.turn.items.first()
+            let Some(codex_app_server_protocol::ThreadItem {
+                payload: codex_app_server_protocol::ThreadItemPayload::AgentMessage { text, .. },
+                ..
+            }) = reply.turn.items.first()
             else {
                 anyhow::bail!("expected local invalid-page reply");
             };

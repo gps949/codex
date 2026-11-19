@@ -106,6 +106,8 @@ pub(crate) fn credentials(user: &str, workspace: &str, suffix: &str) -> AuthDotJ
         auth_mode: Some(AuthMode::Chatgpt),
         openai_api_key: None,
         tokens: Some(TokenData {
+            oauth_provenance: None,
+            login_owner_id: None,
             id_token: crate::token_data::parse_chatgpt_jwt_claims(&jwt).unwrap(),
             access_token: format!("access-{suffix}"),
             refresh_token: format!("refresh-{suffix}"),

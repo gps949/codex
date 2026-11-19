@@ -23,8 +23,16 @@ async fn account_pool_logout_preserves_profiles_and_explicit_use_resumes(
     write_pool_only_fixture(home.path());
     let credentials = std::fs::read(home.path().join("auth-profiles/selected-acct/auth.json"))?;
     std::fs::write(home.path().join("auth.json"), &credentials)?;
+    let revoke_url = format!("{}/oauth/revoke", backend.uri());
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/oauth/revoke"))
+        .respond_with(wiremock::ResponseTemplate::new(/*status*/ 200))
+        .expect(/*r*/ 0)
+        .mount(&backend)
+        .await;
     let mut app = TestAppServer::builder()
         .with_codex_home(home.path())
+        .with_env_overrides(&[("CODEX_REVOKE_TOKEN_URL_OVERRIDE", Some(revoke_url.as_str()))])
         .build()
         .await?;
     app.initialize().await?;

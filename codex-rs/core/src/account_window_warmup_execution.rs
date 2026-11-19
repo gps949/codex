@@ -112,12 +112,24 @@ pub(super) async fn warm_profile_with_guard(
     // interactive turns. Do not call get_default_model: a configured slug is
     // returned unvalidated. One catalog only — never mix live slugs with
     // bundled names the backend may not have.
-    let catalog = crate::thread_manager::build_models_manager(config, Arc::clone(&auth_manager))
-        .raw_model_catalog(
-            codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
-            factory.clone(),
-        )
-        .await;
+    let installation_id = resolve_installation_id(&config.codex_home)
+        .await
+        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    let runtime = crate::runtime_auth::build_runtime_auth_manager(
+        config,
+        Arc::clone(&auth_manager),
+        &installation_id,
+    );
+    let runtime_auth = runtime
+        .clone()
+        .map(|manager| (manager, config.runtime_auth_mode));
+    let catalog =
+        crate::thread_manager::build_models_manager(config, Arc::clone(&auth_manager), runtime)
+            .raw_model_catalog(
+                codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
+                factory.clone(),
+            )
+            .await;
     let models = codex_models_manager::select_warmup_models(&catalog, config.model.as_deref());
     if models.is_empty() {
         warn!(%profile_id, "standby window warmup skipped: no catalog-backed ChatGPT model");
@@ -132,10 +144,14 @@ pub(super) async fn warm_profile_with_guard(
     });
     let thread_id = ThreadId::new();
     let client = ModelClient::new(
-        Some(Arc::clone(&auth_manager)),
+        codex_model_provider::ProviderAuthContext {
+            credentials: Arc::clone(&auth_manager),
+            runtime_auth,
+        }
+        .model_provider(provider),
         agent_identity_auth_policy(&config.features),
         thread_id,
-        provider,
+        crate::session::session::Session::new_item_id_generator(),
         SessionSource::Cli,
         warmup_originator(),
         models
@@ -150,6 +166,7 @@ pub(super) async fn warm_profile_with_guard(
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
         /*concurrent_reasoning_summaries_enabled*/ false,
+        /*output_token_replay_enabled*/ false,
         /*attestation_provider*/ None,
         factory,
         config.workspace_routing_context(),
@@ -159,9 +176,7 @@ pub(super) async fn warm_profile_with_guard(
     .with_warmup_request_guard(Arc::clone(&request_guard));
     // Interactive turns persist a UUID installation id and reject non-UUID files.
     // The previous literal is not a UUID and is not a real install identity.
-    let installation_id = resolve_installation_id(&config.codex_home)
-        .await
-        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+
     let responses_metadata = warmup_responses_metadata(installation_id, thread_id);
 
     // Share observed rate limits outside the timeout future so a late timeout can still keep

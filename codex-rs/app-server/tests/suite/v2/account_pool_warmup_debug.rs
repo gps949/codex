@@ -487,7 +487,7 @@ async fn account_pool_warmup_discovers_the_standby_workspace_without_switching_e
         foreground_before["requirements"]["application"],
         json!({"network": {
             "enabled": false, "domains": {"foreground.example": "allow"}
-        }})
+        }, "storage": null})
     );
     let id = mcp
         .send_raw_request("accountPool/warmupDebug", Some(json!({"runNow":true})))

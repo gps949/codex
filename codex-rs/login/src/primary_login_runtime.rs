@@ -253,7 +253,10 @@ impl PrimaryLoginResolver {
             // A same-owner re-login can replace tokens while proactive refresh awaits. Do not
             // return that older credential snapshot, even though its workspace still matches.
             if current.as_ref().and_then(|auth| auth.tokens.as_ref())
-                != Some(&auth.get_token_data()?)
+                != auth
+                    .get_current_auth_json()
+                    .as_ref()
+                    .and_then(|auth| auth.tokens.as_ref())
             {
                 return Err(source_changed());
             }

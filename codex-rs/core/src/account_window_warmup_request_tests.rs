@@ -46,10 +46,10 @@ async fn run_warmup_websocket(events: Vec<Value>) -> anyhow::Result<WarmupStream
     provider.stream_idle_timeout_ms = Some(2_000);
     let thread_id = ThreadId::new();
     let client = ModelClient::new(
-        /*auth_manager*/ None,
+        codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         thread_id,
-        provider,
+        crate::session::session::Session::new_item_id_generator(),
         SessionSource::Cli,
         "warmup-test".to_string(),
         /*model_verbosity*/ None,
@@ -59,6 +59,7 @@ async fn run_warmup_websocket(events: Vec<Value>) -> anyhow::Result<WarmupStream
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
         /*concurrent_reasoning_summaries_enabled*/ false,
+        /*output_token_replay_enabled*/ false,
         /*attestation_provider*/ None,
         config.http_client_factory(),
         config.workspace_routing_context(),

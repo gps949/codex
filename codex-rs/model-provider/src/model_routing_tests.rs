@@ -15,14 +15,17 @@ fn model(slug: &str) -> ModelInfo {
 fn candidates() -> Vec<RoutingCandidate> {
     vec![
         RoutingCandidate {
+            origin: ModelOrigin::Provider,
             model: model("gpt-6-luna"),
             role: RoutingModelRole::Economy,
         },
         RoutingCandidate {
+            origin: ModelOrigin::Provider,
             model: model("gpt-6.1-sol"),
             role: RoutingModelRole::Balanced,
         },
         RoutingCandidate {
+            origin: ModelOrigin::Provider,
             model: model("gpt-6-astra"),
             role: RoutingModelRole::Capability,
         },
@@ -66,6 +69,7 @@ fn large_catalog_filters_the_allowlist_before_bounding_candidates() {
             let mut model = model("gpt-6.1-sol");
             model.slug = format!("catalog-model-{index}");
             RoutingCandidate {
+                origin: ModelOrigin::Provider,
                 model,
                 role: RoutingModelRole::Balanced,
             }
@@ -108,8 +112,7 @@ fn large_catalog_filters_the_allowlist_before_bounding_candidates() {
         .iter_mut()
         .find(|candidate| candidate.model.slug == "gpt-6.1-sol")
         .expect("current model")
-        .model
-        .used_fallback_model_metadata = true;
+        .origin = ModelOrigin::Synthetic;
     let allowed = vec!["gpt-6-luna".to_string()];
     let mut routing_request = request(&catalog);
     routing_request.allowed_models = &allowed;
@@ -294,9 +297,12 @@ fn a_service_simple_answer_cannot_lower_an_explicit_local_risk_floor() {
 fn metadata_eligibility_rejects_fallback_hidden_specialty_and_retired_models() {
     for invalid in 0..7 {
         let mut candidates = candidates();
+        if invalid == 0 {
+            candidates[0].origin = ModelOrigin::Synthetic;
+        }
         let model = &mut candidates[0].model;
         match invalid {
-            0 => model.used_fallback_model_metadata = true,
+            0 => {}
             1 => model.visibility = ModelVisibility::Hide,
             2 => model.model_specialty = Some("cyber".into()),
             3 => model.description = Some("Retired model; do not use.".into()),
@@ -409,9 +415,6 @@ fn role_defaults_do_not_infer_from_prefix_or_missing_metadata() {
     info.slug = "custom/gpt-6-luna".into();
     assert_eq!(default_routing_role(&info), None);
     info.slug = "gpt-6-luna".into();
-    info.used_fallback_model_metadata = true;
-    assert_eq!(default_routing_role(&info), None);
-    info.used_fallback_model_metadata = false;
     info.description = Some("Unclassified custom deployment.".into());
     assert_eq!(default_routing_role(&info), None);
 }

@@ -41,7 +41,7 @@ fn rate_limit_snapshot(
 
 fn account_rate_limits_response(snapshot: RateLimitSnapshot) -> GetAccountRateLimitsResponse {
     GetAccountRateLimitsResponse {
-        reset_owner_key: None,
+        reset_owner_key: Some("a".repeat(64)),
         pending_reset_credit: None,
 
         ordinary_usage_allowed: None,
@@ -129,7 +129,6 @@ async fn backend_banner_state_survives_widget_replacement() -> Result<()> {
             app.chat_widget
                 .handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         }
-        let before = render_bottom_popup(&app.chat_widget, /*width*/ 90);
         let mut tui = crate::tui::test_support::make_test_tui()?;
         let init = app.chatwidget_init_for_forked_or_resumed_thread(
             &mut tui,
@@ -142,9 +141,15 @@ async fn backend_banner_state_survives_widget_replacement() -> Result<()> {
             Box::new(PlainHistoryCell::new(Vec::new())),
         );
         app.chat_widget.pre_draw_tick();
-        assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 90), before);
+        assert_eq!(
+            render_bottom_popup(&app.chat_widget, /*width*/ 90).contains("View usage"),
+            !dismiss
+        );
         app.chat_widget.update_backend_banner(&response);
-        assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 90), before);
+        assert_eq!(
+            render_bottom_popup(&app.chat_widget, /*width*/ 90).contains("View usage"),
+            !dismiss
+        );
         response.rate_limit_upsell = None;
         app.chat_widget.update_backend_banner(&response);
         assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 90).contains("View usage"));
@@ -270,9 +275,26 @@ async fn stale_rate_limit_reads_preserve_newer_workspace_hard_stop_for_every_ori
             "reset-picker" => RateLimitRefreshOrigin::ResetPicker {
                 request_id: app.chat_widget.show_rate_limit_reset_loading_popup(),
             },
-            "reset-consume" => RateLimitRefreshOrigin::ResetConsume {
-                request_id: app.chat_widget.show_rate_limit_reset_consuming_popup(),
-            },
+            "reset-consume" => {
+                let operation = crate::app::reset_credit_operation::ResetCreditOperation {
+                    owner_key: "a".repeat(64),
+                    idempotency_key: "synthetic-hard-stop-refresh".into(),
+                    credit_id: None,
+                };
+                app.chat_widget
+                    .set_reset_credit_owner(Some(operation.owner_key.clone()));
+                app.chat_widget
+                    .set_pending_reset_credit_operation(Some(operation.clone()), None);
+                let request_id = app
+                    .prepare_reset_credit_operation(&operation)
+                    .expect("synthetic reset");
+                assert!(app.finish_reset_credit_operation(request_id, operation, Ok(
+                    codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse {
+                        outcome: codex_app_server_protocol::ConsumeAccountRateLimitResetCreditOutcome::Reset,
+                    }
+                )));
+                RateLimitRefreshOrigin::ResetConsume { request_id }
+            }
             _ => unreachable!("unknown refresh origin"),
         };
         let read_generation = app.rate_limit_hard_stop_generation;
@@ -314,7 +336,10 @@ async fn stale_rate_limit_reads_preserve_newer_workspace_hard_stop_for_every_ori
                 assert!(popup.contains("You don't have any usage limit resets available."));
             }
             "reset-consume" => {
-                assert!(popup.contains("Usage reset. You have 0 usage limit resets left."));
+                assert!(
+                    popup
+                        .contains("Reset operation confirmed. You have 0 usage limit resets left.")
+                );
             }
             "startup" | "status" => {}
             _ => unreachable!("unknown refresh origin"),

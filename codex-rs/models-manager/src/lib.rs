@@ -1,14 +1,19 @@
 pub mod cache;
+mod catalog;
 pub mod collaboration_mode_presets;
 pub(crate) mod config;
 pub mod manager;
 pub mod model_info;
 pub mod model_presets;
+mod originator;
 pub mod test_support;
 pub mod warmup_selection;
 
+pub use catalog::CatalogModel;
+pub use catalog::ModelOrigin;
 pub use codex_protocol::auth::AuthMode;
 pub use config::ModelsManagerConfig;
+pub use originator::ModelCatalogOriginator;
 pub use warmup_selection::is_unusable_warmup_model_error;
 pub use warmup_selection::select_warmup_model;
 pub use warmup_selection::select_warmup_models;

@@ -46,11 +46,12 @@ impl AccountManager {
             auth.is_chatgpt_auth(),
             "Reset credits are available only for ChatGPT subscription accounts"
         );
-        let loader = codex_cloud_config::cloud_config_bundle_loader(
+        let loader = codex_cloud_config::managed_config_bundle_loader(
             Arc::clone(&manager),
             self.config.chatgpt_base_url.clone(),
             self.config.codex_home.to_path_buf(),
             factory,
+            self.config.config_layer_stack.requirements_toml(),
         );
         let config = codex_core::config::ConfigBuilder::default()
             .codex_home(self.config.codex_home.to_path_buf())

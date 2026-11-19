@@ -62,7 +62,7 @@ fn persisted_compactions(rollout_path: &Path) -> anyhow::Result<Vec<CompactedIte
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter_map(|line| match line.item {
-            RolloutItem::Compacted(compacted) => Some(compacted),
+            RolloutItem::Compacted(compacted) => Some(*compacted),
             _ => None,
         })
         .collect())
@@ -95,7 +95,7 @@ fn append_opaque_compaction(
     let line = RolloutLine {
         timestamp: chrono::Utc::now().to_rfc3339(),
         ordinal: None,
-        item: RolloutItem::Compacted(CompactedItem {
+        item: RolloutItem::Compacted(Box::new(CompactedItem {
             message: String::new(),
             replacement_history: Some(vec![ResponseItemEnvelope {
                 item: ResponseItem::Compaction {
@@ -115,7 +115,7 @@ fn append_opaque_compaction(
             compaction_response_id: None,
             latest_token_usage_record: None,
             resume_metadata: None,
-        }),
+        })),
     };
     let mut rollout = std::fs::read_to_string(rollout_path)?;
     rollout.push_str(&serde_json::to_string(&line)?);

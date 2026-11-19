@@ -703,6 +703,7 @@ async fn recovery_retains_the_admitted_model_and_effort() -> Result<()> {
     .await;
     test.codex
         .recover_turn_if_idle(RecoverTurnRequest {
+            prompt_cache_ttl: None,
             turn_id: "recovered-admitted-choice".into(),
             thread_settings: Default::default(),
             trace: None,
@@ -759,7 +760,8 @@ async fn steering_a_simple_request_preserves_the_active_choice() -> Result<()> {
             text_elements: Vec::new(),
         };
     }
-    let TurnInputSubmission::Started { turn_id } = test.codex.start_or_steer_turn(request).await?
+    let TurnInputSubmission::Started { turn_id, .. } =
+        test.codex.start_or_steer_turn(request).await?
     else {
         panic!("new task expected");
     };
@@ -802,16 +804,18 @@ async fn steering_a_simple_request_preserves_the_active_choice() -> Result<()> {
     Ok(())
 }
 
-#[test_case("none", None, "routing-economy", ReasoningEffort::Low; "fresh_child")]
-#[test_case("1", None, "routing-economy", ReasoningEffort::Low; "partial_child")]
-#[test_case("all", None, "routing-balanced", ReasoningEffort::Medium; "full_fork")]
-#[test_case("2", Some("function_call_output"), "routing-economy", ReasoningEffort::Low; "partial_function_audio_filtered")]
-#[test_case("2", Some("custom_tool_call_output"), "routing-economy", ReasoningEffort::Low; "partial_custom_audio_filtered")]
-#[test_case("2", Some("retained_message_audio"), "routing-balanced", ReasoningEffort::Medium; "partial_retained_message_audio")]
+#[test_case("none", None, "plaintext", "routing-economy", ReasoningEffort::Low; "fresh_child")]
+#[test_case("1", None, "plaintext", "routing-balanced", ReasoningEffort::Medium; "legacy_count_inherits_full_history")]
+#[test_case("all", None, "plaintext", "routing-balanced", ReasoningEffort::Medium; "full_fork")]
+#[test_case("2", Some("function_call_output"), "plaintext", "routing-balanced", ReasoningEffort::Medium; "legacy_count_with_function_audio")]
+#[test_case("2", Some("custom_tool_call_output"), "plaintext", "routing-balanced", ReasoningEffort::Medium; "legacy_count_with_custom_audio")]
+#[test_case("2", Some("retained_message_audio"), "plaintext", "routing-balanced", ReasoningEffort::Medium; "partial_retained_message_audio")]
+#[test_case("none", None, "encrypted", "routing-balanced", ReasoningEffort::Medium; "opaque_message_keeps_parent_model")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn child_creation_routes_only_fresh_or_partial_history(
+async fn child_creation_routes_fresh_and_preserves_inherited_history(
     fork_turns: &str,
     audio_output_type: Option<&str>,
+    message_kind: &str,
     expected_model: &str,
     expected_effort: ReasoningEffort,
 ) -> Result<()> {
@@ -844,9 +848,15 @@ async fn child_creation_routes_only_fresh_or_partial_history(
             && !body["input"].as_array().expect("request input").iter().any(|item| item["call_id"] == "route-child-spawn")
     }, responses::sse(vec![
         responses::ev_response_created("parent-spawn"),
-        responses::ev_function_call_with_namespace("route-child-spawn", "collaboration", "spawn_agent", &json!({
-            "task_name": "translation_worker", "message": "Translate this short sentence", "fork_turns": fork_turns,
-        }).to_string()),
+        {
+            let mut call = responses::ev_function_call_with_namespace("route-child-spawn", "collaboration", "spawn_agent", &json!({
+                "task_name": "translation_worker", "message": "Translate this short sentence", "fork_turns": fork_turns,
+            }).to_string());
+            if message_kind == "plaintext" {
+                call["item"]["encrypted_function_args"] = json!([]);
+            }
+            call
+        },
         responses::ev_completed("parent-spawn"),
     ])).await;
     let child_parent_id = parent_id.clone();

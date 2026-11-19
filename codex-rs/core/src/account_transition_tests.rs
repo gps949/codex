@@ -26,6 +26,8 @@ fn envelope(
 
 fn unattributed_message(role: &str, suffix: &str, content_kind: &str) -> ResponseItem {
     ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: Some(ResponseItemId::with_suffix("msg", suffix)),
         role: role.to_string(),
         content: vec![ContentItem::InputText {
@@ -57,9 +59,13 @@ fn portable_unattributed_history_retains_ids_and_content_annotations() {
     ];
     let model_or_server = [
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: Some(ResponseItemId::with_suffix("msg", "assistant")),
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
+                annotations: None,
+                logprobs: None,
                 text: "model output".to_string(),
             }],
             phase: None,
@@ -80,6 +86,8 @@ fn portable_unattributed_history_retains_ids_and_content_annotations() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: Some(ResponseItemId::with_suffix("fc", "tool-call")),
             name: "example".to_string(),
             namespace: None,
@@ -294,7 +302,12 @@ fn foreign_encrypted_only_tool_output_keeps_call_pair_with_placeholder() {
     };
     assert_eq!(
         output.body,
-        FunctionCallOutputBody::Text(AccountTransitionToolOutputNotice.render())
+        FunctionCallOutputBody::Text(
+            AccountTransitionToolOutputNotice
+                .render()
+                .into_text()
+                .unwrap_or_default()
+        )
     );
     assert_eq!(stats.stripped_encrypted_tool_outputs, 1);
 }
@@ -324,6 +337,8 @@ fn metadata_fixture_documents_history_wire_extension() {
     let profile = AccountProfileId::new("account-a").expect("valid id");
     let envelope = envelope(
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: Vec::new(),

@@ -125,8 +125,14 @@ pub(super) async fn launch(
     );
     let threads = Arc::new(codex_core::ThreadManager::new(
         &config,
-        Arc::clone(&auth),
-        codex_core::build_models_manager(&config, auth),
+        codex_core::build_startup_models(
+            &config,
+            auth,
+            "11111111-1111-4111-8111-111111111111".into(),
+            Arc::new(codex_models_manager::manager::ModelCatalogSettings::disk(
+                config.codex_home.to_path_buf(),
+            )),
+        ),
         codex_core::CodexAppsToolsCache::default(),
         codex_protocol::protocol::SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -134,9 +140,8 @@ pub(super) async fn launch(
         Arc::new(codex_core::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
         codex_core::passthrough_image_store(),
-        codex_core::thread_store_from_config(&config, /*state_db*/ None),
+        codex_core::ThreadStoreBuilder::from_config(&config, /*state_db*/ None).build(),
         /*agent_graph_store*/ None,
-        "11111111-1111-4111-8111-111111111111".into(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     ));
@@ -152,11 +157,13 @@ pub(super) async fn launch(
             },
             thread_id,
             NativeMenuInput {
-                user: ThreadItem::UserMessage {
-                    id: "user-item".into(),
-                    client_id: None,
-                    content: vec![],
-                },
+                user: ThreadItem::untimed(
+                    codex_app_server_protocol::ThreadItemPayload::UserMessage {
+                        id: "user-item".into(),
+                        client_id: None,
+                        content: vec![],
+                    },
+                ),
                 inventory: empty_inventory(),
                 thread: Arc::clone(&thread),
             },
@@ -604,6 +611,7 @@ async fn real_turn_barrier_uses_shared_gate_and_completes_native_menu_before_for
         .send_server_notification(ServerNotification::TurnStarted(TurnStartedNotification {
             thread_id: thread_id.to_string(),
             turn: Turn {
+                root_turn_id: None,
                 id: "real-turn".into(),
                 items: vec![],
                 items_view: TurnItemsView::NotLoaded,

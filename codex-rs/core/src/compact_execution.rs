@@ -75,7 +75,11 @@ impl LocalCompactionExecution {
         };
         let preflight_history = history
             .clone()
-            .for_prompt_annotated(&turn.model_info().input_modalities);
+            .for_prompt_annotated(
+                &turn.model_info().input_modalities,
+                session.services.image_store.as_ref(),
+            )
+            .await;
         let mut client = if let Some(target) = &api_target {
             project_api_history(preflight_history)?;
             session

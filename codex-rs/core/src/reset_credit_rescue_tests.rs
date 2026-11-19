@@ -828,6 +828,8 @@ async fn credit_test_auth(
             auth_mode: Some(AuthMode::Chatgpt),
             openai_api_key: None,
             tokens: Some(TokenData {
+                oauth_provenance: None,
+                login_owner_id: None,
                 id_token: parse_chatgpt_jwt_claims(&token).map_err(std::io::Error::other)?,
                 access_token: token,
                 refresh_token: format!("{workspace}-refresh"),

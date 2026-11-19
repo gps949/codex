@@ -157,7 +157,7 @@ impl NativeAccountManager {
                 "Account inventory could not be loaded. Check host account settings.".to_string()
             })?;
         let inventory = FrozenAccountInventory::from_inventory(inventory);
-        let user = ThreadItem::UserMessage {
+        let user = ThreadItem::untimed(codex_app_server_protocol::ThreadItemPayload::UserMessage {
             id: Uuid::now_v7().to_string(),
             client_id: params.client_user_message_id.as_deref().map(|id| {
                 crate::native_account_capabilities::bounded_text(id, /*max_chars*/ 128)
@@ -173,7 +173,7 @@ impl NativeAccountManager {
                 },
                 text_elements: vec![],
             }],
-        };
+        });
         let _ordering = outgoing
             .native_account_ordering
             .lock_thread(thread_id)
@@ -231,6 +231,7 @@ impl NativeAccountManager {
             state.menus.insert(thread_id, menu.clone());
         }
         let turn = Turn {
+            root_turn_id: Some(menu.turn_id.clone()),
             id: menu.turn_id.clone(),
             items: vec![],
             items_view: TurnItemsView::NotLoaded,

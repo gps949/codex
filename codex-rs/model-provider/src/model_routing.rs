@@ -2,6 +2,7 @@
 
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelOrigin;
 use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ReasoningEffort;
 use serde::Deserialize;
@@ -30,6 +31,7 @@ pub enum RoutingModelRole {
 #[derive(Debug, Clone)]
 pub struct RoutingCandidate {
     pub model: ModelInfo,
+    pub origin: ModelOrigin,
     pub role: RoutingModelRole,
 }
 
@@ -216,13 +218,27 @@ pub fn default_routing_role(info: &ModelInfo) -> Option<RoutingModelRole> {
         | ("gpt-5.6-luna", Some("Older fast and efficient model.")) => {
             Some(RoutingModelRole::Economy)
         }
-        ("gpt-6.1-sol", Some("Latest workhorse model for coding and everyday work."))
+        ("gpt-6.2-sol", Some("Fast, go-to model for coding and everyday work."))
+        | ("gpt-6.1-sol", Some("Previous generation model for coding and everyday work."))
+        | (
+            "gpt-6.1-terra",
+            Some("Efficient model that excels at visual understanding and computer use."),
+        )
+        | ("gpt-6.1-sol", Some("Latest workhorse model for coding and everyday work."))
         | ("gpt-6-sol", Some("Previous generation workhorse model."))
         | ("gpt-5.6-sol", Some("Older generation workhorse model."))
         | ("gpt-5.6-terra", Some("Older balanced model for straightforward work.")) => {
             Some(RoutingModelRole::Balanced)
         }
-        ("gpt-6-astra", Some("Frontier intelligence for the most demanding work.")) => {
+        (
+            "gpt-6.2-astra",
+            Some("Our most capable model for complex coding and professional work."),
+        )
+        | (
+            "gpt-6-astra",
+            Some("Previous generation model for complex coding and professional work."),
+        )
+        | ("gpt-6-astra", Some("Frontier intelligence for the most demanding work.")) => {
             Some(RoutingModelRole::Capability)
         }
         _ => None,
@@ -255,7 +271,7 @@ pub fn choose_task_model(
         .candidates
         .iter()
         .find(|candidate| candidate.model.slug == request.current_model)?;
-    if !complete_model_metadata(&current.model) {
+    if current.origin == ModelOrigin::Synthetic || !complete_model_metadata(&current.model) {
         return None;
     }
     let local = classify_task_locally(request.task);
@@ -296,7 +312,8 @@ pub fn choose_task_model(
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
-            complete_model_metadata(&candidate.model)
+            candidate.origin != ModelOrigin::Synthetic
+                && complete_model_metadata(&candidate.model)
                 && (request.allowed_models.is_empty()
                     || request.allowed_models.contains(&candidate.model.slug))
                 && role_rank(candidate.role) >= floor
@@ -350,8 +367,7 @@ pub fn choose_task_model(
 }
 
 fn complete_model_metadata(info: &ModelInfo) -> bool {
-    !info.used_fallback_model_metadata
-        && !info.slug.is_empty()
+    !info.slug.is_empty()
         && info.slug.len() <= 128
         && !info.slug.chars().any(char::is_control)
         && info.visibility == ModelVisibility::List

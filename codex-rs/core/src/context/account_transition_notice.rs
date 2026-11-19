@@ -1,5 +1,7 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::input_text;
 
 /// Fixed-size notice used when account-scoped encrypted tool output cannot cross an execution
 /// account boundary.
@@ -15,10 +17,6 @@ impl ContextualUserFragment for AccountTransitionToolOutputNotice {
         "developer"
     }
 
-    fn requires_separate_message(&self) -> bool {
-        true
-    }
-
     fn markers(&self) -> (&'static str, &'static str) {
         Self::type_markers()
     }
@@ -30,8 +28,7 @@ impl ContextualUserFragment for AccountTransitionToolOutputNotice {
         )
     }
 
-    fn body(&self) -> String {
-        "\nEncrypted tool output was omitted because it belongs to a different Codex execution account.\n"
-            .to_string()
+    fn body(&self) -> ContentItem {
+        input_text("\nEncrypted tool output was omitted because it belongs to a different Codex execution account.\n".to_string())
     }
 }

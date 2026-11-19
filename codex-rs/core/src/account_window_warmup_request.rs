@@ -60,6 +60,8 @@ pub(crate) fn warmup_prompt(model_info: &ModelInfo) -> Prompt {
                 text: WARMUP_PROMPT.to_string(),
             }],
             phase: None,
+            status: None,
+            encrypted_content: None,
             internal_chat_message_metadata_passthrough: None,
         }],
         tools: warmup_tool_specs(model_info),
@@ -106,13 +108,18 @@ fn warmup_tool_specs(model_info: &ModelInfo) -> Arc<[ToolSpec]> {
     match model_info.tool_mode {
         Some(ToolMode::CodeMode | ToolMode::CodeModeOnly) => Arc::from([
             create_code_mode_tool(
-                &[],
-                &[],
-                &BTreeMap::new(),
-                codex_code_mode::DEFAULT_EXEC_YIELD_TIME_MS,
-                matches!(model_info.tool_mode, Some(ToolMode::CodeModeOnly)),
-                ImageDetailVisibility::Visible,
-                model_messages.code_mode(),
+                codex_code_mode::build_exec_tool_description_and_definitions(
+                    &[],
+                    &[],
+                    &BTreeMap::new(),
+                    codex_code_mode::DEFAULT_EXEC_YIELD_TIME_MS,
+                    matches!(model_info.tool_mode, Some(ToolMode::CodeModeOnly)),
+                    ImageDetailVisibility::Visible,
+                    codex_code_mode::DeferredToolDiscovery::Catalog,
+                    /*incremental_exec_enabled*/ false,
+                    model_messages.code_mode(),
+                )
+                .0,
             ),
             create_wait_tool(
                 model_messages.code_mode_wait_description_override(),
@@ -122,11 +129,9 @@ fn warmup_tool_specs(model_info: &ModelInfo) -> Arc<[ToolSpec]> {
         Some(ToolMode::Direct) | None => Arc::from([
             create_exec_command_tool_with_environment_id(
                 CommandToolOptions {
-                    allow_login_shell: false,
                     exec_permission_approvals_enabled: false,
                 },
                 /*include_environment_id*/ false,
-                /*include_shell_parameter*/ true,
                 /*include_windows_shell_guidance*/ cfg!(windows),
             ),
             create_write_stdin_tool(),
@@ -209,7 +214,8 @@ pub(crate) async fn stream_warmup_turn(
             | ResponseEvent::ReasoningSummaryPartAdded { .. } => {
                 accepted.store(true, Ordering::Relaxed);
             }
-            ResponseEvent::SafetyBuffering(_)
+            ResponseEvent::GuardianAssessment(_)
+            | ResponseEvent::SafetyBuffering(_)
             | ResponseEvent::ServerModel(_)
             | ResponseEvent::ModelVerifications(_)
             | ResponseEvent::TurnModerationMetadata(_)
