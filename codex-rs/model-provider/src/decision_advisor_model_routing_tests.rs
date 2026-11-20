@@ -201,22 +201,46 @@ async fn service_assessment_times_out_without_retrying_the_paid_call() {
     let server = MockServer::start().await;
     let mut settings = settings(&server, DecisionAdvisorProvider::Typesafe);
     settings.timeout = Duration::from_millis(/*millis*/ 100);
-    Mock::given(method("POST"))
+    let mock = Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(/*s*/ 200)
                 .set_body_json(answer(&settings.model, "simple"))
                 .set_delay(Duration::from_secs(/*secs*/ 1)),
         )
         .expect(/*r*/ 1)
-        .mount(&server)
+        .mount_as_scoped(&server)
         .await;
     let advisor = DecisionAdvisor::default();
-    for _ in 0..2 {
-        assert_eq!(
-            advisor
-                .assess_task(&settings, &factory(), "Translate this.", Some("test"))
-                .await,
-            Err(DecisionAdvisorFallback::TimedOut)
+    let factory = factory();
+    tokio::time::pause();
+    let request = advisor.assess_task(&settings, &factory, "Translate this.", Some("test"));
+    tokio::pin!(request);
+    let received = mock.wait_until_satisfied();
+    tokio::pin!(received);
+    let deadline = Instant::now() + Duration::from_secs(/*secs*/ 30);
+    // Keep the runtime runnable so CI scheduling cannot expire the request before dispatch.
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "advisor request did not reach the mock server"
         );
+        tokio::select! {
+            () = &mut received => break,
+            result = &mut request => panic!("assessment ended before dispatch: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
     }
+    // Expire the inner request budget before the enclosing assessment deadline,
+    // allowing the timeout result to be cached for the next identical assessment.
+    tokio::time::advance(settings.timeout - Duration::from_millis(/*millis*/ 1)).await;
+    assert_eq!(request.await, Err(DecisionAdvisorFallback::TimedOut));
+    tokio::time::resume();
+    assert_eq!(
+        advisor
+            .assess_task(&settings, &factory, "Translate this.", Some("test"))
+            .await,
+        Err(DecisionAdvisorFallback::TimedOut)
+    );
+    assert_eq!(advisor.stats().requests, 1);
+    assert_eq!(advisor.stats().cache_hits, 1);
 }
