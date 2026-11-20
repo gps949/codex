@@ -208,39 +208,16 @@ pub fn classify_task_locally(task: &str) -> RoutingTaskComplexity {
     RoutingTaskComplexity::Unknown
 }
 
-/// Known exact catalog descriptions provide roles, without extrapolating model-name prefixes.
+/// Reviewed exact model IDs provide roles; descriptive copy is not a stable identifier.
 pub fn default_routing_role(info: &ModelInfo) -> Option<RoutingModelRole> {
     if !complete_model_metadata(info) {
         return None;
     }
-    match (info.slug.as_str(), info.description.as_deref()) {
-        ("gpt-6-luna", Some("Fast and affordable model for easier tasks."))
-        | ("gpt-5.6-luna", Some("Older fast and efficient model.")) => {
-            Some(RoutingModelRole::Economy)
-        }
-        ("gpt-6.2-sol", Some("Fast, go-to model for coding and everyday work."))
-        | ("gpt-6.1-sol", Some("Previous generation model for coding and everyday work."))
-        | (
-            "gpt-6.1-terra",
-            Some("Efficient model that excels at visual understanding and computer use."),
-        )
-        | ("gpt-6.1-sol", Some("Latest workhorse model for coding and everyday work."))
-        | ("gpt-6-sol", Some("Previous generation workhorse model."))
-        | ("gpt-5.6-sol", Some("Older generation workhorse model."))
-        | ("gpt-5.6-terra", Some("Older balanced model for straightforward work.")) => {
-            Some(RoutingModelRole::Balanced)
-        }
-        (
-            "gpt-6.2-astra",
-            Some("Our most capable model for complex coding and professional work."),
-        )
-        | (
-            "gpt-6-astra",
-            Some("Previous generation model for complex coding and professional work."),
-        )
-        | ("gpt-6-astra", Some("Frontier intelligence for the most demanding work.")) => {
-            Some(RoutingModelRole::Capability)
-        }
+    match info.slug.as_str() {
+        "gpt-6-luna" | "gpt-5.6-luna" => Some(RoutingModelRole::Economy),
+        "gpt-6.2-sol" | "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-sol" | "gpt-5.6-sol"
+        | "gpt-5.6-terra" => Some(RoutingModelRole::Balanced),
+        "gpt-6.2-astra" | "gpt-6-astra" => Some(RoutingModelRole::Capability),
         _ => None,
     }
 }

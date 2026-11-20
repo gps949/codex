@@ -10,8 +10,8 @@ describes how to keep the fork in sync with upstream and how to cut releases.
   Update with `git fetch upstream && git merge --ff-only upstream/main`.
 - `feature/native-multi-account` — the fork's integration branch. All fork
   functionality lives here, merged with an upstream stable tag.
-- `sync/rust-vX.Y.Z` — short-lived branches produced by a sync (rebase of the
-  integration branch onto a new upstream stable tag), merged back after tests.
+- `sync/rust-vX.Y.Z` — short-lived branches produced by merging a new upstream stable tag
+  into the integration branch, merged back after tests.
 
 The fork's diff is intentionally mostly _additive_ (new modules such as
 `login/src/account_pool.rs`, `core/src/failover*.rs`). The files that modify
@@ -134,24 +134,25 @@ Actions UI when they first appear.
 - **Order of operations**: sync + verify first, tag only from a green
   integration branch. Never tag a release from an unsynced/untested state.
 - **Install (users)**: download the asset for the platform, extract, put
-  `codex` and every sibling helper together on PATH. No compilation needed. Linux builds link against system
+  the complete package in one directory and add its `bin/` directory to PATH.
+  Keep `codex-package.json`, `codex-resources/` and `codex-path/` beside `bin/`. No compilation needed. Linux builds link against system
   OpenSSL 3 (any 2022+ distro).
 
 ### Coexistence with the official binary (audited)
 
 Verified safe by design — no user action needed:
 
-| Surface                        | Why it is safe                                                                                                                              |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `config.toml` `[account_pool]` | Official builds ignore unknown config sections (only `--strict-config` rejects them)                                                        |
-| Root `auth.json`               | The pool never rewrites it; per-profile credentials live under `auth-profiles/<id>/`                                                        |
-| OS keyring                     | Entries are keyed by each credential home's path, so profiles and the root login never collide                                              |
-| SQLite state DB                | Upstream explicitly tolerates databases migrated by a newer binary running in parallel                                                      |
-| Sessions/rollouts              | Official builds ignore the fork's provenance metadata; items they write are genuinely root-account items, so pool attribution stays correct |
-| Sibling helper binaries        | Each installation resolves helpers next to its own executable                                                                               |
-| Self-update                    | The fork checks its own releases; npm/brew updates of the official build never touch the fork's install dir                                 |
-| Daemon socket                  | The fork only reuses a daemon whose version matches; mismatch replaces the managed daemon with this CLI                                     |
-| Remote control                 | Enrollment uses a root-only AuthManager; pool rotation never re-pairs the remote identity; daemon spawns this CLI, not packages/standalone  |
+| Surface                        | Why it is safe                                                                                                                                            |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config.toml` `[account_pool]` | Official builds ignore unknown config sections (only `--strict-config` rejects them)                                                                      |
+| Root `auth.json`               | The pool never rewrites it; per-profile credentials live under `auth-profiles/<id>/`                                                                      |
+| OS keyring                     | Entries are keyed by each credential home's path, so profiles and the root login never collide                                                            |
+| SQLite state DB                | Upstream explicitly tolerates databases migrated by a newer binary running in parallel                                                                    |
+| Sessions/rollouts              | Official builds ignore the fork's provenance metadata; items they write are genuinely root-account items, so pool attribution stays correct               |
+| Sibling helper binaries        | Each installation resolves helpers next to its own executable                                                                                             |
+| Self-update                    | The fork checks its own releases; npm/brew updates of the official build never touch the fork's install dir                                               |
+| Daemon socket                  | The fork checks both version and managed executable contents before reuse; unmanaged sockets require an explicit stop                                     |
+| Remote control                 | Enrollment uses the selected primary-login AuthManager; pool rotation never re-pairs the remote identity; daemon spawns this CLI, not packages/standalone |
 
 Remaining edge cases (documented, not auto-fixable):
 
@@ -194,7 +195,7 @@ Remaining edge cases (documented, not auto-fixable):
 - **Remote control ownership.** Remote control follows the shared
   `AuthManager` (upstream behavior: logins and logouts retire the relay) unless
   `account-profiles.json` exists; with a pool it stays pinned to a separate
-  root-only manager so pool rotation never re-pairs it.
+  primary-login manager so pool rotation never re-pairs it.
 - **Workspace routing owner.** `AuthManager::workspace_routing` rejects a
   request captured for another account or seat before running discovery, even
   when discovery would report no route.
@@ -232,15 +233,25 @@ continues on that account. Failures fall back to the normal pool-exhausted
 error. Manual redemption (TUI `/status`, app UI,
 `account/rateLimitResetCredit/consume`) is unaffected.
 
-Note: this adds a `codex-backend-client` dependency edge to `codex-core`
-(already present in the workspace lockfile). `MODULE.bazel.lock` was not
-regenerated because Bazel CI is disabled on this fork; run
-`just bazel-lock-update` if Bazel builds are ever re-enabled.
+The Cargo and Bazel lockfiles were verified during the 0.170.0 synchronization.
+The fork release workflow now uses the pinned Bazel native Voice recipes; keep
+both lockfiles current when dependency edges change.
 
 ## Fork feature roadmap
 
 All originally planned items are implemented: the `/account` TUI picker,
 `accountPool/read|use|updated` app-server APIs, preemptive switching, cooldown
 fallback, keep-alive, per-profile re-login and enable/disable, remote-control
-identity pinned to the root account (pool rotation does not re-enroll), opt-in
+identity pinned to the selected primary login (pool rotation does not re-enroll), opt-in
 reset-credit automation, and the failover integration test.
+
+## 0.170.0 release compatibility
+
+- Voice requires the complete canonical package, including its same-commit helper and native runtime. The release gate moves the assembled package and verifies CLI/helper discovery, runtime initialization and clean shutdown without opening audio devices or calling the backend. Physical microphone/speaker and account entitlement remain runtime requirements.
+- macOS packages use local ad-hoc signatures, not Apple notarization. The Voice runtime requires macOS 14 or newer. Linux packages target GNU libc and system OpenSSL 3.
+- The installer requires Python 3.9 or newer to validate canonical archive metadata and resource hashes. It keeps the package intact and activates the CLI only after validation. Older flat releases remain supported.
+- Native MAv2 now treats legacy numeric `fork_turns` values as full history. Use `none` for a fresh task and `all` for complete inheritance; a number no longer limits context to the last N turns.
+- Default model roles use reviewed exact model IDs with validated catalog metadata. Description-only changes do not assign unknown models to a tier. Explicit per-model roles still take precedence.
+- Routing observations retain the latest compatible record and a bounded local history of 64 decisions. They contain model/effort/source/scope/application/time/reason, not prompts or credentials; they are not measurements of subscription savings.
+
+Canonical installer generations are kept under `CODEX_INSTALL_DIR/.codex-packages` so running processes and manual rollback retain their resources. They are not automatically deleted. Remove an old generation only after confirming no process uses it; repeated installations can otherwise accumulate disk usage.

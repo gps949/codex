@@ -415,6 +415,22 @@ fn role_defaults_do_not_infer_from_prefix_or_missing_metadata() {
     info.slug = "custom/gpt-6-luna".into();
     assert_eq!(default_routing_role(&info), None);
     info.slug = "gpt-6-luna".into();
-    info.description = Some("Unclassified custom deployment.".into());
+    info.description = None;
     assert_eq!(default_routing_role(&info), None);
+}
+
+#[test]
+fn reviewed_model_roles_survive_catalog_description_updates() {
+    for (slug, role) in [
+        ("gpt-6-luna", RoutingModelRole::Economy),
+        ("gpt-6.2-sol", RoutingModelRole::Balanced),
+        ("gpt-6.1-terra", RoutingModelRole::Balanced),
+        ("gpt-6.2-astra", RoutingModelRole::Capability),
+    ] {
+        let mut info = model(slug);
+        info.description = Some("Updated catalog wording for this model.".into());
+        assert_eq!(default_routing_role(&info), Some(role), "{slug}");
+        info.description = Some("Deprecated model; choose a current model.".into());
+        assert_eq!(default_routing_role(&info), None, "{slug}");
+    }
 }

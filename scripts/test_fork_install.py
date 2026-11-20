@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import stat
@@ -113,6 +114,116 @@ class InstallerTests(unittest.TestCase):
                 "PATH": f"{mock}:{install}:/usr/bin:/bin",
             }
             yield root, install, env, binary
+
+    @contextmanager
+    def canonical_fixture(self, *, wrong_target=False, unsafe=False):
+        with self.fixture(old_bundle="complete") as (root, install, env, binary):
+            files = {
+                "bin/codex": binary,
+                "bin/codex-code-mode-host": b"#!/bin/sh\nexit 0\n",
+                "bin/codex-exec-server": b"#!/bin/sh\nexit 0\n",
+                "bin/codex-responses-api-proxy": b"proxy",
+                "codex-path/rg": b"rg",
+                "codex-resources/voice/bin/codex-voice-host": b"voice",
+                "codex-resources/voice/lib/runtime.dylib": b"runtime",
+            }
+            target = "wrong-target" if wrong_target else "aarch64-apple-darwin"
+            metadata = {
+                "layoutVersion": 1,
+                "version": "0.153.4+ma.3",
+                "target": target,
+                "variant": "codex",
+                "entrypoint": "bin/codex",
+                "resourcesDir": "codex-resources",
+                "pathDir": "codex-path",
+            }
+            voice = {
+                "buildCommit": "a" * 40,
+                "appVersion": "0.153.4+ma.3",
+                "appTarget": target,
+                "voiceTarget": target,
+                "sha256": {
+                    name: hashlib.sha256(data).hexdigest()
+                    for name, data in files.items()
+                },
+            }
+            files["codex-package.json"] = json.dumps(metadata).encode()
+            files["codex-resources/voice/manifest.json"] = json.dumps(voice).encode()
+            if unsafe:
+                files["bin/../../outside"] = b"unsafe"
+            archive = Path(env["TEST_ARCHIVE"])
+            with tarfile.open(archive, "w:gz") as bundle:
+                for name, data in files.items():
+                    member = tarfile.TarInfo(name)
+                    member.size = len(data)
+                    member.mode = 0o755
+                    bundle.addfile(member, io.BytesIO(data))
+            Path(env["TEST_CHECKSUM"]).write_text(
+                hashlib.sha256(archive.read_bytes()).hexdigest()
+                + "  codex-aarch64-apple-darwin.tar.gz\n"
+            )
+            yield root, install, env, binary
+
+    def test_canonical_package_keeps_resources_and_activates_physical_cli(self):
+        with self.canonical_fixture() as (_, install, env, binary):
+            result = self.run_command(env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            cli = install / "codex"
+            self.assertTrue(cli.is_symlink())
+            self.assertEqual(cli.read_bytes(), binary)
+            package = cli.resolve().parent.parent
+            self.assertTrue((package / "codex-package.json").is_file())
+            self.assertTrue(
+                (package / "codex-resources/voice/lib/runtime.dylib").is_file()
+            )
+            self.assertTrue((package / "codex-path/rg").is_file())
+
+    def test_canonical_post_activation_failure_keeps_live_package(self):
+        with self.canonical_fixture() as (root, install, env, binary):
+            rmdir = root / "mock/rmdir"
+            rmdir.write_text(
+                '#!/bin/sh\ncase "$1" in *.codex-install.lock) exit 1;; esac\nexec /bin/rmdir "$@"\n'
+            )
+            rmdir.chmod(0o755)
+            result = self.run_command(env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((install / "codex").is_symlink())
+            self.assertEqual((install / "codex").read_bytes(), binary)
+
+    def test_canonical_package_parent_allows_shared_install_traversal(self):
+        with self.canonical_fixture() as (_, install, env, _):
+            result = self.run_command(env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            generation = (install / "codex").resolve().parent.parent.parent
+            self.assertEqual(stat.S_IMODE(generation.stat().st_mode), 0o755)
+            for directory in [
+                install / ".codex-packages",
+                generation / "package",
+                generation / "package/bin",
+            ]:
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+
+    def test_canonical_invalid_target_or_traversal_preserves_install(self):
+        for kwargs in ({"wrong_target": True}, {"unsafe": True}):
+            with (
+                self.subTest(kwargs=kwargs),
+                self.canonical_fixture(**kwargs) as (_, install, env, _),
+            ):
+                before = self.snapshot(install)
+                result = self.run_command(env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.snapshot(install), before)
+
+    def test_canonical_failed_activation_restores_previous_cli(self):
+        with self.canonical_fixture() as (_, install, env, _):
+            before = (install / "codex").read_bytes()
+            result = self.run_command(
+                {**env, "TEST_FAIL_BINARY": "codex", "TEST_FAIL_AFTER_MOVE": "1"}
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((install / "codex").read_bytes(), before)
+            self.assertFalse((install / "codex").is_symlink())
+            self.assertFalse((install / ".codex-install.lock").exists())
 
     def command(self):
         return ["/bin/bash", str(INSTALLER), "rust-v0.153.4-ma.3"]
