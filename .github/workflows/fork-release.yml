@@ -152,7 +152,7 @@ jobs:
 
       - name: Restore verified V8 native archive after Cargo cache
         shell: bash
-        run: python3 .github/scripts/restore_rusty_v8_native.py --archive "$RUSTY_V8_ARCHIVE" --target "${{ matrix.target }}"
+        run: python3 .github/scripts/restore_rusty_v8_native.py --archive "$RUSTY_V8_ARCHIVE" --target "${{ matrix.target }}" --target-dir "$CARGO_TARGET_DIR"
 
       - name: Stamp version from tag
         shell: bash
