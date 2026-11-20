@@ -79,7 +79,7 @@ jobs:
           target: x86_64-unknown-linux-gnu
 
       - name: Restore verified V8 native archive after Cargo cache
-        run: python3 .github/scripts/restore_rusty_v8_native.py --archive "$RUSTY_V8_ARCHIVE" --target x86_64-unknown-linux-gnu
+        run: python3 .github/scripts/restore_rusty_v8_native.py --archive "$RUSTY_V8_ARCHIVE" --target x86_64-unknown-linux-gnu --profile debug --host-layout
 
       - name: Unused dependencies (cargo shear)
         working-directory: codex-rs

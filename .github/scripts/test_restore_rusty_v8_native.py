@@ -9,6 +9,23 @@ from restore_rusty_v8_native import restore_native_archive
 
 
 class RestoreNativeArchiveTests(unittest.TestCase):
+    def test_host_debug_build_restores_the_actual_cargo_link_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "verified.gz"
+            archive.write_bytes(gzip.compress(b"verified-host-library"))
+            destination = restore_native_archive(
+                archive,
+                root / "target",
+                "x86_64-unknown-linux-gnu",
+                profile="debug",
+                explicit_target=False,
+            )
+            self.assertEqual(
+                destination, root / "target/debug/gn_out/obj/librusty_v8.a"
+            )
+            self.assertEqual(destination.read_bytes(), b"verified-host-library")
+
     def test_verified_archive_is_restored_for_every_release_target(self):
         targets = [
             "aarch64-apple-darwin",
