@@ -4,11 +4,11 @@ set -euo pipefail
 phase="${1:?expected build or run}"
 case "$phase" in
   build) phase_args=(--no-run) ;;
-  run) phase_args=() ;;
+  run) phase_args=(--no-fail-fast) ;;
   *) echo "Unknown test phase: $phase" >&2; exit 2 ;;
 esac
 
-cargo nextest run --no-fail-fast "${phase_args[@]}" \
+cargo nextest run "${phase_args[@]}" \
   -p codex-backend-client -p codex-login -p codex-config -p codex-history -p codex-protocol -p codex-app-server-protocol \
   -p codex-model-provider -p codex-models-manager -p codex-core -p codex-tui -p codex-cli -p codex-app-server -p codex-app-server-transport -p codex-app-server-daemon -p codex-app-server-client -p codex-install-context \
   -E '
