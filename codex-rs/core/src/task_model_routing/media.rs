@@ -1,13 +1,13 @@
 //! Checks retained modalities before projection and estimates fresh model-visible input.
 
 use crate::context_manager::estimate_image_reference_bytes;
-use crate::utils::json::serialized_json_bytes;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::user_input::UserInput;
+use codex_user_input::ResolvedUserInput as UserInput;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
+use codex_utils_string::serialized_json_bytes;
 
 const IMAGE_INPUT_MARGIN_TOKENS: i64 = 4096;
 

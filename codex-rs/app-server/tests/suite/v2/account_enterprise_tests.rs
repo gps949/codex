@@ -151,6 +151,7 @@ client_id = "enterprise-client""#
         account,
         AccountUpdatedNotification {
             account_pool: None,
+            reason: None,
             auth_mode: None,
             plan_type: None,
         }

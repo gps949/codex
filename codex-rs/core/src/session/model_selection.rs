@@ -19,7 +19,7 @@ use codex_protocol::protocol::ModelSelectionIntent;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::turn_input::TurnInput;
-use codex_protocol::user_input::UserInput;
+use codex_user_input::ResolvedUserInput as UserInput;
 
 pub(super) fn initial_intent(config: &Config, history: &InitialHistory) -> ModelSelectionIntent {
     if let Some(intent @ (ModelSelectionIntent::Explicit | ModelSelectionIntent::Automatic)) =
@@ -115,7 +115,7 @@ pub(super) async fn retain_legacy_turn_echo(
 /// Called only after new user-turn admission, before committing its settings.
 pub(super) async fn route_root_task(
     session: &Session,
-    input: &TurnInput,
+    input: &TurnInput<UserInput>,
     updates: &mut SessionSettingsUpdate,
     submission_id: &str,
 ) -> Option<TaskRoutingDecision> {

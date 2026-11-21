@@ -27,9 +27,9 @@ use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::code_mode::wait_spec::create_wait_tool;
 use crate::tools::handlers::apply_patch_spec::create_apply_patch_freeform_tool;
 use crate::tools::handlers::plan_spec::create_update_plan_tool;
-use crate::tools::handlers::shell_spec::CommandToolOptions;
-use crate::tools::handlers::shell_spec::create_exec_command_tool_with_environment_id;
+use crate::tools::handlers::shell_spec::create_exec_command_tool;
 use crate::tools::handlers::shell_spec::create_write_stdin_tool;
+use crate::tools::handlers::unified_exec::ExecCommandHandlerOptions;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::handlers::view_image_spec::create_view_image_tool;
 use codex_code_mode::ImageDetailVisibility;
@@ -127,13 +127,11 @@ fn warmup_tool_specs(model_info: &ModelInfo) -> Arc<[ToolSpec]> {
             ),
         ]),
         Some(ToolMode::Direct) | None => Arc::from([
-            create_exec_command_tool_with_environment_id(
-                CommandToolOptions {
-                    exec_permission_approvals_enabled: false,
-                },
-                /*include_environment_id*/ false,
-                /*include_windows_shell_guidance*/ cfg!(windows),
-            ),
+            create_exec_command_tool(ExecCommandHandlerOptions {
+                allow_tty: true,
+                include_windows_shell_guidance: cfg!(windows),
+                ..Default::default()
+            }),
             create_write_stdin_tool(),
             create_apply_patch_freeform_tool(/*include_environment_id*/ false),
             create_update_plan_tool(),
@@ -168,7 +166,7 @@ pub(crate) async fn stream_warmup_turn(
     let mut session = client.new_session();
     let mut stream = session
         .stream(
-            prompt,
+            &Arc::new(prompt.clone()),
             model_info,
             session_telemetry,
             effort,

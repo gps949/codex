@@ -360,6 +360,7 @@ async fn ordinary_owned_registration_does_not_enable_user_verification() {
     let thread_id = ThreadId::new();
     let payload =
         ServerRequestPayload::McpServerElicitationRequest(McpServerElicitationRequestParams {
+            environment_id: None,
             thread_id: thread_id.to_string(),
             turn_id: Some("verification-turn".into()),
             server_name: "plugin-service".into(),

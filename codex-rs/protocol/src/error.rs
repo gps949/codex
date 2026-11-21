@@ -250,6 +250,9 @@ pub enum CodexErrorDetails {
     GatewayLoginRequired(String),
     #[error("Fatal error: {0}")]
     Fatal(String),
+    /// The provider attempt ended. Retrying inference cannot settle its bill.
+    #[error("{0}")]
+    UsageAccountingFailed(String),
     // -----------------------------------------------------------------
     // Automatic conversions for common external error types
     // -----------------------------------------------------------------
@@ -423,6 +426,7 @@ impl CodexErr {
         AccountMigrationRequired(message: String),
         RefreshTokenFailed(error: RefreshTokenFailedError),
         Fatal(message: String),
+        UsageAccountingFailed(message: String),
         Io(error: io::Error),
         Json(error: serde_json::Error),
         #[cfg(target_os = "linux")]
@@ -487,6 +491,7 @@ impl CodexErr {
             | CodexErrorDetails::Interrupted
             | CodexErrorDetails::EnvVar(_)
             | CodexErrorDetails::Fatal(_)
+            | CodexErrorDetails::UsageAccountingFailed(_)
             | CodexErrorDetails::UsageNotIncluded
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::InvalidImageRequest()

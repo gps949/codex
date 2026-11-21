@@ -114,7 +114,7 @@ jobs:
       - name: Set up pinned Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.99.1"
           targets: ${{ matrix.target }}
 
       - name: Install Linux build dependencies

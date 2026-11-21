@@ -29,7 +29,7 @@ jobs:
       - name: Set up pinned Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.99.1"
           components: rustfmt, clippy
 
       # Text checks run before the Rust cache restores codex-rs/target, so
@@ -118,7 +118,7 @@ jobs:
               (package(=codex-protocol) and test(usage_limit)) or
               package(=codex-app-server-protocol) or
               (package(=codex-models-manager) and (test(warmup) or test(routing_catalog))) or
-              (package(=codex-core) and (test(client::tests) or test(model_routing_observation) or test(task_model_routing) or test(account_failover) or test(failover) or test(account_transition) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration) or test(account_window_warmup) or test(execution_auth) or test(account_pool_strategy) or test(account_pool_recovery) or test(account_pool_metadata_recovery) or test(account_recovered_reentry) or test(reset_credit) or test(captured_maintenance) or test(model_specific_limit) or test(durable_) or test(api_account_execution) or test(credit_expiry) or test(decision_advisor) or test(skill_advisor) or test(skill_suggestion) or test(tool_search) or test(search_tool))) or
+              (package(=codex-core) and (test(client::tests) or test(compact) or test(suite::model_request::) or test(model_routing_observation) or test(task_model_routing) or test(account_failover) or test(failover) or test(account_transition) or test(tool_output_provenance) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration) or test(account_window_warmup) or test(execution_auth) or test(account_pool_strategy) or test(account_pool_recovery) or test(account_pool_metadata_recovery) or test(account_recovered_reentry) or test(reset_credit) or test(captured_maintenance) or test(model_specific_limit) or test(durable_) or test(api_account_execution) or test(credit_expiry) or test(decision_advisor) or test(skill_advisor) or test(skill_suggestion) or test(tool_search) or test(search_tool))) or
               (package(=codex-tui) and (test(account) or test(warmup) or test(selection_row_layout) or test(model_routing) or test(model_selection) or test(model_auto) or test(reset_credit) or test(chatwidget::tests::usage))) or
               (package(=codex-cli) and ((kind(test) and ((binary(=app_server) and test(print_startup_config_sign_out_preserves_enrolled_pool_credentials)) or binary(=account_selection) or binary(=account_manager_names) or binary(=account_primary) or binary(=account_manager_preferences) or binary(=decision_advisor))) or (kind(bin) and binary(=codex) and (test(doctor::updates) or test(quota_observations) or test(account_cmd::quota_display) or test(account_cmd::display) or test(account_selector) or test(account_primary) or test(account_manager))))) or
               (package(=codex-app-server-transport) and (test(host_policy_retry) or test(primary_login_handover))) or

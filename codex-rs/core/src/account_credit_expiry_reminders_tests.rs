@@ -8,7 +8,7 @@ use codex_login::AccountProfileStore;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::user_input::UserInput;
+use codex_user_input::ResolvedUserInput as UserInput;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::time::Duration;

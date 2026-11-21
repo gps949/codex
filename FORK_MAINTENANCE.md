@@ -233,7 +233,7 @@ continues on that account. Failures fall back to the normal pool-exhausted
 error. Manual redemption (TUI `/status`, app UI,
 `account/rateLimitResetCredit/consume`) is unaffected.
 
-The Cargo and Bazel lockfiles were verified during the 0.170.0 synchronization.
+The Cargo and Bazel lockfiles were verified during the 0.171.0 synchronization.
 The fork release workflow now uses the pinned Bazel native Voice recipes; keep
 both lockfiles current when dependency edges change.
 
@@ -245,7 +245,9 @@ fallback, keep-alive, per-profile re-login and enable/disable, remote-control
 identity pinned to the selected primary login (pool rotation does not re-enroll), opt-in
 reset-credit automation, and the failover integration test.
 
-## 0.170.0 release compatibility
+## 0.171.0 release compatibility
+
+- The fork follows official `rust-v0.171.0` and its Rust 1.99.1 toolchain. Request-bound account identity and portable compaction are retained through the upstream sampling and authentication refactors; stable account notifications include both the pool snapshot and the upstream routing-update reason.
 
 - Voice requires the complete canonical package, including its same-commit helper and native runtime. The release gate moves the assembled package and verifies CLI/helper discovery, runtime initialization and clean shutdown without opening audio devices or calling the backend. Physical microphone/speaker and account entitlement remain runtime requirements.
 - macOS packages use local ad-hoc signatures, not Apple notarization. The Voice runtime requires macOS 14 or newer. Linux packages target GNU libc and system OpenSSL 3.

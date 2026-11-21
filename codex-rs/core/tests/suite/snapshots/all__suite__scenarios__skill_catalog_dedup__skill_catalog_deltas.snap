@@ -16,15 +16,15 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (3; hash=8408a14ca1f37780):
-        - namespace/functions; hash=03340277aa23936f
+00:additional_tools/developer (3; hash=a7c46a0959d54866):
+        - namespace/functions; hash=81846de5bc4e7474
           - custom/exec
           - function/wait
           - function/request_user_input
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=ae875a9d734f2fc2
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -57,7 +57,12 @@ Settings:
         A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list ...ed into an absolute path using the skill roots table. [hash=ca27c3957f42502b]
         ### Skill roots
         - `r0` = `<SKILLS_ROOT>`
+        - `r1` = `<SKILLS_ROOT>/.system`
         ### Available skills
+        - imagegen: Generate or edit raster images when the task benefits from AI-created bitmap visuals such as...ctly in HTML/CSS/canvas. (file: r1/imagegen/SKILL.md) [hash=dcccaed407aafb03]
+        - openai-docs: API first-timers, Codex/Work Q&A. If the user already has an OpenAI API integration, skip...upplied text or data. (file: r1/openai-docs/SKILL.md) [hash=8ba7f79795ddc1cb]
+        - skill-creator: Create or update a Codex skill with appropriately scoped instructions and any needed supporting resources. (file: r1/skill-creator/SKILL.md)
+        - skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo pat...g private repos). (file: r1/skill-installer/SKILL.md) [hash=80e87da510d34d88]
         - browser-testing: Run browser tests for web applications. (file: r0/browser-testing/SKILL.md)
         - code-review: Review code changes for correctness. (file: r0/code-review/SKILL.md)
         - release-notes: Draft release notes from recent commits. (file: r0/release-notes/SKILL.md)
@@ -155,15 +160,15 @@ Settings:
 ## Window 2 (after request 7: input diverged at item 02)
 Settings: same as window 1
 -- request 8 (turn) --
-00:additional_tools/developer (3; hash=8408a14ca1f37780):
-        - namespace/functions; hash=03340277aa23936f
+00:additional_tools/developer (3; hash=a7c46a0959d54866):
+        - namespace/functions; hash=81846de5bc4e7474
           - custom/exec
           - function/wait
           - function/request_user_input
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=ae875a9d734f2fc2
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -206,7 +211,12 @@ Settings: same as window 1
         A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list ...ed into an absolute path using the skill roots table. [hash=ca27c3957f42502b]
         ### Skill roots
         - `r0` = `<SKILLS_ROOT>`
+        - `r1` = `<SKILLS_ROOT>/.system`
         ### Available skills
+        - imagegen: Generate or edit raster images when the task benefits from AI-created bitmap visuals such as...ctly in HTML/CSS/canvas. (file: r1/imagegen/SKILL.md) [hash=dcccaed407aafb03]
+        - openai-docs: API first-timers, Codex/Work Q&A. If the user already has an OpenAI API integration, skip...upplied text or data. (file: r1/openai-docs/SKILL.md) [hash=8ba7f79795ddc1cb]
+        - skill-creator: Create or update a Codex skill with appropriately scoped instructions and any needed supporting resources. (file: r1/skill-creator/SKILL.md)
+        - skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list or a GitHub repo pat...g private repos). (file: r1/skill-installer/SKILL.md) [hash=80e87da510d34d88]
         - code-review: Review code changes for correctness. (file: r0/code-review/SKILL.md)
         - incident-summary: Summarize incidents and follow-up actions. (file: r0/incident-summary/SKILL.md)
         - release-notes: Draft release notes grouped by feature and bug fix. (file: r0/release-notes/SKILL.md)
@@ -285,15 +295,15 @@ Settings: same as window 1
 ## Window 3 (after request 11: input diverged at item 07)
 Settings: same as window 1
 -- request 12 (turn) --
-00:additional_tools/developer (3; hash=8408a14ca1f37780):
-        - namespace/functions; hash=03340277aa23936f
+00:additional_tools/developer (3; hash=a7c46a0959d54866):
+        - namespace/functions; hash=81846de5bc4e7474
           - custom/exec
           - function/wait
           - function/request_user_input
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=ae875a9d734f2fc2
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -342,7 +352,12 @@ Settings: same as window 1
         A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list ...ed into an absolute path using the skill roots table. [hash=ca27c3957f42502b]
         ### Skill roots
         - `r0` = `<SKILLS_ROOT>`
+        - `r1` = `<SKILLS_ROOT>/.system`
         ### Available skills
+        - imagegen: (file: r1/imagegen/SKILL.md)
+        - openai-docs: (file: r1/openai-docs/SKILL.md)
+        - skill-creator: (file: r1/skill-creator/SKILL.md)
+        - skill-installer: (file: r1/skill-installer/SKILL.md)
         - code-review: (file: r0/code-review/SKILL.md)
         - incident-summary: (file: r0/incident-summary/SKILL.md)
         - release-notes: (file: r0/release-notes/SKILL.md)
@@ -421,15 +436,15 @@ Settings: same as window 1
 ## Window 4 (after request 18: input diverged at item 10)
 Settings: same as window 1
 -- request 19 (turn) --
-00:additional_tools/developer (3; hash=8408a14ca1f37780):
-        - namespace/functions; hash=03340277aa23936f
+00:additional_tools/developer (3; hash=a7c46a0959d54866):
+        - namespace/functions; hash=81846de5bc4e7474
           - custom/exec
           - function/wait
           - function/request_user_input
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=ae875a9d734f2fc2
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a097b9364047b8bb
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -490,7 +505,12 @@ Settings: same as window 1
         A skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list ...ed into an absolute path using the skill roots table. [hash=ca27c3957f42502b]
         ### Skill roots
         - `r0` = `<SKILLS_ROOT>`
+        - `r1` = `<SKILLS_ROOT>/.system`
         ### Available skills
+        - imagegen: Generate or edit raster images (file: r1/imagegen/SKILL.md)
+        - openai-docs: API first-timers, Codex/Work Q&A (file: r1/openai-docs/SKILL.md)
+        - skill-creator: Create or update a Codex skill w (file: r1/skill-creator/SKILL.md)
+        - skill-installer: Install Codex skills into $C (file: r1/skill-installer/SKILL.md)
         - documentation: Write project documentation. (file: r0/documentation/SKILL.md)
         </skills_instructions>
     [02] <permissions instructions>

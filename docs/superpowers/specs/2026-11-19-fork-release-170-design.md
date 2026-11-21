@@ -17,3 +17,7 @@ Strengthen daemon compatibility using the probed executable identity when availa
 Explain legacy numeric fork_turns now means full history. Keep portable compaction and payment consent semantics.
 
 No repository visibility changes, installed-user binary replacement, real login mutation, or paid service configuration changes. User-facing strings remain English/default-English i18n.
+
+## Approved scope extension: official 0.171.0
+
+On 2026-11-20 the user explicitly selected syncing official `rust-v0.171.0` before publishing. Preserve the completed release and pool improvements, merge the new tag, use Rust 1.99.1, regenerate protocol outputs and revalidate the final source and platform packages. Do not publish an intermediate 0.170.0 release.

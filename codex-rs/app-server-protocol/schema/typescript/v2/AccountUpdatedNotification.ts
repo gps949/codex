@@ -4,6 +4,7 @@
 import type { AuthMode } from "../AuthMode";
 import type { PlanType } from "../PlanType";
 import type { AccountPoolReadResponse } from "./AccountPoolReadResponse";
+import type { AccountUpdateReason } from "./AccountUpdateReason";
 
 export type AccountUpdatedNotification = { authMode: AuthMode | null, planType: PlanType | null,
 /**
@@ -12,4 +13,8 @@ export type AccountUpdatedNotification = { authMode: AuthMode | null, planType: 
  * Stable remote clients (including mobile) can render multi-profile status from this
  * notification without calling experimental `accountPool/read`.
  */
-accountPool: AccountPoolReadResponse | null, };
+accountPool: AccountPoolReadResponse | null,
+/**
+ * Set when initial routing discovery completes for the same authenticated owner.
+ */
+reason: AccountUpdateReason | null, };
