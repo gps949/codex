@@ -1839,6 +1839,15 @@ impl TestAppServer {
             .collect()
     }
 
+    pub fn pending_notifications(&self) -> impl Iterator<Item = &JSONRPCNotification> {
+        self.pending_messages
+            .iter()
+            .filter_map(|message| match message {
+                JSONRPCMessage::Notification(notification) => Some(notification),
+                _ => None,
+            })
+    }
+
     /// Reads the stream until a message matches `predicate`, buffering any non-matching messages
     /// for later reads.
     async fn read_stream_until_message<F>(&mut self, predicate: F) -> anyhow::Result<JSONRPCMessage>
