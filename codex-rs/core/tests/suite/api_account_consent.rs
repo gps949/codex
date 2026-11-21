@@ -134,3 +134,100 @@ async fn revoking_unstarted_fallback_during_wait_stops_without_paid_requests_man
     revoking_unstarted_fallback_during_wait_stops_without_paid_requests(Revocation::ManualSelection)
         .await
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoking_unstarted_fallback_during_pre_model_hook_stops_without_paid_requests()
+-> anyhow::Result<()> {
+    let subscription = MockServer::start().await;
+    let api = MockServer::start().await;
+    let hook_server = MockServer::start().await;
+    mount_subscription_usage_denials(&subscription).await;
+    let rejected = ResponseTemplate::new(429).set_body_json(json!({"error": {
+        "type": "usage_limit_reached", "message": "synthetic quota exhaustion",
+        "resets_at": chrono::Utc::now().timestamp() + 3_600,
+    }}));
+    mount_response_sequence(&subscription, vec![rejected.clone(), rejected]).await;
+    core_test_support::responses::mount_sse_once(
+        &api,
+        core_test_support::responses::sse(vec![
+            core_test_support::responses::ev_assistant_message("unexpected", "paid request sent"),
+            core_test_support::responses::ev_completed("unexpected"),
+        ]),
+    )
+    .await;
+    let held = std::sync::Arc::new(tokio::sync::Notify::new());
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = std::sync::Mutex::new(gate);
+    core_test_support::hooks::mount_hook_mcp(&hook_server, "consent-gate", &["pre"], {
+        let held = std::sync::Arc::clone(&held);
+        move |params| {
+            if params["arguments"]["model"] == "vendor-exact-model" {
+                held.notify_one();
+                // Dropping the sender also releases the hook if the test exits early.
+                let _ = gate
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(20));
+            }
+            json!({"content": []})
+        }
+    })
+    .await;
+    let endpoint = api.uri();
+    let backend_base_url = format!("{}/backend-api", subscription.uri());
+    let hook_url = format!("{}/repl", hook_server.uri());
+    let mut builder = test_codex()
+        .without_auth()
+        .with_pre_build_hook(move |home| {
+            write_account_pool_fixture(home);
+            let account = add_api_fixture(home, &endpoint);
+            api_store(home)
+                .configure_fallback(ApiAccountFallback {
+                    enabled: true,
+                    profile_id: Some(account.id),
+                    wait_minutes: 0,
+                })
+                .expect("configure synthetic API fallback");
+            let config = json!({
+                "hooks": {"PreModelRequest": [{"hooks": [{
+                    "type": "mcp_tool", "server": "consent-gate", "tool": "pre",
+                    "input": {"model": "${model}"}
+                }]}]},
+                "mcp_servers": {"consent-gate": {
+                    "url": hook_url,
+                    "environment_id": super::super::rmcp_client::remote_aware_environment_id()
+                }}
+            });
+            std::fs::write(home.join("config.toml"), toml::to_string(&config).unwrap())
+                .expect("install pre-model hook");
+        })
+        .with_config(move |config| {
+            config.chatgpt_base_url = backend_base_url;
+            config.account_pool.window_warmup = Some(false);
+            core_test_support::hooks::trust_discovered_hooks(config);
+        });
+    let fixture = builder.build_with_auto_env(&subscription).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(codex_core::TurnInputRequest::user_input(vec![
+            UserInput::Text {
+                text: "continue only while API fallback remains authorized".into(),
+                text_elements: Vec::new(),
+            },
+        ]))
+        .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(15), held.notified()).await?;
+    let store = api_store(fixture.home.path());
+    let mut fallback = store.load()?.fallback;
+    fallback.enabled = false;
+    store.configure_fallback(fallback)?;
+    release.send(())?;
+    let events = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        turn_events(&fixture.codex),
+    )
+    .await??;
+    assert_eq!(api.received_requests().await.unwrap_or_default().len(), 0);
+    assert!(events.iter().any(|event| matches!(event, EventMsg::Error(error) if error.message.contains("API fallback was changed or disabled"))));
+    Ok(())
+}

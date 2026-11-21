@@ -90,7 +90,7 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -114,7 +114,7 @@ jobs:
       - name: Set up pinned Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.99.1"
           targets: ${{ matrix.target }}
 
       - name: Install Linux build dependencies
@@ -129,6 +129,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Build pinned Voice helper and runtime
+        id: voice
+        uses: ./.github/actions/fork-voice
+        with:
+          target: ${{ matrix.target }}
+
       # Codex pins a v8 build flavor whose prebuilt static libraries are
       # published on the upstream openai/codex releases (public download),
       # not on denoland/rusty_v8; without this the v8 build script 404s.
@@ -140,13 +146,13 @@ jobs:
       - name: Cache release dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: codex-rs
+          workspaces: codex-rs -> ${{ env.CARGO_TARGET_DIR }}
           shared-key: fork-release-v8-native-${{ matrix.target }}
           cache-workspace-crates: false
 
       - name: Restore verified V8 native archive after Cargo cache
         shell: bash
-        run: python3 .github/scripts/restore_rusty_v8_native.py --archive "$RUSTY_V8_ARCHIVE" --target "${{ matrix.target }}"
+        run: python3 .github/scripts/restore_rusty_v8_native.py --archive "$RUSTY_V8_ARCHIVE" --target "${{ matrix.target }}" --target-dir "$CARGO_TARGET_DIR"
 
       - name: Stamp version from tag
         shell: bash
@@ -154,6 +160,7 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
+          echo "STABLE_GIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           version="${RELEASE_TAG#rust-v}"
           cargo_version="${version/-ma./+ma.}"
           python3 - "$cargo_version" <<'PY'
@@ -186,13 +193,13 @@ jobs:
           set -euo pipefail
           if [[ "${{ matrix.target }}" == *linux* ]]; then
             cargo build --release --target ${{ matrix.target }} --bin bwrap
-            bwrap_path="target/${{ matrix.target }}/release/bwrap"
+            bwrap_path="${CARGO_TARGET_DIR}/${{ matrix.target }}/release/bwrap"
             strip --strip-debug --strip-unneeded "$bwrap_path"
             export CODEX_BWRAP_SHA256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
           fi
           # One invocation resolves features once; separate per-package builds
           # recompile shared dependencies and exceeded the job timeout on Windows.
-          bins=(codex codex-code-mode-host codex-responses-api-proxy)
+          bins=(codex codex-code-mode-host codex-exec-server codex-responses-api-proxy)
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             bins+=(codex-windows-sandbox-setup codex-command-runner codex-windows-sandbox-service)
           fi
@@ -210,15 +217,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          release_dir="codex-rs/target/${{ matrix.target }}/release"
+          release_dir="${CARGO_TARGET_DIR}/${{ matrix.target }}/release"
           case "${{ matrix.target }}" in
             *apple-darwin)
-              for binary in codex codex-code-mode-host codex-responses-api-proxy; do
+              for binary in codex codex-code-mode-host codex-exec-server codex-responses-api-proxy; do
                 strip -S -x "$release_dir/$binary"
+                if [[ "$binary" == codex-code-mode-host || "$binary" == codex ]]; then
+                  codesign --force --sign - --entitlements ".github/scripts/macos-signing/$binary.entitlements.plist" "$release_dir/$binary"
+                else
+                  codesign --force --sign - "$release_dir/$binary"
+                fi
               done
               ;;
             *linux*)
-              for binary in codex codex-code-mode-host codex-responses-api-proxy; do
+              for binary in codex codex-code-mode-host codex-exec-server codex-responses-api-proxy; do
                 strip --strip-debug --strip-unneeded "$release_dir/$binary"
               done
               ;;
@@ -228,26 +240,44 @@ jobs:
               ;;
           esac
 
-      - name: Package
+      - name: Assemble and verify relocated release package
         shell: bash
+        env:
+          VOICE_HELPER: ${{ steps.voice.outputs.helper }}
+          VOICE_RUNTIME: ${{ steps.voice.outputs.runtime }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          mkdir -p dist stage
-          release_dir="codex-rs/target/${{ matrix.target }}/release"
-          case "${{ matrix.target }}" in
-            *windows*)
-              cp "$release_dir/codex.exe" "$release_dir/codex-code-mode-host.exe" "$release_dir/codex-responses-api-proxy.exe" "$release_dir/codex-windows-sandbox-setup.exe" "$release_dir/codex-windows-sandbox-service.exe" "$release_dir/codex-command-runner.exe" stage/
-              (cd stage && 7z a "../dist/codex-${{ matrix.target }}.zip" .)
-              ;;
-            *linux*)
-              cp "$release_dir/codex" "$release_dir/codex-code-mode-host" "$release_dir/codex-responses-api-proxy" "$release_dir/bwrap" stage/
-              tar czf "dist/codex-${{ matrix.target }}.tar.gz" -C stage .
-              ;;
-            *)
-              cp "$release_dir/codex" "$release_dir/codex-code-mode-host" "$release_dir/codex-responses-api-proxy" stage/
-              tar czf "dist/codex-${{ matrix.target }}.tar.gz" -C stage .
-              ;;
-          esac
+          version="${RELEASE_TAG#rust-v}"
+          version="${version/-ma./+ma.}"
+          package="$RUNNER_TEMP/fork-package"
+          python3 .github/scripts/package-fork-release.py \
+            --target "$TARGET" --release-dir "$CARGO_TARGET_DIR/$TARGET/release" \
+            --helper "$VOICE_HELPER" --runtime "$VOICE_RUNTIME" \
+            --version "$version" --commit "$STABLE_GIT_COMMIT" --output "$package"
+          mkdir -p dist
+          export FORK_PACKAGE="$package"
+          PYTHONPATH=scripts python3 - <<'PY'
+          import os
+          import tarfile
+          import zipfile
+          from pathlib import Path
+          from codex_package.archive import write_archive
+          target = os.environ["TARGET"]
+          suffix = ".zip" if "windows" in target else ".tar.gz"
+          archive = Path(f"dist/codex-{target}{suffix}")
+          write_archive(Path(os.environ["FORK_PACKAGE"]), archive, force=False)
+          extracted = Path(os.environ["FORK_PACKAGE"] + "-extracted")
+          if suffix == ".zip":
+              with zipfile.ZipFile(archive) as bundle:
+                  bundle.extractall(extracted)
+          else:
+              with tarfile.open(archive) as bundle:
+                  bundle.extractall(extracted, filter="data")
+          PY
+          python3 .github/scripts/smoke-fork-package.py --package "$package-extracted" \
+            --target "$TARGET" --version "$version" --commit "$STABLE_GIT_COMMIT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -292,5 +322,5 @@ jobs:
           \`\`\`
           curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/feature/native-multi-account/install.sh | bash
           \`\`\`
-          Or download the asset for your platform, extract, and keep ALL extracted binaries together in one directory on your PATH (codex spawns its sibling helper binaries by path). Linux builds link against system OpenSSL 3." \
+          Or download the asset for your platform, extract, and keep the entire extracted package together and add its bin directory to PATH. Voice resources and helper binaries must remain in the package. Linux builds link against system OpenSSL 3." \
             dist/*

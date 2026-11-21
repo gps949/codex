@@ -77,6 +77,7 @@ pub(super) fn spawn(
                     .send_server_notification_checked(
                         &[],
                         ServerNotification::AccountUpdated(AccountUpdatedNotification {
+                            reason: None,
                             auth_mode: identity.auth_mode,
                             plan_type: identity.plan_type,
                             account_pool: Some(account_pool.clone()),

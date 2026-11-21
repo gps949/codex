@@ -73,3 +73,21 @@ fn app_server_version_matches_this_cli_package_version() {
     assert!(app_server_version_matches_cli(env!("CARGO_PKG_VERSION")));
     assert!(!app_server_version_matches_cli("0.0.0-not-this-build"));
 }
+
+#[test]
+fn daemon_reuse_requires_matching_binary_contents() {
+    let current = ExecutableIdentity {
+        digest: [1; 32],
+        path_digest: None,
+    };
+    let different_build = ExecutableIdentity {
+        digest: [2; 32],
+        path_digest: None,
+    };
+    assert!(!super::same_cli_executable(None, &current));
+    assert!(!super::same_cli_executable(
+        Some(&different_build),
+        &current
+    ));
+    assert!(super::same_cli_executable(Some(&current), &current));
+}

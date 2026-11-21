@@ -654,6 +654,17 @@ pub struct AccountUpdatedNotification {
     /// notification without calling experimental `accountPool/read`.
     #[serde(default)]
     pub account_pool: Option<AccountPoolReadResponse>,
+    /// Set when initial routing discovery completes for the same authenticated owner.
+    pub reason: Option<AccountUpdateReason>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/", rename_all = "camelCase")]
+pub enum AccountUpdateReason {
+    WorkspaceRoutingReady,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]

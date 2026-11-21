@@ -460,7 +460,8 @@ impl Daemon {
         }
         let (status, backend, pid, info) = if let Ok(info) = client::probe(&self.socket_path).await
         {
-            if self.uses_invoking_cli() && !app_server_version_matches_cli(&info.app_server_version)
+            if self.uses_invoking_cli()
+                && !self.invoking_cli_daemon_matches(&settings, &info).await?
             {
                 return self
                     .restart_with_settings(settings)
@@ -475,7 +476,8 @@ impl Daemon {
             )
         } else if self.running_backend_instance(&settings).await?.is_some() {
             let info = self.wait_until_ready().await?;
-            if self.uses_invoking_cli() && !app_server_version_matches_cli(&info.app_server_version)
+            if self.uses_invoking_cli()
+                && !self.invoking_cli_daemon_matches(&settings, &info).await?
             {
                 return self
                     .restart_with_settings(settings)
@@ -1108,6 +1110,26 @@ impl Daemon {
 
     fn uses_invoking_cli(&self) -> bool {
         std::env::current_exe().is_ok_and(|current| current == self.managed_codex_bin)
+    }
+
+    async fn invoking_cli_daemon_matches(
+        &self,
+        settings: &DaemonSettings,
+        info: &client::ProbeInfo,
+    ) -> Result<bool> {
+        // A listening socket alone does not authorize stopping an unrelated server.
+        let backend = self.running_backend_instance(settings).await?.context(
+            "The app-server socket is owned by an unmanaged process. Stop that server before starting this CLI build.",
+        )?;
+        if !app_server_version_matches_cli(&info.app_server_version) {
+            return Ok(false);
+        }
+        let current = managed_install::executable_identity(&self.managed_codex_bin).await?;
+        let running = backend.running_executable_identity().await?;
+        Ok(managed_install::same_cli_executable(
+            running.as_ref(),
+            &current,
+        ))
     }
 
     async fn stop_updater_best_effort(&self, settings: &DaemonSettings) {

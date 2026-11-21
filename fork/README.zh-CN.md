@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/gps949/codex/feature/native-multi-a
 codex --version
 ```
 
-版本号包含 `+ma.N`。Linux 发行包需要系统 OpenSSL 3。Windows x64/arm64 请从[发布页](https://github.com/gps949/codex/releases)下载对应 ZIP，完整解压，将所在目录加入 PATH。所有随包辅助程序都需要放在 `codex` 或 `codex.exe` 同一目录下。
+版本号包含 `+ma.N`。Linux 发行包需要系统 OpenSSL 3。Windows x64/arm64 请从[发布页](https://github.com/gps949/codex/releases)下载对应 ZIP，完整解压，将 `bin` 目录加入 PATH。保留与 `bin` 同级的 `codex-package.json`、`codex-resources` 和 `codex-path`，其中包含语音运行库。Unix 安装器需要 Python 3.9 或更新版本。macOS 语音需要 macOS 14 或更新版本；fork 安装包使用临时签名，未经过 Apple 公证。
 
 为账号取简短、容易辨认且不重复的名称：
 
@@ -244,3 +244,5 @@ macOS/Linux 安装脚本会检查发布的 SHA256，将主程序与辅助程序�
 跨工作区并发路由、旧不透明压缩历史自动迁移，以及真实个人/Business/手机使用仍需要后续完善或验收。自动化模拟用例与发行包完整性检查无法代替这些真实账号场景。
 
 [自动选择模型](MODEL_ROUTING_DESIGN.zh-CN.md)提供关闭、仅预览和自动应用三种模式，主任务／子代理独立开关，以及 0–100 决策倾向。可在浏览器管理器、终端管理器 **M** 页、手机“模型选择”菜单或 `codex account routing` 中设置。默认关闭，手动指定模型优先；本地规则与单独同意任务分享的 Jev/Clef 分类二选一，订阅额度节省仍未经过真实账号测量。
+
+原生 MAv2 使用 `fork_turns = "none"` 或 `"all"`。旧的正整数参数现在表示全部历史，不再截取最近 N 轮。模型路由会在本地 `model-routing-history.json` 保留最多 64 条决策，不含提示词和凭据，也不代表订阅额度节省统计。

@@ -46,6 +46,7 @@ lock="$INSTALL_DIR/.codex-install.lock"
 lock_owned=0
 commit_pending=0
 keep_stage=0
+new_package=""
 cleanup_install() {
   install_status=$?
   trap - EXIT
@@ -68,6 +69,9 @@ cleanup_install() {
       warn "Installation rollback failed. Backups were kept at $stage/backup."
       warn "Restore those backups into $INSTALL_DIR; remove these bundle files if they have no backup: $required."
     fi
+  fi
+  if [ "$install_status" != 0 ] && [ "$keep_stage" = 0 ] && [ -n "$new_package" ]; then
+    rm -rf "$new_package"
   fi
   rm -rf "$tmp"
   if [ -n "$stage" ] && [ "$keep_stage" = 0 ]; then
@@ -104,25 +108,112 @@ if curl -fsSL "https://github.com/$REPO/releases/download/$tag/SHA256SUMS" -o "$
 fi
 # Validate the whole archive before touching an existing installation.
 tar tzf "$tmp/$asset" > "$tmp/members"
-while IFS= read -r member; do
-  case "$member" in
-    . | ./ | codex | ./codex | codex-code-mode-host | ./codex-code-mode-host | codex-responses-api-proxy | ./codex-responses-api-proxy | bwrap | ./bwrap) ;;
-    *) warn "Unexpected release archive member: $member"; exit 1 ;;
-  esac
-done < "$tmp/members"
-mkdir -p "$INSTALL_DIR"
-stage="$(mktemp -d "$INSTALL_DIR/.codex-install.XXXXXX")"
-tar xzf "$tmp/$asset" -C "$stage"
-required="codex codex-code-mode-host codex-responses-api-proxy"
-case "$target" in *linux*) required="$required bwrap" ;; esac
-for binary in $required; do
-  if [ ! -f "$stage/$binary" ] || [ -L "$stage/$binary" ]; then
-    warn "Release bundle is missing a regular binary: $binary"
-    exit 1
-  fi
-  chmod +x "$stage/$binary"
-done
-"$stage/codex" --version
+canonical=0
+if grep -Eq '^(\./)?codex-package.json$' "$tmp/members"; then
+  canonical=1
+  command -v python3 >/dev/null 2>&1 || { warn "Python 3.9 or newer is required to validate this release package."; exit 1; }
+  mkdir -p "$INSTALL_DIR"
+  stage="$(mktemp -d "$INSTALL_DIR/.codex-install.XXXXXX")"
+  python3 - "$tmp/$asset" "$stage/package" "$target" "$tag" <<'PY_PACKAGE'
+import hashlib
+import json
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import sys
+import tarfile
+
+if sys.version_info < (3, 9):
+    raise SystemExit("Python 3.9 or newer is required to validate this release package")
+archive, output, target, tag = sys.argv[1:]
+root = Path(output)
+version = tag.removeprefix("rust-v").replace("-ma.", "+ma.")
+if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\+ma\.[1-9][0-9]*", version):
+    raise SystemExit("Invalid fork release version")
+with tarfile.open(archive, "r:gz") as bundle:
+    members = bundle.getmembers()
+    if len(members) > 4096 or sum(item.size for item in members) > 4 * 1024**3:
+        raise SystemExit("Release package exceeds size limits")
+    names = set()
+    for item in members:
+        name = item.name.removeprefix("./").rstrip("/")
+        if not name or name == ".":
+            continue
+        path = PurePosixPath(name)
+        if (path.is_absolute() or ".." in path.parts or "\\" in name
+                or any(ord(char) < 32 for char in name)
+                or path.parts[0] not in {"bin", "codex-resources", "codex-path", "codex-package.json"}
+                or not (item.isdir() or item.isfile()) or name in names):
+            raise SystemExit("Unsafe or duplicate release archive member")
+        names.add(name)
+    root.mkdir()
+    for item in members:
+        name = item.name.removeprefix("./").rstrip("/")
+        if not name or name == ".":
+            continue
+        destination = root / name
+        if item.isdir():
+            destination.mkdir(parents=True, exist_ok=True)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with bundle.extractfile(item) as source, destination.open("xb") as sink:
+                shutil.copyfileobj(source, sink)
+            destination.chmod(0o755 if item.mode & 0o111 else 0o644)
+# Package directories contain public release resources, never account data.
+root.chmod(0o755)
+for directory in root.rglob("*"):
+    if directory.is_dir():
+        directory.chmod(0o755)
+metadata = json.loads((root / "codex-package.json").read_text())
+for key, value in {"layoutVersion": 1, "version": version, "target": target,
+                   "variant": "codex", "entrypoint": "bin/codex",
+                   "resourcesDir": "codex-resources", "pathDir": "codex-path"}.items():
+    if metadata.get(key) != value:
+        raise SystemExit("Release package metadata mismatch: " + key)
+required = ["bin/codex", "bin/codex-code-mode-host", "bin/codex-exec-server",
+            "bin/codex-responses-api-proxy", "codex-path/rg",
+            "codex-resources/voice/bin/codex-voice-host"]
+if "linux" in target:
+    required.append("codex-resources/bwrap")
+for name in required:
+    if not (root / name).is_file():
+        raise SystemExit("Missing release resource: " + name)
+    (root / name).chmod(0o755)
+voice = json.loads((root / "codex-resources/voice/manifest.json").read_text())
+if voice.get("appVersion") != version or voice.get("appTarget") != target or voice.get("voiceTarget") != target:
+    raise SystemExit("Voice package identity mismatch")
+if not re.fullmatch(r"[0-9a-f]{40}", voice.get("buildCommit", "")):
+    raise SystemExit("Missing Voice build identity")
+for name, expected in voice["sha256"].items():
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts or name not in names:
+        raise SystemExit("Unsafe Voice manifest entry")
+    if hashlib.sha256((root / name).read_bytes()).hexdigest() != expected:
+        raise SystemExit("Voice resource checksum mismatch")
+PY_PACKAGE
+  "$stage/package/bin/codex" --version
+  required="codex"
+else
+  while IFS= read -r member; do
+    case "$member" in
+      . | ./ | codex | ./codex | codex-code-mode-host | ./codex-code-mode-host | codex-responses-api-proxy | ./codex-responses-api-proxy | bwrap | ./bwrap) ;;
+      *) warn "Unexpected release archive member: $member"; exit 1 ;;
+    esac
+  done < "$tmp/members"
+  mkdir -p "$INSTALL_DIR"
+  stage="$(mktemp -d "$INSTALL_DIR/.codex-install.XXXXXX")"
+  tar xzf "$tmp/$asset" -C "$stage"
+  required="codex codex-code-mode-host codex-responses-api-proxy"
+  case "$target" in *linux*) required="$required bwrap" ;; esac
+  for binary in $required; do
+    if [ ! -f "$stage/$binary" ] || [ -L "$stage/$binary" ]; then
+      warn "Release bundle is missing a regular binary: $binary"
+      exit 1
+    fi
+    chmod +x "$stage/$binary"
+  done
+  "$stage/codex" --version
+fi
 
 # Serialize only the commit stage; never remove another installer's lock.
 if ! mkdir "$lock" 2>/dev/null; then
@@ -144,6 +235,16 @@ for binary in $required; do
     cp -Pp "$INSTALL_DIR/$binary" "$stage/backup/$binary"
   fi
 done
+if [ "$canonical" = 1 ]; then
+  mkdir -p "$INSTALL_DIR/.codex-packages"
+  chmod 755 "$INSTALL_DIR/.codex-packages"
+  package_install="$(mktemp -d "$INSTALL_DIR/.codex-packages/release.XXXXXX")"
+  new_package="$package_install"
+  chmod 755 "$package_install"
+  mv "$stage/package" "$package_install/package"
+  package_install="$(cd "$package_install/package" && pwd -P)"
+  ln -s "$package_install/bin/codex" "$stage/codex"
+fi
 commit_pending=1
 # Rename on the same filesystem, with the CLI last so helpers are present first.
 for binary in $required; do
@@ -151,6 +252,8 @@ for binary in $required; do
 done
 mv -f "$stage/codex" "$INSTALL_DIR/codex"
 commit_pending=0
+# The active generation now belongs to the installation, not failure cleanup.
+new_package=""
 rmdir "$lock"
 lock_owned=0
 rm -rf "$stage"

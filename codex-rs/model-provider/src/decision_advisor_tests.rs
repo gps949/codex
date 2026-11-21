@@ -177,41 +177,56 @@ async fn decision_advisor_timeout_falls_back_without_retry() {
     let server = MockServer::start().await;
     let mut settings = settings(&server, DecisionAdvisorProvider::Typesafe);
     settings.timeout = Duration::from_millis(100);
-    Mock::given(method("POST"))
+    let mock = Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(answer("jev-test"))
                 .set_delay(Duration::from_secs(1)),
         )
         .expect(1)
-        .mount(&server)
+        .mount_as_scoped(&server)
         .await;
     let candidates = candidates();
     let advisor = DecisionAdvisor::default();
-    let started = Instant::now();
-    let advice = advisor
-        .rank(
-            &settings,
-            &factory(),
-            DecisionSearchRequest {
-                scope: DecisionSearchScope::Tools,
-                query: "weather",
-                candidates: &candidates,
-                catalog_revision: b"1",
-            },
-            Some("test"),
-        )
-        .await;
+    let factory = factory();
+    tokio::time::pause();
+    let request = advisor.rank(
+        &settings,
+        &factory,
+        DecisionSearchRequest {
+            scope: DecisionSearchScope::Tools,
+            query: "weather",
+            candidates: &candidates,
+            catalog_revision: b"1",
+        },
+        Some("test"),
+    );
+    tokio::pin!(request);
+    let received = mock.wait_until_satisfied();
+    tokio::pin!(received);
+    let deadline = Instant::now() + Duration::from_secs(/*secs*/ 30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "advisor request did not reach the mock server"
+        );
+        tokio::select! {
+            () = &mut received => break,
+            result = &mut request => panic!("ranking ended before dispatch: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    tokio::time::advance(settings.timeout - Duration::from_millis(/*millis*/ 1)).await;
     assert_eq!(
-        advice,
+        request.await,
         DecisionAdvice::Fallback(DecisionAdvisorFallback::TimedOut)
     );
-    assert!(started.elapsed() < Duration::from_millis(500));
+    tokio::time::resume();
     assert_eq!(
         advisor
             .rank(
                 &settings,
-                &factory(),
+                &factory,
                 DecisionSearchRequest {
                     scope: DecisionSearchScope::Tools,
                     query: "weather",
@@ -224,6 +239,7 @@ async fn decision_advisor_timeout_falls_back_without_retry() {
         DecisionAdvice::Fallback(DecisionAdvisorFallback::TimedOut)
     );
     assert_eq!(advisor.stats().requests, 1);
+    assert_eq!(advisor.stats().cache_hits, 1);
 }
 
 #[tokio::test]

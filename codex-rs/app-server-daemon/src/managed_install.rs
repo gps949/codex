@@ -88,6 +88,14 @@ pub(crate) fn app_server_version_matches_cli(app_server_version: &str) -> bool {
     app_server_version == env!("CARGO_PKG_VERSION")
 }
 
+/// Package version equality cannot distinguish an upstream binary from a fork build.
+pub(crate) fn same_cli_executable(
+    running: Option<&ExecutableIdentity>,
+    current: &ExecutableIdentity,
+) -> bool {
+    running.is_some_and(|running| running.same_contents(current))
+}
+
 /// Only latest-channel stable releases may run the public latest-version updater.
 pub(crate) fn is_stable_standalone_release(codex_home: &Path, codex_bin: &Path) -> bool {
     let standalone = package_root(codex_home);

@@ -185,10 +185,9 @@ async fn local_compaction_retries_preserve_instructions_and_tool_metadata(
         Arc::clone(&session),
         step,
         world_state,
-        vec![UserInput::Text {
-            text: "Summarize the conversation.".to_string(),
-            text_elements: Vec::new(),
-        }],
+        vec![ResolvedUserInput::text(
+            "Summarize the conversation.".to_string(),
+        )],
     )
     .await?;
 
@@ -270,6 +269,15 @@ fn compacted_user_message<'a>(text: &str, original: &'a ResponseItem) -> Compact
         original,
         harness_metadata: None,
     }
+}
+
+fn compact_items(items: &[ResponseItemEnvelope], summary: &str) -> Vec<ResponseItemEnvelope> {
+    build_compacted_history_with_limit(
+        items,
+        summary,
+        COMPACT_USER_MESSAGE_MAX_TOKENS,
+        &FileAudioDurations::default(),
+    )
 }
 
 #[tokio::test]
@@ -459,7 +467,9 @@ fn collect_annotated_user_messages_extracts_user_text_only(
         ResponseItemEnvelope::new(ResponseItem::Other),
     ];
 
-    let collected = collect_annotated_user_messages(&items);
+    let collected: Vec<_> = annotated_user_messages(&items)
+        .map(|(_, message)| message)
+        .collect();
 
     if !preserve_content {
         item = user_message(expected_text);
@@ -488,7 +498,7 @@ fn collect_annotated_user_messages_extracts_user_text_only(
         }]
     );
     assert_eq!(
-        build_compacted_history(Vec::new(), &collected, "summary"),
+        compact_items(&items, "summary"),
         vec![
             expected,
             ResponseItemEnvelope::new(ContextualUserFragment::into(CompactionSummary::new(
@@ -606,10 +616,10 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages(
         .set_id(Some(ResponseItemId::with_suffix("msg", "long-user")));
     original.metadata = Some(CodexHarnessMetadata::default());
     let history = super::build_compacted_history_with_limit(
-        Vec::new(),
-        &collect_annotated_user_messages(std::slice::from_ref(&original)),
+        std::slice::from_ref(&original),
         "SUMMARY",
         max_tokens,
+        &FileAudioDurations::default(),
     );
     assert_eq!(history.len(), 2);
 
@@ -687,13 +697,11 @@ fn portable_compaction_stops_when_aggregate_budget_cannot_retain_an_older_messag
         .map(|index| user_message(&format!("old-{index}:{}", "x".repeat(128))))
         .collect::<Vec<_>>();
     items.push(user_message("tail"));
-    let user_messages = collect_user_messages(&items);
-
     let history = super::build_compacted_history_with_limit(
-        Vec::new(),
-        &user_messages,
+        &annotated(items),
         "SUMMARY",
         /*max_tokens*/ 1,
+        &FileAudioDurations::default(),
     );
     let retained_user_texts = history[..history.len() - 1]
         .iter()
@@ -710,12 +718,10 @@ fn portable_compaction_stops_when_aggregate_budget_cannot_retain_an_older_messag
 
 #[test]
 fn build_token_limited_compacted_history_appends_summary_message() {
-    let initial_context: Vec<ResponseItemEnvelope> = Vec::new();
-    let original = user_message("first user message");
-    let user_messages = collect_user_messages(std::slice::from_ref(&original));
+    let items = annotated(vec![user_message("first user message")]);
     let summary_text = "summary text";
 
-    let history = build_compacted_history(initial_context, &user_messages, summary_text);
+    let history = compact_items(&items, summary_text);
     assert!(
         !history.is_empty(),
         "expected compacted history to include summary"
@@ -740,7 +746,7 @@ fn portable_compaction_caps_each_user_and_summary_item() {
     ];
     let summary = format!("summary:{}:summary-tail", "d".repeat(32_000));
 
-    let history = build_compacted_history(Vec::new(), &collect_user_messages(&items), &summary);
+    let history = compact_items(&annotated(items.to_vec()), &summary);
 
     assert_eq!(history.len(), 4);
     let estimates = history
@@ -810,11 +816,7 @@ fn portable_compaction_caps_escaped_user_item_with_passthrough_metadata() {
             ..CodexHarnessMetadata::default()
         }),
     };
-    let history = build_compacted_history(
-        Vec::new(),
-        &collect_annotated_user_messages(std::slice::from_ref(&original)),
-        "summary",
-    );
+    let history = compact_items(std::slice::from_ref(&original), "summary");
 
     let user = &history[0];
     assert!(
@@ -855,8 +857,7 @@ fn portable_compaction_bounds_multipart_text_and_preserves_content_that_fits() {
     let short = make_item("first", "second");
     let large = make_item(&"a".repeat(20_000), &"b".repeat(20_000));
     let originals = [short.clone(), large];
-    let history =
-        build_compacted_history(Vec::new(), &collect_user_messages(&originals), "summary");
+    let history = compact_items(&annotated(originals.to_vec()), "summary");
 
     assert_eq!(history[0].item, short);
     assert!(history.iter().all(|envelope| {
@@ -879,7 +880,7 @@ fn portable_compaction_caps_final_summary_after_turn_and_provenance_stamp() {
         "escaped-summary:{}:escaped-summary-tail",
         "\\\"\n".repeat(20_000)
     );
-    let mut history = build_compacted_history(Vec::new(), &[], &summary_text);
+    let mut history = compact_items(&[], &summary_text);
     let summary = history.last_mut().expect("compaction summary");
     summary.set_turn_id_if_missing("portable-compaction-turn");
     summary.metadata = Some(CodexHarnessMetadata {
@@ -940,11 +941,7 @@ fn build_compacted_history_preserves_user_message_passthrough_metadata(attribute
         item: original,
         metadata: Some(CodexHarnessMetadata::default()),
     };
-    let history = build_compacted_history(
-        Vec::new(),
-        &collect_annotated_user_messages(std::slice::from_ref(&original)),
-        "summary text",
-    );
+    let history = compact_items(std::slice::from_ref(&original), "summary text");
 
     assert_eq!(
         history,

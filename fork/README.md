@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/gps949/codex/feature/native-multi-a
 codex --version
 ```
 
-The version includes `+ma.N`. Linux bundles require system OpenSSL 3. For Windows x64/arm64, download the matching ZIP from [Releases](https://github.com/gps949/codex/releases), extract it, and add its folder to PATH. Keep every bundled helper beside `codex` or `codex.exe`.
+The version includes `+ma.N`. Linux bundles require system OpenSSL 3. For Windows x64/arm64, download the matching ZIP from [Releases](https://github.com/gps949/codex/releases), extract the complete package, and add its `bin` folder to PATH. Keep `codex-package.json`, `codex-resources` and `codex-path` beside `bin`; these include the Voice runtime. The Unix installer requires Python 3.9 or newer. macOS Voice requires macOS 14 or newer; fork packages are ad-hoc signed, not Apple notarized.
 
 Enroll accounts with recognizable, unique labels:
 
@@ -244,3 +244,5 @@ The [Jev/Clef decision-model research](DECISION_MODELS.md) explains potential to
 Cross-workspace concurrent routing, automatic migration of old opaque compacted history, and real Personal/Business/mobile acceptance still need further work. Automated fixture coverage and release archive checks do not establish those real-account behaviors.
 
 [Automatic model selection](MODEL_ROUTING_DESIGN.md) provides Off, Preview and Automatic modes, separate main-task/subagent switches and a 0–100 preference. Configure it in the browser manager, terminal manager's **M** page, phone **Model selection** menu or `codex account routing`. It starts off and keeps manual model choices ahead of automatic policy. Local rules and an independently consented Jev/Clef assessment are alternatives; subscription savings remain unmeasured.
+
+Native MAv2 accepts `fork_turns = "none"` or `"all"`. Legacy positive numbers now mean full history, not the last N turns. Routing keeps a local history of up to 64 decisions in `model-routing-history.json`; it contains no prompts or credentials and does not measure subscription quota savings.

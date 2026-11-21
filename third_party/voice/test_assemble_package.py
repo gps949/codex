@@ -162,6 +162,28 @@ class AssembleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "required libraries"):
                     runtime_files(root.resolve(), target)
 
+    def test_fork_package_preserves_release_version_and_matching_build(self):
+        self.commit = "b" * 40
+        target = "aarch64-unknown-linux-gnu"
+        runtime, _ = self.make_runtime(target)
+        seal(runtime, target)
+        self.metadata.update(version="0.170.0+ma.1", target=target)
+        (self.package / "codex-package.json").write_text(json.dumps(self.metadata))
+        assemble(
+            self.package,
+            self.helper,
+            target,
+            self.commit,
+            self.output,
+            runtime=runtime,
+            release_version="0.170.0+ma.1",
+        )
+        manifest = json.loads(
+            (self.output / "codex-resources/voice/manifest.json").read_text()
+        )
+        self.assertEqual(manifest["appVersion"], "0.170.0+ma.1")
+        self.assertEqual(manifest["buildCommit"], self.commit)
+
     def test_alpha_package_preserves_release_version_and_matching_build(self):
         self.commit = "b" * 40
         target = "aarch64-apple-darwin"

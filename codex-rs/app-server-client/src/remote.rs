@@ -1083,6 +1083,7 @@ mod tests {
                 AppServerEvent::ServerNotification(Box::new(ServerNotification::AccountUpdated(
                     codex_app_server_protocol::AccountUpdatedNotification {
                         account_pool: None,
+                        reason: None,
                         auth_mode: None,
                         plan_type: None,
                     },
