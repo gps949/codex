@@ -92,7 +92,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     env:
-      CARGO_BUILD_JOBS: "2"
+      # Large optimized Rust crates can exhaust a standard runner when built together.
+      CARGO_BUILD_JOBS: "1"
+      # Release archives strip debug data and exclude PDBs; avoid generating it first.
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
     strategy:
       fail-fast: false
       matrix:
