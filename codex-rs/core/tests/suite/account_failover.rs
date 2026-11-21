@@ -927,8 +927,7 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn(
                     profile["profile_id"] == "primary-acct"
                         && profile["exhausted_until"].is_string()
                 }) && profiles.iter().any(|profile| {
-                    profile["profile_id"] == "backup-acct"
-                        && profile["exhausted_until"].is_null()
+                    profile["profile_id"] == "backup-acct" && profile["exhausted_until"].is_null()
                 })
             });
         if persisted || tokio::time::Instant::now() >= deadline {
