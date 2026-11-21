@@ -584,11 +584,20 @@ async fn account_pool_quota_only_updates_publish_stable_quota_without_identity_r
         }),
     )
     .await??;
-    assert!(
-        !app.pending_notification_methods()
-            .iter()
-            .any(|method| method == "account/updated")
-    );
+    // Background routing discovery may finish after the quota read. Its explicit reason
+    // distinguishes it from an identity reset caused by the quota-only publication.
+    for notification in app
+        .pending_notifications()
+        .filter(|notification| notification.method == "account/updated")
+    {
+        assert_eq!(
+            notification.params,
+            Some(json!({
+                "authMode": "chatgpt", "planType": "pro", "accountPool": null,
+                "reason": "workspaceRoutingReady"
+            }))
+        );
+    }
     let quota: AccountRateLimitsUpdatedNotification = timeout(
         DEFAULT_READ_TIMEOUT,
         app.read_notification("account/rateLimits/updated"),
