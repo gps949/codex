@@ -914,10 +914,28 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn(
         Some("Bearer access-backup".to_string())
     );
 
-    // The scheduler must persist the rotation for future processes.
-    let runtime_state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
-        fixture.home.path().join("account-runtime-state.json"),
-    )?)?;
+    // Turn completion does not wait for the independent account-runtime writer.
+    // Observe its natural commit so this still fails if background persistence breaks.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let runtime_state = loop {
+        let state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+            fixture.home.path().join("account-runtime-state.json"),
+        )?)?;
+        let persisted = state["active_profile_id"] == json!("backup-acct")
+            && state["profiles"].as_array().is_some_and(|profiles| {
+                profiles.iter().any(|profile| {
+                    profile["profile_id"] == "primary-acct"
+                        && profile["exhausted_until"].is_string()
+                }) && profiles.iter().any(|profile| {
+                    profile["profile_id"] == "backup-acct"
+                        && profile["exhausted_until"].is_null()
+                })
+            });
+        if persisted || tokio::time::Instant::now() >= deadline {
+            break state;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
     assert_eq!(
         runtime_state["active_profile_id"],
         json!("backup-acct"),
