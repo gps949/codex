@@ -65,6 +65,8 @@ runs:
         python3 third_party/voice/release_runtime.py stage \
           --target "$TARGET" --source "bazel-bin/third_party/voice/native_runtime_$prefix" --output "$output/runtime"
         cp "bazel-bin/codex-rs/voice-host/codex-voice-host$suffix" "$output/codex-voice-host$suffix"
+        # Bazel outputs can be read-only; stripping and signing mutate this staged copy.
+        chmod u+w "$output/codex-voice-host$suffix"
         if [[ "$RUNNER_OS" == macOS ]]; then
           strip -S -x "$output/codex-voice-host"
           codesign --force --sign - "$output/codex-voice-host"
