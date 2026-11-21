@@ -91,6 +91,8 @@ jobs:
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: "2"
     strategy:
       fail-fast: false
       matrix:
@@ -197,7 +199,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ matrix.target }}" == *linux* ]]; then
-            cargo build --release --target ${{ matrix.target }} --bin bwrap
+            bash ../.github/scripts/run-fork-ci-command.sh bwrap cargo build --release --target ${{ matrix.target }} --bin bwrap
             bwrap_path="${CARGO_TARGET_DIR}/${{ matrix.target }}/release/bwrap"
             strip --strip-debug --strip-unneeded "$bwrap_path"
             export CODEX_BWRAP_SHA256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
@@ -212,7 +214,7 @@ jobs:
           for bin in "${bins[@]}"; do
             build_args+=(--bin "$bin")
           done
-          cargo build --release --target ${{ matrix.target }} "${build_args[@]}"
+          bash ../.github/scripts/run-fork-ci-command.sh release cargo build --release --target ${{ matrix.target }} "${build_args[@]}"
 
       # Upstream release builds keep `strip = false` so debug info can be archived
       # into separate symbols packages, then strips the shipped binaries. The fork
@@ -292,6 +294,17 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+      - name: Preserve build diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-diagnostics-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fork-ci-diagnostics/
+          retention-days: 1
+          compression-level: 9
+          if-no-files-found: ignore
+
   release:
     name: Publish GitHub release
     needs: [prepare, build]
@@ -301,6 +314,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: codex-*
           path: dist
           merge-multiple: true
 

@@ -167,6 +167,18 @@ toolchain(
     visibility = ["//visibility:public"],
 )
 
+# Use the hash-pinned official build that supports the Linux release host.
+toolchain(
+    name = "linux_arm64_ninja_toolchain",
+    exec_compatible_with = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+    ],
+    toolchain = "@voice_ninja_linux_aarch64//:ninja_tool",
+    toolchain_type = "@rules_foreign_cc//toolchains:ninja_toolchain",
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "archives",
     srcs = [
