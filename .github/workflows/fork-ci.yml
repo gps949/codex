@@ -64,6 +64,7 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_fork_install.py
           python3 -m unittest discover -s third_party/voice -p test_assemble_package.py
+          python3 -m unittest discover -s third_party/voice -p test_windows_crt.py
           CODEX_REPO_ROOT="$PWD" python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
           python3 -m unittest discover -s .github/scripts -p test_fork_release_gate.py
           python3 -m unittest discover -s .github/scripts -p test_restore_rusty_v8_native.py

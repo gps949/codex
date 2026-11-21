@@ -210,6 +210,7 @@ foreign_cc_tools = use_extension("@rules_foreign_cc//foreign_cc:extensions.bzl",
 use_repo(foreign_cc_tools, "cmake-3.31.8-windows-x86_64", "ninja_1.13.0_win", "pkgconfig_src")
 
 register_toolchains("//third_party/voice:windows_ninja_toolchain")
+register_toolchains("//third_party/voice:linux_arm64_ninja_toolchain")
 
 single_version_override(
     module_name = "rules_rs",
@@ -536,6 +537,15 @@ crate.annotation(
 )
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# Ninja 1.13.0's ARM64 prebuilt requires glibc 2.38; the official fixed build
+# retains compatibility with the Ubuntu 22.04 release host.
+http_archive(
+    name = "voice_ninja_linux_aarch64",
+    build_file = "//third_party/voice:ninja_linux_aarch64.BUILD.bazel",
+    sha256 = "fd2cacc8050a7f12a16a2e48f9e06fca5c14fc4c2bee2babb67b58be17a607fc",
+    urls = ["https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux-aarch64.zip"],
+)
 
 managed_tcp_test_bwrap = use_repo_rule("//codex-rs/linux-sandbox:managed_tcp_test_bwrap.bzl", "managed_tcp_test_bwrap")
 

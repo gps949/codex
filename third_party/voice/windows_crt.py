@@ -71,6 +71,8 @@ def stage(root: Path, target: str, helper: Path):
     manifest["libraries"].append(
         {"path": "bin/vcruntime140.dll", "sha256": pin["dllSha256"]}
     )
+    # Staging preserves the read-only mode of Bazel outputs on this private copy.
+    manifest_path.chmod(manifest_path.stat().st_mode | 0o200)
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
 
