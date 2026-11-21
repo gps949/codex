@@ -57,10 +57,10 @@ Settings:
         - `r0` = `<SKILLS_ROOT>`
         - `r1` = `<PLUGINS_CACHE>/test`
         ### Available skills
-        - calendar:agenda: Plan a team agenda (file: r1/calendar/local/skills/agenda/SKILL.md)
         - final-check: Review a final brief (file: r0/final-check/SKILL.md)
-        - notes:summarize: Summarize team notes (file: r1/notes/local/skills/summarize/SKILL.md)
         - outline: Draft a project outline (file: r0/outline/SKILL.md)
+        - calendar:agenda: Plan a team agenda (file: r1/calendar/local/skills/agenda/SKILL.md)
+        - notes:summarize: Summarize team notes (file: r1/notes/local/skills/summarize/SKILL.md)
         </skills_instructions>
     [02] <permissions instructions>
         Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
@@ -126,7 +126,7 @@ Settings:
           <shell><HOST_SHELL></shell>
           <current_date><CURRENT_DATE></current_date>
           <timezone><HOST_TIMEZONE></timezone>
-          <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
+          <filesystem><workspace_roots><root><CWD></root></workspace_roots><permission_profile type="managed"><f...ntry></file_system></permission_profile></filesystem> [hash=e8c1de60307d0a3d]
         </environment_context>
 06:message/user:
     Plan a team kickoff for Friday using $outline and $calendar:agenda.
@@ -231,10 +231,10 @@ Settings: same as window 1
         - `r0` = `<SKILLS_ROOT>`
         - `r1` = `<PLUGINS_CACHE>/test`
         ### Available skills
-        - calendar:agenda: Plan a team agenda (file: r1/calendar/local/skills/agenda/SKILL.md)
         - final-check: Review a final brief (file: r0/final-check/SKILL.md)
-        - notes:summarize: Summarize team notes (file: r1/notes/local/skills/summarize/SKILL.md)
         - outline: Draft a project outline (file: r0/outline/SKILL.md)
+        - calendar:agenda: Plan a team agenda (file: r1/calendar/local/skills/agenda/SKILL.md)
+        - notes:summarize: Summarize team notes (file: r1/notes/local/skills/summarize/SKILL.md)
         </skills_instructions>
     [02] <permissions instructions>
         Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
@@ -300,7 +300,7 @@ Settings: same as window 1
           <shell><HOST_SHELL></shell>
           <current_date><CURRENT_DATE></current_date>
           <timezone><HOST_TIMEZONE></timezone>
-          <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
+          <filesystem><workspace_roots><root><CWD></root></workspace_roots><permission_profile type="managed"><f...ntry></file_system></permission_profile></filesystem> [hash=e8c1de60307d0a3d]
         </environment_context>
 07:message/user:
     Summarize the kickoff notes with $notes:summarize.
