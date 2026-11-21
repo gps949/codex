@@ -22,6 +22,16 @@ jobs:
     # Cold-cache builds of the clippy + test tree can exceed an hour on the
     # 4-core free runner; warm runs settle far below this.
     timeout-minutes: 120
+    env:
+      # Bound compilation and subprocess-heavy tests on the standard hosted runner.
+      CARGO_BUILD_JOBS: "2"
+      NEXTEST_TEST_THREADS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      # Synced TUI async tests exceed the previous 8 MiB test-thread stack.
+      RUST_MIN_STACK: "16777216"
+      NEXTEST_PROFILE: default
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,10 +73,19 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs
-          cache-on-failure: true
+          # Start a separate cache lineage for smaller, non-incremental artifacts.
+          shared-key: fork-ci-bounded-v1
+          cache-on-failure: false
 
       - name: Install system dependencies
-        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config libcap-dev
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config libcap-dev bubblewrap
+          # Match upstream setup-ci for bubblewrap on hosted Ubuntu runners.
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
@@ -87,40 +106,30 @@ jobs:
 
       - name: Clippy on fork-touched crates
         working-directory: codex-rs
-        run: cargo clippy --tests -p codex-backend-client -p codex-login -p codex-config -p codex-history -p codex-model-provider -p codex-models-manager -p codex-core -p codex-cli -p codex-tui -p codex-app-server -p codex-app-server-transport -p codex-app-server-protocol -p codex-app-server-daemon -p codex-app-server-client -p codex-install-context -- -D warnings
+        run: bash ../.github/scripts/run-fork-ci-command.sh clippy cargo clippy --tests -p codex-backend-client -p codex-login -p codex-config -p codex-history -p codex-model-provider -p codex-models-manager -p codex-core -p codex-cli -p codex-tui -p codex-app-server -p codex-app-server-transport -p codex-app-server-protocol -p codex-app-server-daemon -p codex-app-server-client -p codex-install-context -- -D warnings
 
       - name: Build test helper binaries
         working-directory: codex-rs
         # Package-scoped nextest builds do not produce standalone fixture helpers.
-        run: cargo build -p codex-linux-sandbox -p codex-rmcp-client -p codex-code-mode-host --bin codex-linux-sandbox --bin test_stdio_server --bin codex-code-mode-host
+        run: bash ../.github/scripts/run-fork-ci-command.sh helpers cargo build -p codex-linux-sandbox -p codex-rmcp-client -p codex-code-mode-host --bin codex-linux-sandbox --bin test_stdio_server --bin codex-code-mode-host
 
-      - name: Multi-account tests
+      - name: Compile multi-account tests
         working-directory: codex-rs
-        env:
-          # Synced TUI async tests exceed the previous 8 MiB test-thread stack.
-          RUST_MIN_STACK: "16777216"
-          NEXTEST_PROFILE: default
-        # Build the selected packages together to unify shared dependency features.
-        # Package and binary filters preserve the existing test coverage.
-        run: |
-          cargo nextest run --no-fail-fast \
-            -p codex-backend-client -p codex-login -p codex-config -p codex-history -p codex-protocol -p codex-app-server-protocol \
-            -p codex-model-provider -p codex-models-manager -p codex-core -p codex-tui -p codex-cli -p codex-app-server -p codex-app-server-transport -p codex-app-server-daemon -p codex-app-server-client -p codex-install-context \
-            -E '
-              (package(=codex-backend-client) and test(credit_expiry)) or
-              package(=codex-login) or
-              package(=codex-config) or
-              package(=codex-history) or
-              package(=codex-app-server-daemon) or
-              package(=codex-app-server-client) or
-              package(=codex-install-context) or
-              package(=codex-model-provider) or
-              (package(=codex-protocol) and test(usage_limit)) or
-              package(=codex-app-server-protocol) or
-              (package(=codex-models-manager) and (test(warmup) or test(routing_catalog))) or
-              (package(=codex-core) and (test(client::tests) or test(compact) or test(suite::model_request::) or test(model_routing_observation) or test(task_model_routing) or test(account_failover) or test(failover) or test(account_transition) or test(tool_output_provenance) or test(preemptive) or test(account_request_auth) or test(opaque_history_migration) or test(account_window_warmup) or test(execution_auth) or test(account_pool_strategy) or test(account_pool_recovery) or test(account_pool_metadata_recovery) or test(account_recovered_reentry) or test(reset_credit) or test(captured_maintenance) or test(model_specific_limit) or test(durable_) or test(api_account_execution) or test(credit_expiry) or test(decision_advisor) or test(skill_advisor) or test(skill_suggestion) or test(tool_search) or test(search_tool))) or
-              (package(=codex-tui) and (test(account) or test(warmup) or test(selection_row_layout) or test(model_routing) or test(model_selection) or test(model_auto) or test(reset_credit) or test(chatwidget::tests::usage))) or
-              (package(=codex-cli) and ((kind(test) and ((binary(=app_server) and test(print_startup_config_sign_out_preserves_enrolled_pool_credentials)) or binary(=account_selection) or binary(=account_manager_names) or binary(=account_primary) or binary(=account_manager_preferences) or binary(=decision_advisor))) or (kind(bin) and binary(=codex) and (test(doctor::updates) or test(quota_observations) or test(account_cmd::quota_display) or test(account_cmd::display) or test(account_selector) or test(account_primary) or test(account_manager))))) or
-              (package(=codex-app-server-transport) and (test(host_policy_retry) or test(primary_login_handover))) or
-              (package(=codex-app-server) and (test(model_selection) or test(reset_credit_journal) or test(logout_account) or test(logout_reloads_persisted) or test(account_pool) or test(mobile_account) or test(mobile_quota) or test(pool_warnings) or test(pool_warning) or test(guarded_pool_notification) or test(status_overlay) or test(workspace_routing) or test(rate_limit_reset) or test(rate_limits_identity) or test(native_status) or test(mobile_warmup) or test(get_account_rate_limits) or test(login_survives_same_owner_token_refresh) or test(account_management) or test(native_account) or test(primary_login) or test(host_login) or test(remote_control) or test(outgoing_owned_request) or test(user_verification_ownership)))
-            '
+        run: bash ../.github/scripts/run-fork-ci-command.sh test-build bash ../.github/scripts/run-fork-ci-tests.sh build
+
+      - name: Run multi-account tests
+        working-directory: codex-rs
+        run: bash ../.github/scripts/run-fork-ci-command.sh tests bash ../.github/scripts/run-fork-ci-tests.sh run
+
+      - name: Preserve CI diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-ci-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fork-ci-diagnostics/
+            codex-rs/target/nextest/default/junit.xml
+          retention-days: 1
+          compression-level: 9
+          if-no-files-found: warn
