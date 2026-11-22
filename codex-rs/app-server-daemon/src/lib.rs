@@ -13,6 +13,7 @@ mod diagnostics;
 mod install_lock;
 mod launch;
 pub use launch::restart_with_features;
+pub use launch::start_for_tui;
 pub use launch::start_with_features;
 pub use launch::start_with_features_classified;
 mod managed_install;
@@ -341,6 +342,12 @@ fn ensure_supported_platform() -> Result<()> {
     ))
 }
 
+#[derive(Clone, Copy)]
+enum RunningDaemonPolicy {
+    Refresh,
+    Reuse,
+}
+
 #[derive(Clone)]
 struct Daemon {
     // Feature-aware TUI startup owns a live terminal. Direct lifecycle commands
@@ -432,7 +439,7 @@ impl Daemon {
         let selected = self.current_installation()?;
         match command {
             LifecycleCommand::Start { feature_overrides } => selected
-                .start(&feature_overrides)
+                .start(&feature_overrides, RunningDaemonPolicy::Refresh)
                 .await
                 .map_err(|err| err.error),
             LifecycleCommand::Restart { feature_overrides } => {
@@ -452,17 +459,18 @@ impl Daemon {
     async fn start(
         &self,
         feature_overrides: &BTreeMap<String, bool>,
+        running_daemon_policy: RunningDaemonPolicy,
     ) -> Result<LifecycleOutput, StartError> {
         let mut managed = self.clone();
         let mut settings = self.load_settings().await?;
-        if self.uses_invoking_cli() {
+        let refresh_running = matches!(running_daemon_policy, RunningDaemonPolicy::Refresh);
+        let refresh_invoking_cli = refresh_running && self.uses_invoking_cli();
+        if refresh_invoking_cli {
             self.stop_updater_best_effort(&settings).await;
         }
         let (status, backend, pid, info) = if let Ok(info) = client::probe(&self.socket_path).await
         {
-            if self.uses_invoking_cli()
-                && !self.invoking_cli_daemon_matches(&settings, &info).await?
-            {
+            if refresh_invoking_cli && !self.invoking_cli_daemon_matches(&settings, &info).await? {
                 return self
                     .restart_with_settings(settings)
                     .await
@@ -476,9 +484,7 @@ impl Daemon {
             )
         } else if self.running_backend_instance(&settings).await?.is_some() {
             let info = self.wait_until_ready().await?;
-            if self.uses_invoking_cli()
-                && !self.invoking_cli_daemon_matches(&settings, &info).await?
-            {
+            if refresh_invoking_cli && !self.invoking_cli_daemon_matches(&settings, &info).await? {
                 return self
                     .restart_with_settings(settings)
                     .await
@@ -521,6 +527,7 @@ impl Daemon {
             )
         };
         if backend.is_some()
+            && (refresh_running || status == LifecycleStatus::Started)
             && let Err(err) = managed.ensure_managed_updater(&settings).await
         {
             self.diagnostic(format_args!(
@@ -803,7 +810,7 @@ impl Daemon {
                 .set_remote_control_locked(RemoteControlMode::Enabled)
                 .await?;
             let output = selected
-                .start(&BTreeMap::new())
+                .start(&BTreeMap::new(), RunningDaemonPolicy::Refresh)
                 .await
                 .map_err(|err| err.error)?;
             return Ok(RemoteControlStartOutput::Start(output));

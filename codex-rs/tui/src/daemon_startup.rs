@@ -158,7 +158,7 @@ pub(super) async fn compatibility_warning(
         // Connect even without overrides so startup can recover from an unreachable daemon.
         let client = app_server_connection::connect(target)
             .await
-            .map_err(|_| "could not connect to check daemon feature settings".to_string())?;
+            .map_err(|err| format!("could not connect to the local background server: {err:#}"))?;
         if requested.is_empty() {
             let _ = client.shutdown().await;
             return Ok(());
@@ -233,9 +233,7 @@ pub(super) async fn compatibility_warning(
     .await;
     match check {
         Ok(()) => Ok(None),
-        Err(reason) if *allow_embedded_fallback && restart_features.is_none() => Ok(Some(format!(
-            "Running without the shared background server: {reason}."
-        ))),
+        Err(reason) if *allow_embedded_fallback && restart_features.is_none() => Ok(Some(reason)),
         Err(reason) => Err(CompatibilityError {
             reason,
             restart_features,

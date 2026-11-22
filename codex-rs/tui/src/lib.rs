@@ -504,6 +504,7 @@ async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<Absolute
 #[allow(clippy::too_many_arguments)]
 async fn start_app_server(
     target: &mut AppServerTarget,
+    allow_independent_start: bool,
     arg0_paths: Arg0DispatchPaths,
     config: Config,
     cli_kv_overrides: Vec<(String, toml::Value)>,
@@ -521,6 +522,7 @@ async fn start_app_server(
     } else {
         Some(app_server_connection::connect(target).await)
     };
+    let mut connection_error = None;
     if let Some(connection) = connection {
         match connection {
             Ok(app_server) => {
@@ -552,6 +554,7 @@ async fn start_app_server(
                 ) =>
             {
                 tracing::debug!(%err, "local daemon connection failed; starting embedded app server");
+                connection_error = Some(err);
                 *target = AppServerTarget::Embedded;
                 *state_db = init_state_db_for_app_server_target(&config, target).await?;
             }
@@ -565,15 +568,17 @@ async fn start_app_server(
         }
     }
 
-    if let Some(socket_path) = maybe_probe_default_daemon_socket(&config.codex_home).await {
-        return Err(color_eyre::eyre::eyre!(
-            "Refusing to start a second embedded app-server while another Codex instance is already listening at {}.\n\
-             Attach to the existing server with:\n\
-               codex --remote unix://{}\n\
-             or quit the other Codex app first.",
-            socket_path.display(),
+    if !allow_independent_start
+        && let Some(socket_path) = maybe_probe_default_daemon_socket(&config.codex_home).await
+    {
+        let message = format!(
+            "The local background server is still listening at {}. Retry once it is ready, or use --no-daemon to start an independent session.",
             socket_path.display()
-        ));
+        );
+        return Err(match connection_error {
+            Some(error) => error.wrap_err(message),
+            None => color_eyre::eyre::eyre!(message),
+        });
     }
 
     start_embedded_app_server(
@@ -617,6 +622,7 @@ pub(crate) async fn start_app_server_for_picker(
         codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;
     let app_server = start_app_server(
         &mut target,
+        /*allow_independent_start*/ false,
         Arg0DispatchPaths::default(),
         config.clone(),
         cli_kv_overrides,
@@ -645,6 +651,7 @@ pub(crate) async fn start_embedded_app_server_for_picker(
     // Keep the shared test fixture's frame independent of embedded startup size.
     let app_server = Box::pin(start_app_server(
         &mut target,
+        /*allow_independent_start*/ false,
         Arg0DispatchPaths::default(),
         config.clone(),
         Vec::new(),
@@ -1191,6 +1198,7 @@ async fn run_ratatui_app(
     loader_overrides: LoaderOverrides,
     strict_config: bool,
     mut app_server_target: AppServerTarget,
+    allow_independent_start: bool,
     remote_cwd_override: Option<PathBuf>,
     initial_config: Config,
     statusline_metrics: statusline_metrics::StatuslineMetrics,
@@ -1275,6 +1283,7 @@ async fn run_ratatui_app(
                          state_db: &mut Option<StateDbHandle>| {
         start_app_server(
             target,
+            allow_independent_start,
             arg0_paths.clone(),
             config.clone(),
             cli_kv_overrides.clone(),
@@ -2056,6 +2065,7 @@ async fn run_ratatui_app(
                 app_server.shutdown().await?;
                 let client = start_app_server(
                     &mut app_server_target,
+                    allow_independent_start,
                     arg0_paths.clone(),
                     config.clone(),
                     cli_kv_overrides.clone(),

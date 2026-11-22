@@ -361,7 +361,7 @@ pub(super) async fn run_main_inner(
     )?;
 
     let implicit_connection = explicit_remote_endpoint.is_none();
-    let default_daemon = if implicit_connection && !workload_identity_selected {
+    let default_daemon = if implicit_connection && reuse_implicit_local_daemon {
         startup_draft
             .run_until(maybe_probe_default_daemon_socket(&codex_home))
             .await?
@@ -621,9 +621,7 @@ pub(super) async fn run_main_inner(
                 // Daemon startup needs no terminal input. Keep the composer visible and
                 // responsive while it checks the running server or prepares an installation.
                 // Preserve saved daemon settings until any mismatch is confirmed in recovery.
-                let result =
-                    codex_app_server_daemon::start_with_features_classified(&Default::default())
-                        .await;
+                let result = codex_app_server_daemon::start_for_tui().await;
                 daemon_telemetry::record_start(&config, &result).await;
                 match result.map_err(|err| err.error) {
                     Ok(output) => Ok(Some(output)),
@@ -651,14 +649,55 @@ pub(super) async fn run_main_inner(
             daemon_exclusion = Some("this Windows launcher");
         }
     }
-    let compatibility_warning = daemon_recovery::check(
+    let new_local_session = session_action == startup_draft::StartupDraftSessionAction::New
+        && !cli.agents_overview
+        && !app_server_target.uses_remote_workspace();
+    // Resume, fork and the agents overview must keep the selected backend.
+    if !new_local_session
+        && let AppServerTarget::LocalDaemon {
+            allow_embedded_fallback,
+            ..
+        } = &mut app_server_target
+    {
+        *allow_embedded_fallback = false;
+    }
+    let recovery_mode = match (new_local_session, implicit_connection) {
+        (true, true) => daemon_recovery::RecoveryMode::StartIndependently,
+        (true, false) => daemon_recovery::RecoveryMode::OfferIndependent,
+        (false, _) => daemon_recovery::RecoveryMode::KeepBackend,
+    };
+    let recovery = daemon_recovery::check(
         &mut startup_draft,
         &app_server_target,
         &config,
         &cli_kv_overrides,
         managed_daemon,
+        recovery_mode,
     )
     .await?;
+    let independent_recovery = matches!(recovery, daemon_recovery::Recovery::Independent(_));
+    let allow_independent_start = cli.no_daemon
+        || independent_recovery
+        || (implicit_connection && new_local_session && !reuse_implicit_local_daemon);
+    let compatibility_warning = match recovery {
+        daemon_recovery::Recovery::UseDaemon => None,
+        daemon_recovery::Recovery::Independent(warning) => Some(warning),
+        daemon_recovery::Recovery::Unavailable(reason) => {
+            if startup_draft
+                .run_until(maybe_probe_default_daemon_socket(&codex_home))
+                .await?
+                .is_some()
+            {
+                return Err(std::io::Error::other(format!(
+                    "The local background server is listening but could not be used: {reason}.\n{}",
+                    daemon_startup::FAILURE_HINT
+                )));
+            }
+            Some(format!(
+                "Running without the shared background server: {reason}."
+            ))
+        }
+    };
     if compatibility_warning.is_some() {
         app_server_target = AppServerTarget::Embedded;
         daemon_exclusion = Some("daemon feature settings");
@@ -1013,6 +1052,7 @@ pub(super) async fn run_main_inner(
         loader_overrides,
         strict_config,
         app_server_target,
+        allow_independent_start,
         remote_cwd_override,
         config,
         statusline_metrics,

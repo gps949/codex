@@ -989,7 +989,7 @@ impl App {
         // This launch warning belongs to the TUI, independent of picker/trust client replacement.
         if let Some(warning) = daemon_startup_warning {
             app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                history_cell::StartupWarningsCell::new(vec![warning]),
+                history_cell::new_visible_warning_event(warning),
             )));
         }
         // Automatic NFS detection is Linux-only; manual migration supports Unix.
@@ -1340,7 +1340,13 @@ See the Codex keymap documentation for supported actions and examples."
                 },
             );
         }
-        if account_pool_enabled {
+        // An older local daemon can omit the account-pool snapshot entirely.
+        let has_local_account_profiles =
+            matches!(app.app_server_target, AppServerTarget::LocalDaemon { .. })
+                && codex_login::AccountProfileStore::new(app.config.codex_home.to_path_buf())
+                    .manifest_path()
+                    .is_file();
+        if account_pool_enabled || has_local_account_profiles {
             app.prefetch_account_pool(&app_server);
         }
 

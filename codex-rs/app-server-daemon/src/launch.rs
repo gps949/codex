@@ -3,14 +3,14 @@
 
 use crate::Daemon;
 use crate::LifecycleOutput;
+use crate::RunningDaemonPolicy;
 use crate::ensure_supported_platform;
 use crate::telemetry::StartError;
 use anyhow::Result;
 use anyhow::ensure;
 use std::collections::BTreeMap;
 
-/// Start a missing daemon with these features, preserving other saved overrides,
-/// or leave a running daemon unchanged.
+/// Start the daemon with these features, preserving other saved overrides.
 /// Callers must check the running server's configuration before using it.
 /// Startup diagnostics go to tracing, so a caller with a live TUI can keep rendering.
 pub async fn start_with_features(features: &BTreeMap<String, bool>) -> Result<LifecycleOutput> {
@@ -19,9 +19,22 @@ pub async fn start_with_features(features: &BTreeMap<String, bool>) -> Result<Li
         .map_err(|err| err.error)
 }
 
-/// Starts the daemon and classifies failures for the TUI startup counter.
+/// Start a missing daemon with its saved settings, or reuse a running server.
+/// Attaching from the TUI leaves the running daemon and its updater alone.
+pub async fn start_for_tui() -> Result<LifecycleOutput, StartError> {
+    start_with_policy(&BTreeMap::new(), RunningDaemonPolicy::Reuse).await
+}
+
+/// Start the daemon and return classified startup failures.
 pub async fn start_with_features_classified(
     features: &BTreeMap<String, bool>,
+) -> Result<LifecycleOutput, StartError> {
+    start_with_policy(features, RunningDaemonPolicy::Refresh).await
+}
+
+async fn start_with_policy(
+    features: &BTreeMap<String, bool>,
+    running_daemon_policy: RunningDaemonPolicy,
 ) -> Result<LifecycleOutput, StartError> {
     ensure_supported_platform()?;
     #[cfg(windows)]
@@ -32,7 +45,7 @@ pub async fn start_with_features_classified(
     let selected = daemon.current_installation()?;
     let mut overrides = selected.load_settings().await?.feature_overrides;
     overrides.extend(features.clone());
-    Box::pin(selected.start(&overrides)).await
+    Box::pin(selected.start(&overrides, running_daemon_policy)).await
 }
 
 /// Apply confirmed feature settings to an existing managed daemon and restart it.
@@ -77,7 +90,10 @@ impl Daemon {
         let previous = settings.feature_overrides.clone();
         settings.feature_overrides.extend(features.clone());
         if settings.feature_overrides == previous {
-            return self.start(&previous).await.map_err(|err| err.error);
+            return self
+                .start(&previous, RunningDaemonPolicy::Refresh)
+                .await
+                .map_err(|err| err.error);
         }
         self.restart_with_settings(settings).await
     }

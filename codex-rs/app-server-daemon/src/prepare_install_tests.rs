@@ -526,7 +526,10 @@ async fn broken_selection_is_not_a_missing_installation() {
             .to_string()
             .contains("repair the existing installation")
     );
-    let start_error = daemon.start(&BTreeMap::new()).await.unwrap_err();
+    let start_error = daemon
+        .start(&BTreeMap::new(), crate::RunningDaemonPolicy::Refresh)
+        .await
+        .unwrap_err();
     assert_eq!(start_error.failure_reason(), "install");
     assert_eq!(
         std::fs::read_link(current).unwrap(),

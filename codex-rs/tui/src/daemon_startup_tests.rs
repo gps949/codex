@@ -205,10 +205,7 @@ async fn daemon_feature_compatibility_respects_required_and_optional_attachment(
             let restartable = scenario != "unsupported RPC";
             if allow_embedded_fallback && !restartable {
                 let warning = result?.expect("optional attachment should fall back");
-                assert_eq!(
-                    warning,
-                    format!("Running without the shared background server: {reason}.")
-                );
+                assert_eq!(warning, reason);
             } else {
                 let error = result.unwrap_err();
                 assert_eq!(error.restart_features.is_some(), restartable);
@@ -298,6 +295,7 @@ async fn daemon_startup_falls_back_only_for_implicit_endpoints() -> color_eyre::
         let mut state_db = None;
         let result = start_app_server(
             &mut target,
+            /*allow_independent_start*/ false,
             Arg0DispatchPaths::default(),
             config,
             Vec::new(),

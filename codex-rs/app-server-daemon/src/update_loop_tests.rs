@@ -920,7 +920,10 @@ async fn daemon_start_and_restart_preserve_launch_features() {
                 .await
                 .abort_handle()
         };
-        let (started, server) = tokio::join!(daemon.start(&features), control);
+        let (started, server) = tokio::join!(
+            daemon.start(&features, crate::RunningDaemonPolicy::Refresh),
+            control
+        );
         assert_eq!(started.unwrap().status, crate::LifecycleStatus::Started);
         assert_eq!(
             daemon.load_settings().await.unwrap().feature_overrides,
@@ -933,10 +936,10 @@ async fn daemon_start_and_restart_preserve_launch_features() {
         };
         assert_eq!(std::fs::read_to_string(&args_path).unwrap(), expected);
         let reused = daemon
-            .start(&std::collections::BTreeMap::from([(
-                "api_key_model_discovery".to_string(),
-                false,
-            )]))
+            .start(
+                &std::collections::BTreeMap::from([("api_key_model_discovery".to_string(), false)]),
+                crate::RunningDaemonPolicy::Refresh,
+            )
             .await
             .unwrap();
         assert_eq!(reused.status, crate::LifecycleStatus::AlreadyRunning);

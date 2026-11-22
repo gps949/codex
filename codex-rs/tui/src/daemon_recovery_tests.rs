@@ -31,7 +31,12 @@ fn daemon_recovery_requires_explicit_restart_and_defaults_to_cancel() {
             "non_restartable_daemon_recovery_menu",
         ),
     ] {
-        let mut view = recovery_view(issue, managed, &RuntimeKeymap::defaults());
+        let mut view = recovery_view(
+            issue,
+            managed,
+            /*allow_independent*/ true,
+            &RuntimeKeymap::defaults(),
+        );
         let area = Rect::new(
             /*x*/ 0,
             /*y*/ 0,
@@ -56,7 +61,12 @@ fn daemon_recovery_requires_explicit_restart_and_defaults_to_cancel() {
         view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(view.take_last_selected_index(), Some(2));
 
-        let mut view = recovery_view(issue, managed, &RuntimeKeymap::defaults());
+        let mut view = recovery_view(
+            issue,
+            managed,
+            /*allow_independent*/ true,
+            &RuntimeKeymap::defaults(),
+        );
         view.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
         if managed && issue.restart_features.is_some() {
             assert!(!view.is_complete());
