@@ -42,6 +42,12 @@ const RATE_LIMIT_RESET_REQUEST_TIMEOUT: std::time::Duration =
 const WORKSPACE_HEADLINE_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(/*millis*/ 2000);
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "The connected server does not support the multi-account pool. Use a background server running the multi-account Codex fork."
+)]
+struct AccountPoolUnsupported;
+
 impl App {
     pub(super) fn start_mcp_login(
         &self,
@@ -172,8 +178,6 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            // Keep the full error chain: the root cause (for example "unknown method"
-            // from a stale pre-fork app-server daemon) is what makes this actionable.
             let result = fetch_account_pool(request_handle)
                 .await
                 .map_err(|err| format!("{err:#}"));
@@ -185,9 +189,16 @@ impl App {
     /// delaying the first frame or opening the account picker.
     pub(super) fn prefetch_account_pool(&self, app_server: &AppServerSession) {
         let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            if let Err(error) = refresh_account_pool_quotas(request_handle).await {
-                tracing::warn!(%error, "failed to prefetch account-pool quotas");
+            if let Err(error) = fetch_account_pool(request_handle).await {
+                if error.downcast_ref::<AccountPoolUnsupported>().is_some() {
+                    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                        history_cell::new_visible_warning_event(error.to_string()),
+                    )));
+                } else {
+                    tracing::warn!(%error, "failed to prefetch account-pool quotas");
+                }
             }
         });
     }
@@ -956,9 +967,10 @@ pub(super) async fn fetch_account_pool(
     // pool snapshot and skips those probes, so prefer experimental
     // `accountPool/read` (TUI enables experimentalApi). Fall back to the
     // stable snapshot if a stale daemon does not expose the method.
-    if let Ok(pool) = refresh_account_pool_quotas(request_handle.clone()).await {
-        return Ok(pool);
-    }
+    let refresh_error = match refresh_account_pool_quotas(request_handle.clone()).await {
+        Ok(pool) => return Ok(pool),
+        Err(error) => error,
+    };
 
     let request_id = RequestId::String(format!("account-read-pool-{}", Uuid::new_v4()));
     let account: GetAccountResponse = request_handle
@@ -972,6 +984,13 @@ pub(super) async fn fetch_account_pool(
         .wrap_err("account/read failed in TUI")?;
     if let Some(pool) = account.account_pool {
         return Ok(pool);
+    }
+
+    if refresh_error
+        .downcast_ref::<TypedRequestError>()
+        .is_some_and(crate::app_server_session::is_method_not_found)
+    {
+        return Err(AccountPoolUnsupported.into());
     }
 
     refresh_account_pool_quotas(request_handle).await

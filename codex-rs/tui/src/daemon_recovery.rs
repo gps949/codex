@@ -27,24 +27,62 @@ use std::io::IsTerminal;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio_stream::StreamExt;
 
+pub(super) enum Recovery {
+    UseDaemon,
+    Independent(String),
+    Unavailable(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RecoveryMode {
+    StartIndependently,
+    OfferIndependent,
+    KeepBackend,
+}
+
 pub(super) async fn check(
     startup: &mut StartupDraft,
     target: &AppServerTarget,
     config: &Config,
     cli_kv_overrides: &[(String, toml::Value)],
     mut managed_daemon: bool,
-) -> io::Result<Option<String>> {
-    let issue = match startup
+    mode: RecoveryMode,
+) -> io::Result<Recovery> {
+    let mut compatibility = startup
         .run_until(daemon_startup::compatibility_warning(
             target,
             config,
             cli_kv_overrides,
         ))
-        .await?
-    {
-        Ok(warning) => return Ok(warning),
+        .await?;
+    // A daemon can accept the socket while it is still finishing startup or restarting.
+    if matches!(
+        &compatibility,
+        Ok(Some(_))
+            | Err(CompatibilityError {
+                restart_features: None,
+                ..
+            })
+    ) {
+        compatibility = startup
+            .run_until(async {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                daemon_startup::compatibility_warning(target, config, cli_kv_overrides).await
+            })
+            .await?;
+    }
+    let issue = match compatibility {
+        Ok(None) => return Ok(Recovery::UseDaemon),
+        Ok(Some(warning)) => return Ok(Recovery::Unavailable(warning)),
         Err(issue) => issue,
     };
+    // Preserve explicit invocation settings without changing shared daemon state.
+    if mode == RecoveryMode::StartIndependently && issue.restart_features.is_some() {
+        return Ok(Recovery::Independent(format!(
+            "Independent session: {}.",
+            issue.reason
+        )));
+    }
     if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
         return Err(io::Error::other(issue));
     }
@@ -56,9 +94,13 @@ pub(super) async fn check(
             .await?
             .is_ok_and(|status| status.backend.is_some());
     }
+    let allow_independent = mode != RecoveryMode::KeepBackend;
+    if !allow_independent && (!managed_daemon || issue.restart_features.is_none()) {
+        return Err(io::Error::other(issue));
+    }
     startup.flush_pending_events().await?;
     let keymap = RuntimeKeymap::from_config(&config.tui_keymap).map_err(io::Error::other)?;
-    let mut view = recovery_view(&issue, managed_daemon, &keymap);
+    let mut view = recovery_view(&issue, managed_daemon, allow_independent, &keymap);
     let mut chord_matcher = crate::keymap::KeyChordMatcher::default();
     let tui = startup.tui_mut();
     tui.discard_pending_input_before_interactive_screen()?;
@@ -109,8 +151,8 @@ pub(super) async fn check(
     };
     tui.terminal.clear()?;
     match (selection, issue.restart_features.as_ref()) {
-        (Some(0), _) => Ok(Some(format!(
-            "Running without the shared background server: {}.",
+        (Some(0), _) if allow_independent => Ok(Recovery::Independent(format!(
+            "Independent session: {}.",
             issue.reason
         ))),
         (Some(1), Some(features)) if managed_daemon => {
@@ -130,6 +172,7 @@ pub(super) async fn check(
                     cli_kv_overrides,
                 ))
                 .await?
+                .map(|warning| warning.map_or(Recovery::UseDaemon, Recovery::Unavailable))
                 .map_err(io::Error::other)
         }
         (Some(_) | None, _) => Err(io::Error::other(issue)),
@@ -139,6 +182,7 @@ pub(super) async fn check(
 fn recovery_view(
     issue: &CompatibilityError,
     managed_daemon: bool,
+    allow_independent: bool,
     keymap: &RuntimeKeymap,
 ) -> ListSelectionView {
     let can_restart = managed_daemon && issue.restart_features.is_some();
@@ -177,15 +221,13 @@ fn recovery_view(
                 SelectionItem {
                     name: "Run without daemon this time".to_string(),
                     dismiss_on_select: true,
+                    is_disabled: !allow_independent,
+                    disabled_reason: (!allow_independent)
+                        .then(|| "This request needs the shared background server.".to_string()),
                     ..Default::default()
                 },
                 SelectionItem {
-                    name: if can_restart {
-                        "Restart with these settings (recommended)"
-                    } else {
-                        "Restart with these settings"
-                    }
-                    .to_string(),
+                    name: "Restart with these settings".to_string(),
                     dismiss_on_select: true,
                     require_explicit_confirmation: true,
                     is_disabled: !can_restart,

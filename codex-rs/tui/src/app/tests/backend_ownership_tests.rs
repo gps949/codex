@@ -158,6 +158,7 @@ async fn startup_fallback_requires_no_established_backend() -> Result<()> {
         let mut state_db = None;
         let result = crate::start_app_server(
             &mut target,
+            /*allow_independent_start*/ false,
             Default::default(),
             app.config.clone(),
             Vec::new(),
