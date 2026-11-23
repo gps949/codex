@@ -5970,6 +5970,18 @@ impl Session {
         self.send_token_count_event(turn_context).await;
     }
 
+    pub(crate) async fn replace_rate_limits(
+        &self,
+        turn_context: &TurnContext,
+        new_rate_limits: Option<RateLimitSnapshot>,
+    ) {
+        {
+            let mut state = self.state.lock().await;
+            state.replace_rate_limits(new_rate_limits);
+        }
+        self.send_token_count_event(turn_context).await;
+    }
+
     pub(crate) async fn record_rate_limits_info(&self, new_rate_limits: RateLimitSnapshot) {
         {
             let mut state = self.state.lock().await;

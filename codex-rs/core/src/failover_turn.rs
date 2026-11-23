@@ -149,10 +149,9 @@ pub(crate) fn account_switch_message(
     continuation: AccountSwitchContinuation,
 ) -> Option<String> {
     let active = execution_auth.active_lease()?;
-    let to_profile = active.profile_id()?.clone();
+    let to_label = active.notice_label()?;
     let from = failed_lease
-        .profile_id()
-        .map(|id| format!("`{id}`"))
+        .notice_label()
         .unwrap_or_else(|| "the previous account".to_string());
     let suffix = match continuation {
         AccountSwitchContinuation::Automatic => "The turn continues automatically.",
@@ -161,24 +160,189 @@ pub(crate) fn account_switch_message(
         }
     };
     Some(format!(
-        "Codex account {from} became unavailable; switched to `{to_profile}`. {suffix}"
+        "Codex account {from} became unavailable; switched to {to_label}. {suffix}"
     ))
 }
 
-/// Earliest known cooldown end across exhausted pool profiles.
+/// Earliest known cooldown or active-window reset across exhausted enabled pool profiles.
 pub(crate) fn earliest_exhausted_reset(execution_auth: &ExecutionAuth) -> Option<DateTime<Utc>> {
     execution_auth
         .account_pool()
-        .map(|pool| pool.snapshots())
-        .unwrap_or_default()
+        .and_then(|pool| earliest_exhausted_reset_in_pool(&pool))
+}
+
+pub(crate) fn earliest_exhausted_reset_in_pool(
+    pool: &codex_login::AccountPool,
+) -> Option<DateTime<Utc>> {
+    let now = Utc::now();
+    pool.snapshots()
         .into_iter()
+        .filter(|snapshot| !snapshot.profile.disabled)
         .filter_map(|snapshot| match snapshot.availability {
-            AccountAvailability::Exhausted { resets_at } => resets_at,
+            AccountAvailability::Exhausted { resets_at } => resets_at
+                .into_iter()
+                .chain(snapshot.backend_resets_at.filter(|reset| *reset > now))
+                .chain(
+                    snapshot
+                        .rate_limits
+                        .primary
+                        .iter()
+                        .chain(snapshot.rate_limits.secondary.iter())
+                        .filter_map(|window| window.resets_at)
+                        .filter(|reset| *reset > now),
+                )
+                .min(),
             AccountAvailability::Available
             | AccountAvailability::AuthenticationUnavailable { .. }
             | AccountAvailability::Disabled => None,
         })
         .min()
+}
+
+pub(crate) fn preemptive_switch_message(
+    switch: &crate::execution_auth::PreemptiveSwitch,
+) -> String {
+    format!(
+        "Switched to Codex account {}: account {} reached {:.0}% of a usage window (resets at {}).",
+        switch.to_label,
+        switch.from_label,
+        switch.used_percent,
+        codex_login::format_exhausted_reset(switch.resets_at),
+    )
+}
+
+pub(crate) fn recovery_continuation_message(execution_auth: &ExecutionAuth) -> String {
+    match execution_auth
+        .account_pool()
+        .and_then(|pool| pool.lease().ok().map(|lease| lease.notice_label()))
+    {
+        Some(label) => {
+            format!("Codex account {label} became available; the turn continues automatically.")
+        }
+        None => "A Codex account became available for retry. The turn continues automatically."
+            .to_string(),
+    }
+}
+
+pub(crate) fn profile_notice_label_in_pool(
+    pool: Option<&codex_login::AccountPool>,
+    profile_id: &codex_login::AccountProfileId,
+) -> String {
+    pool.and_then(|pool| {
+        let snapshot = pool
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| &snapshot.profile.id == profile_id)?;
+        let email = pool
+            .auth_managers()
+            .into_iter()
+            .find(|(id, _)| id == profile_id)
+            .and_then(|(_, manager)| manager.auth_cached())
+            .and_then(|auth| auth.get_account_email());
+        Some(codex_login::format_account_notice_label(
+            snapshot.profile.label.as_deref(),
+            email.as_deref(),
+            profile_id.as_str(),
+        ))
+    })
+    .unwrap_or_else(|| format!("`{profile_id}`"))
+}
+
+pub(crate) fn reset_credit_rescue_message(
+    execution_auth: &ExecutionAuth,
+    redeemed_profile_id: Option<&codex_login::AccountProfileId>,
+    active_profile_id: &codex_login::AccountProfileId,
+    safe_to_continue: bool,
+) -> String {
+    let pool = execution_auth.account_pool();
+    pool_reset_credit_rescue_message(
+        pool.as_deref(),
+        redeemed_profile_id,
+        active_profile_id,
+        safe_to_continue,
+    )
+}
+
+pub(crate) fn pool_reset_credit_rescue_message(
+    pool: Option<&codex_login::AccountPool>,
+    redeemed_profile_id: Option<&codex_login::AccountProfileId>,
+    active_profile_id: &codex_login::AccountProfileId,
+    safe_to_continue: bool,
+) -> String {
+    let active_label = profile_notice_label_in_pool(pool, active_profile_id);
+    let prefix = match redeemed_profile_id {
+        Some(redeemed_id) => {
+            let redeemed_label = profile_notice_label_in_pool(pool, redeemed_id);
+            format!(
+                "Redeemed one rate-limit reset credit on Codex account {redeemed_label}. Execution account: {active_label}."
+            )
+        }
+        None => format!("Codex account recovered: {active_label}."),
+    };
+    let suffix = if safe_to_continue {
+        "The turn continues on that account."
+    } else {
+        "Partial output or an unfinished tool result requires reconciliation; re-send your message to continue."
+    };
+    format!("{prefix} {suffix}")
+}
+
+/// Projects the active pooled account's cached rate-limit windows into a clean session snapshot so
+/// UI surfaces do not remain stuck on the previous account's exhausted percentages after switching.
+pub(crate) fn active_account_rate_limit_snapshot(
+    execution_auth: &ExecutionAuth,
+) -> Option<codex_protocol::protocol::RateLimitSnapshot> {
+    let pool = execution_auth.account_pool()?;
+    active_pool_rate_limit_snapshot(&pool)
+}
+
+pub(crate) fn active_pool_rate_limit_snapshot(
+    pool: &codex_login::AccountPool,
+) -> Option<codex_protocol::protocol::RateLimitSnapshot> {
+    let account_lease = pool.lease().ok()?;
+    let snapshot = pool
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.profile.id == account_lease.profile().id)?;
+    let convert_window =
+        |window: &codex_login::AccountRateLimitWindow| codex_protocol::protocol::RateLimitWindow {
+            used_percent: window.used_percent,
+            resets_at: window.resets_at.map(|reset| reset.timestamp()),
+            window_minutes: window.window_minutes,
+        };
+    let primary = snapshot.rate_limits.primary.as_ref().map(convert_window);
+    let secondary = snapshot.rate_limits.secondary.as_ref().map(convert_window);
+    if primary.is_none() && secondary.is_none() {
+        return None;
+    }
+    let plan_type = account_lease
+        .auth_manager()
+        .auth_cached()
+        .and_then(|auth| auth.account_plan_type());
+    Some(codex_protocol::protocol::RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: None,
+        normal_model_slug: None,
+        primary,
+        secondary,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type,
+        rate_limit_reached_type: None,
+    })
+}
+
+pub(crate) async fn sync_session_rate_limits_with_active_account(
+    sess: &crate::session::session::Session,
+    turn_context: &crate::session::turn_context::TurnContext,
+    execution_auth: &ExecutionAuth,
+) {
+    sess.replace_rate_limits(
+        turn_context,
+        active_account_rate_limit_snapshot(execution_auth),
+    )
+    .await;
 }
 
 /// Builds the user-facing message shown when every configured account is unavailable.

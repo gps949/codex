@@ -58,6 +58,10 @@ pub(super) async fn choose(settings: &Value, locale: Locale) -> anyhow::Result<O
                             "earliest_reset",
                             "Prefer the account whose quota resets sooner",
                         ),
+                        (
+                            "least_used",
+                            "Prefer the account with the most remaining headroom across 5h and weekly limits",
+                        ),
                     ],
                 )
             } else {

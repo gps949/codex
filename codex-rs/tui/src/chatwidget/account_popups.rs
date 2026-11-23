@@ -50,6 +50,7 @@ impl ChatWidget {
                 return;
             }
         };
+        self.apply_account_pool_read_response(&pool);
         if !pool.enabled {
             self.add_info_message(
                 "The multi-account pool is not configured. Add accounts with `codex account add`."
@@ -187,7 +188,7 @@ impl ChatWidget {
                     label: "Strategy".to_string(),
                     header: account_picker_header(
                         "Automatic selection",
-                        "Both strategies use eligible accounts and preserve reserve quota.",
+                        "All strategies use eligible accounts and preserve reserve quota.",
                     ),
                     items: strategy_items,
                 },
@@ -220,9 +221,12 @@ impl ChatWidget {
     }
 
     pub(crate) fn apply_account_pool_read_response(&mut self, pool: &AccountPoolReadResponse) {
+        self.account_pool_enabled = pool.enabled;
+        self.account_pool_accounts = pool.accounts.clone();
         if pool.enabled {
             self.update_account_pool_identity(active_pool_profile_label(pool));
         }
+        self.refresh_status_line();
     }
 
     /// Refresh identity-bound account data once per activation, while quota observations
@@ -234,12 +238,15 @@ impl ChatWidget {
         let identity = (pool.active_profile_id.clone(), pool.active_generation);
         let changed = self.account_pool_identity.as_ref() != Some(&identity);
         self.account_pool_identity = Some(identity);
+        self.account_pool_enabled = !pool.accounts.is_empty();
+        self.account_pool_accounts = pool.accounts.clone();
         let active_profile = pool
             .accounts
             .iter()
             .find(|account| account.is_active)
             .map(account_display_name);
         self.update_account_pool_identity(active_profile);
+        self.refresh_status_line();
         changed
     }
 
@@ -249,11 +256,20 @@ impl ChatWidget {
     ) {
         match result {
             Ok(response) => {
+                let target = self
+                    .account_pool_accounts
+                    .iter()
+                    .find(|account| account.profile_id == response.active_profile_id)
+                    .map(|account| {
+                        codex_login::format_account_notice_label(
+                            account.label.as_deref(),
+                            account.email.as_deref(),
+                            &response.active_profile_id,
+                        )
+                    })
+                    .unwrap_or_else(|| format!("`{}`", response.active_profile_id));
                 self.add_info_message(
-                    format!(
-                        "Switched to Codex account `{}`.",
-                        response.active_profile_id
-                    ),
+                    format!("Switched to Codex account {target}."),
                     /*hint*/ None,
                 );
             }
@@ -443,7 +459,7 @@ fn account_rate_limit_description(
     spans
 }
 
-fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 2] {
+fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 3] {
     [
         (
             AccountPoolRotationStrategy::FillFirst,
@@ -454,6 +470,11 @@ fn rotation_strategy_items() -> [(AccountPoolRotationStrategy, String, String); 
             AccountPoolRotationStrategy::EarliestReset,
             "By reset time".to_string(),
             "Start idle 5h windows early, then prefer the soonest reset".to_string(),
+        ),
+        (
+            AccountPoolRotationStrategy::LeastUsed,
+            "By remaining quota".to_string(),
+            "Prefer the most remaining headroom across 5h and weekly limits".to_string(),
         ),
     ]
 }

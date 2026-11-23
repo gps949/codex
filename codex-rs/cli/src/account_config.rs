@@ -63,8 +63,9 @@ pub(crate) fn parse_rotation_strategy(value: &str) -> Result<AccountPoolRotation
     match value {
         "fill_first" | "fill-first" => Ok(AccountPoolRotationStrategy::FillFirst),
         "earliest_reset" | "earliest-reset" => Ok(AccountPoolRotationStrategy::EarliestReset),
+        "least_used" | "least-used" => Ok(AccountPoolRotationStrategy::LeastUsed),
         other => Err(format!(
-            "invalid rotation strategy {other:?}; expected fill_first or earliest_reset"
+            "invalid rotation strategy {other:?}; expected fill_first, earliest_reset, or least_used"
         )),
     }
 }
@@ -73,6 +74,7 @@ pub(crate) fn format_rotation_strategy(strategy: AccountPoolRotationStrategy) ->
     match strategy {
         AccountPoolRotationStrategy::FillFirst => "fill_first",
         AccountPoolRotationStrategy::EarliestReset => "earliest_reset",
+        AccountPoolRotationStrategy::LeastUsed => "least_used",
     }
 }
 

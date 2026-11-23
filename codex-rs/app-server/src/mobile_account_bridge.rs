@@ -123,6 +123,15 @@ pub(crate) fn native_menu_command(
             }
             _ => NativeMenuCommand::Invalid,
         },
+        Some(value) if !value.is_empty() && words.next().is_none() => {
+            crate::native_account_capabilities::NativeAccountLanguage::parse(value).map_or(
+                NativeMenuCommand::Other,
+                |language| NativeMenuCommand::Language {
+                    entry: crate::native_account_view::NativeMenuEntry::Quick,
+                    language,
+                },
+            )
+        }
         Some(_) => NativeMenuCommand::Other,
     }
 }
@@ -257,6 +266,72 @@ pub(crate) async fn complete_mobile_slash_turn(
     TurnStartResponse {
         turn: completed_turn,
     }
+}
+
+pub(crate) async fn complete_mobile_slash_steer(
+    outgoing: &OutgoingMessageSender,
+    request_id: &ConnectionRequestId,
+    thread_id: ThreadId,
+    turn_id: &str,
+    input: &[V2UserInput],
+    agent_text: String,
+) {
+    let connection_ids = [request_id.connection_id];
+    let thread_id_string = thread_id.to_string();
+    let started_at_ms = now_unix_timestamp_ms();
+    let user_text = single_text_input(input)
+        .map(str::trim)
+        .unwrap_or("/account")
+        .to_string();
+
+    outgoing.record_request_turn_id(request_id, turn_id).await;
+    outgoing
+        .send_response(
+            request_id.clone(),
+            codex_app_server_protocol::TurnSteerResponse {
+                turn_id: turn_id.to_string(),
+            },
+        )
+        .await;
+
+    let user_item =
+        ThreadItem::untimed(codex_app_server_protocol::ThreadItemPayload::UserMessage {
+            id: Uuid::new_v4().to_string(),
+            client_id: None,
+            content: vec![V2UserInput::Text {
+                text: user_text,
+                text_elements: Vec::new(),
+            }],
+        });
+    emit_item_lifecycle(
+        outgoing,
+        &connection_ids,
+        &thread_id_string,
+        turn_id,
+        user_item,
+        started_at_ms,
+    )
+    .await;
+
+    let agent_item =
+        ThreadItem::untimed(codex_app_server_protocol::ThreadItemPayload::AgentMessage {
+            moderation: None,
+            id: Uuid::new_v4().to_string(),
+            text: agent_text,
+            phase: None,
+            memory_citation: None,
+            delivery: None,
+            questions: None,
+        });
+    emit_item_lifecycle(
+        outgoing,
+        &connection_ids,
+        &thread_id_string,
+        turn_id,
+        agent_item,
+        started_at_ms,
+    )
+    .await;
 }
 
 pub(crate) fn overlay_get_account_rate_limits_for_remote_client(
@@ -725,6 +800,45 @@ mod tests {
             mobile_slash_command(&input, Some("codex_chatgpt_ios_remote")),
             None
         );
+    }
+
+    #[test]
+    fn native_menu_command_accepts_quick_language_shorthands() {
+        for (raw, expected) in [
+            (
+                "/account zh",
+                NativeMenuCommand::Language {
+                    entry: crate::native_account_view::NativeMenuEntry::Quick,
+                    language: crate::native_account_capabilities::NativeAccountLanguage::Chinese,
+                },
+            ),
+            (
+                "/account zh-CN",
+                NativeMenuCommand::Language {
+                    entry: crate::native_account_view::NativeMenuEntry::Quick,
+                    language: crate::native_account_capabilities::NativeAccountLanguage::Chinese,
+                },
+            ),
+            (
+                "/account en",
+                NativeMenuCommand::Language {
+                    entry: crate::native_account_view::NativeMenuEntry::Quick,
+                    language: crate::native_account_capabilities::NativeAccountLanguage::English,
+                },
+            ),
+            ("/account list", NativeMenuCommand::Other),
+            ("/account overview", NativeMenuCommand::Other),
+        ] {
+            let input = vec![V2UserInput::Text {
+                text: raw.to_string(),
+                text_elements: Vec::new(),
+            }];
+            assert_eq!(
+                native_menu_command(&input, Some("codex_chatgpt_ios_remote")),
+                expected,
+                "input: {raw}"
+            );
+        }
     }
 
     #[test]

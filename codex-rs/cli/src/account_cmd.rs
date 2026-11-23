@@ -216,6 +216,14 @@ pub(crate) async fn run_account_set(
     };
     match store.update_profile_metadata(&profile_id, update) {
         Ok(profile) => {
+            if profile.disabled
+                && let Err(error) = AccountRuntimeStateStore::new(config.codex_home.to_path_buf())
+                    .clear_selection_if_active(&profile.id)
+            {
+                eprintln!(
+                    "Warning: failed to clear active selection for disabled profile: {error}"
+                );
+            }
             eprintln!(
                 "Updated account profile {} (priority {}{}{}).",
                 profile.id,
@@ -241,9 +249,16 @@ pub(crate) async fn run_account_set(
 
 pub(crate) async fn run_account_list(
     cli_config_overrides: CliConfigOverrides,
+    refresh: bool,
     options: AccountOutputOptions,
 ) -> ! {
-    display_data::run_account_view(cli_config_overrides, display::AccountView::List, options).await
+    display_data::run_account_view(
+        cli_config_overrides,
+        display::AccountView::List,
+        refresh,
+        options,
+    )
+    .await
 }
 
 pub(crate) async fn run_account_use(
@@ -308,6 +323,166 @@ pub(crate) async fn run_account_use(
             .unwrap_or(profile_id.as_str())
     );
     std::process::exit(0);
+}
+
+pub(crate) async fn run_account_auto(cli_config_overrides: CliConfigOverrides, force: bool) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    let store = AccountProfileStore::new(config.codex_home.to_path_buf());
+    let records = match store.load_profile_records() {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("Error reading account profiles: {error}");
+            std::process::exit(1);
+        }
+    };
+    if records.is_empty() {
+        eprintln!("No Codex account profiles are configured. Add one with `codex account add`.");
+        std::process::exit(1);
+    }
+
+    let pool = match codex_login::load_account_pool_for_management(&config.auth_config()).await {
+        Ok(pool) => pool,
+        Err(error) => {
+            eprintln!("Error loading account pool: {error}");
+            std::process::exit(1);
+        }
+    };
+    let strategy = config.account_pool.effective_rotation_strategy();
+    pool.set_rotation_strategy(strategy);
+    pool.set_return_to_preferred(config.account_pool.effective_return_to_preferred());
+    let selected = if force {
+        pool.force_activate_automatic()
+    } else {
+        pool.activate_fill_first()
+    };
+    let runtime_store = AccountRuntimeStateStore::new(config.codex_home.to_path_buf());
+    let selected_lease = match selected {
+        Ok(lease) => {
+            if let Err(error) = runtime_store.select_automatic(Some(lease.profile().id.clone())) {
+                eprintln!("Error saving automatic account selection: {error}");
+                std::process::exit(1);
+            }
+            Some(lease)
+        }
+        Err(_) => {
+            let preserved = runtime_store
+                .load()
+                .ok()
+                .and_then(|state| state.active_profile_id);
+            if let Err(error) = runtime_store.select_automatic(preserved) {
+                eprintln!("Error saving automatic account selection: {error}");
+                std::process::exit(1);
+            }
+            None
+        }
+    };
+    if let Err(error) = codex_login::ApiAccountStore::new(
+        config.codex_home.to_path_buf(),
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    )
+    .select(codex_login::ApiAccountSelection::Subscription)
+    {
+        eprintln!("Warning: could not reset manual API account selection: {error}");
+    }
+    if let Err(error) = codex_login::AccountPoolRuntime::resume_home(&config.codex_home) {
+        eprintln!("Error resuming account pool: {error}");
+        std::process::exit(1);
+    }
+
+    let strategy_name = format_rotation_strategy(strategy);
+    if let Some(lease) = selected_lease {
+        eprintln!(
+            "Automatic account selection enabled ({strategy_name}): selected {} ({}).",
+            lease.display_name(),
+            lease.profile().id
+        );
+    } else {
+        eprintln!(
+            "Automatic subscription scheduling resumed ({strategy_name}). No eligible account is currently available; quota cooldowns were retained."
+        );
+    }
+    std::process::exit(0);
+}
+
+pub(crate) async fn run_account_refresh(
+    cli_config_overrides: CliConfigOverrides,
+    selectors: Vec<String>,
+    options: AccountOutputOptions,
+) -> ! {
+    let config = load_config_or_exit(cli_config_overrides).await;
+    let selectors = (!selectors.is_empty()).then_some(selectors.as_slice());
+    refresh_quota_for_cli(&config, selectors).await;
+    display_data::render_account_view_and_exit(&config, display::AccountView::Pool, options)
+}
+
+pub(super) async fn refresh_quota_for_cli(config: &Config, selectors: Option<&[String]>) {
+    let store = AccountProfileStore::new(config.codex_home.to_path_buf());
+    let records = match store.load_profile_records() {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("Error reading account profiles: {error}");
+            std::process::exit(1);
+        }
+    };
+    if records.is_empty() {
+        if selectors.is_some() {
+            eprintln!(
+                "No Codex account profiles are configured. Add one with `codex account add`."
+            );
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let profile_ids = selectors.map(|selectors| {
+        let mut resolved = Vec::with_capacity(selectors.len());
+        for selector in selectors {
+            let record = match crate::account_selector::resolve_account_with_config(
+                &records,
+                selector,
+                &config.auth_config(),
+            ) {
+                Ok(record) => record,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            };
+            if record.profile.disabled {
+                eprintln!(
+                    "Account profile {} is disabled. Enable it with `codex account enable {}` before refreshing.",
+                    record.profile.id, record.profile.id
+                );
+                std::process::exit(1);
+            }
+            if record.state != AccountProfileState::Ready {
+                eprintln!(
+                    "Account profile {} has not completed login.",
+                    record.profile.id
+                );
+                std::process::exit(1);
+            }
+            resolved.push(record.profile.id.to_string());
+        }
+        resolved
+    });
+
+    let manager = codex_app_server::account_management::AccountManager::new(config.clone());
+    match manager
+        .execute(
+            codex_app_server::account_management::AccountManagerOperation::Refresh { profile_ids },
+        )
+        .await
+    {
+        Ok(result) => {
+            eprintln!("{}", result.message);
+        }
+        Err(error) => {
+            eprintln!("Error refreshing account quota: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub(crate) async fn run_account_remove(
@@ -392,9 +567,16 @@ pub(crate) async fn run_account_remove(
 
 pub(crate) async fn run_account_pool(
     cli_config_overrides: CliConfigOverrides,
+    refresh: bool,
     options: AccountOutputOptions,
 ) -> ! {
-    display_data::run_account_view(cli_config_overrides, display::AccountView::Pool, options).await
+    display_data::run_account_view(
+        cli_config_overrides,
+        display::AccountView::Pool,
+        refresh,
+        options,
+    )
+    .await
 }
 
 pub(crate) async fn run_account_config_show(cli_config_overrides: CliConfigOverrides) -> ! {

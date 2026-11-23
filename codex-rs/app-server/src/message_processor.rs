@@ -2018,6 +2018,8 @@ impl MessageProcessor {
                         &request_id,
                         &params,
                         app_server_client_name.as_deref(),
+                        &self.config_processor,
+                        &self.request_serialization_queues,
                     )
                     .await?
                 {

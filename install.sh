@@ -235,7 +235,16 @@ for binary in $required; do
     cp -Pp "$INSTALL_DIR/$binary" "$stage/backup/$binary"
   fi
 done
+previous_package=""
 if [ "$canonical" = 1 ]; then
+  if [ -L "$INSTALL_DIR/codex" ]; then
+    prev_target="$(python3 -c 'from pathlib import Path; import sys; p = Path(sys.argv[1]); print(p.resolve())' "$INSTALL_DIR/codex" 2>/dev/null || true)"
+    case "$prev_target" in
+      "$INSTALL_DIR/.codex-packages/release."*/package/bin/codex)
+        previous_package="${prev_target%/package/bin/codex}"
+        ;;
+    esac
+  fi
   mkdir -p "$INSTALL_DIR/.codex-packages"
   chmod 755 "$INSTALL_DIR/.codex-packages"
   package_install="$(mktemp -d "$INSTALL_DIR/.codex-packages/release.XXXXXX")"
@@ -328,6 +337,110 @@ updater_pid_file="${CODEX_HOME:-$HOME/.codex}/app-server-daemon/app-server-updat
 if [ -f "$updater_pid_file" ]; then
   warn "A standalone updater PID file exists at $updater_pid_file."
   warn "Stop that updater through its owning app or service before restarting remote control; a PID file alone cannot safely identify a process."
+fi
+
+# --- Prune superseded canonical release generations (keep active + 1 rollback + any live-in-use).
+if [ "$canonical" = 1 ] && [ -d "$INSTALL_DIR/.codex-packages" ]; then
+  pruned_count="$(python3 - "$INSTALL_DIR" "$previous_package" "${CODEX_KEEP_PREVIOUS_RELEASES:-1}" <<'PY_PRUNE' 2>/dev/null || true
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+install_dir = Path(sys.argv[1]).resolve()
+previous_arg = sys.argv[2]
+try:
+    keep_previous = max(1, int(sys.argv[3]))
+except ValueError:
+    keep_previous = 1
+
+if (install_dir / ".codex-install.lock").exists():
+    raise SystemExit(0)
+
+packages_dir = install_dir / ".codex-packages"
+cli = install_dir / "codex"
+if not packages_dir.is_dir() or not cli.is_symlink():
+    raise SystemExit(0)
+
+active_bin = cli.resolve()
+active_gen = None
+for parent in active_bin.parents:
+    if parent.parent == packages_dir and parent.name.startswith("release."):
+        active_gen = parent
+        break
+if active_gen is None or not active_gen.exists():
+    raise SystemExit(0)
+
+active_mtime = active_gen.stat().st_mtime_ns
+keep = {active_gen}
+if previous_arg:
+    prev_path = Path(previous_arg).resolve()
+    if prev_path.parent == packages_dir and prev_path.exists():
+        keep.add(prev_path)
+
+candidates = []
+for entry in packages_dir.iterdir():
+    if entry.is_symlink() or not entry.is_dir() or not entry.name.startswith("release."):
+        continue
+    resolved = entry.resolve()
+    if resolved in keep:
+        continue
+    stat_info = entry.stat()
+    # Never touch generations created after this activation.
+    if stat_info.st_mtime_ns > active_mtime:
+        continue
+    candidates.append((stat_info.st_mtime_ns, entry.name, entry))
+
+# Sort newest-first so we retain enough recent generations to satisfy `keep_previous`.
+candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+already_kept_previous = len(keep) - 1
+need_more = max(0, keep_previous - already_kept_previous)
+to_prune = [entry for _, _, entry in candidates[need_more:]]
+
+def generation_in_use(gen_dir: Path) -> bool:
+    prefix = str(gen_dir.resolve()) + os.sep
+    proc = Path("/proc")
+    if proc.is_dir():
+        for pid_dir in proc.iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            try:
+                exe = os.readlink(pid_dir / "exe")
+                if exe.startswith(prefix):
+                    return True
+            except OSError:
+                pass
+    lsof = shutil.which("lsof") or ("/usr/sbin/lsof" if Path("/usr/sbin/lsof").is_file() else None)
+    if lsof:
+        try:
+            res = subprocess.run(
+                [lsof, "-n", "-P", "+D", str(gen_dir)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+            if res.returncode == 0:
+                return True
+        except Exception:
+            return True
+    return False
+
+pruned = 0
+for entry in to_prune:
+    if generation_in_use(entry):
+        continue
+    shutil.rmtree(entry, ignore_errors=True)
+    if not entry.exists():
+        pruned += 1
+if pruned:
+    print(pruned)
+PY_PRUNE
+)"
+  if [ -n "$pruned_count" ]; then
+    say "Pruned $pruned_count superseded release package(s) from $INSTALL_DIR/.codex-packages."
+  fi
 fi
 
 say ""

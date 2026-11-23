@@ -928,7 +928,9 @@ async fn no_eligible_target_rejects_next_turn_without_sampling() -> anyhow::Resu
         assert_eq!(
             warnings
                 .iter()
-                .filter(|warning| warning.contains("switched to `backup-acct`"))
+                .filter(|warning| {
+                    warning.contains("switched to `backup-acct@example.com` (`backup-acct`)")
+                })
                 .count(),
             expected_switch_count,
         );

@@ -578,6 +578,8 @@ pub(crate) struct ChatWidget {
     status_account_display: Option<StatusAccountDisplay>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     account_pool_identity: Option<(Option<String>, Option<u64>)>,
+    account_pool_enabled: bool,
+    account_pool_accounts: Vec<codex_app_server_protocol::AccountPoolAccount>,
     pub(crate) statusline_feature_enabled: bool,
     statusline_read: Option<statusline_reader::ActiveStatuslineRead>,
     pub(crate) statusline_disconnected: bool,

@@ -72,7 +72,8 @@ impl StatusLineAccent {
             StatusLineItem::CodexVersion
             | StatusLineItem::Hostname
             | StatusLineItem::SessionId
-            | StatusLineItem::Profile => Self::Metadata,
+            | StatusLineItem::Profile
+            | StatusLineItem::AccountPool => Self::Metadata,
             StatusLineItem::FastMode | StatusLineItem::Daybreak | StatusLineItem::RawOutput => {
                 Self::Mode
             }

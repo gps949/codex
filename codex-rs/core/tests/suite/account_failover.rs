@@ -857,7 +857,9 @@ async fn usage_limit_rotates_to_backup_account_and_completes_turn(
         unreachable!();
     };
     assert!(
-        warning.message.contains("switched to `backup-acct`"),
+        warning
+            .message
+            .contains("switched to `backup-acct@example.com` (`backup-acct`)"),
         "unexpected switch warning: {}",
         warning.message
     );

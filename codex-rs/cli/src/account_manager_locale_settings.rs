@@ -21,6 +21,9 @@ pub(super) fn chinese(english: &str) -> Option<&'static str> {
             "持续使用同一账号，直到提前切换或额度耗尽"
         }
         "Prefer the account whose quota resets sooner" => "优先选择额度更早重置的账号",
+        "Prefer the account with the most remaining headroom across 5h and weekly limits" => {
+            "优先选择 5h 与周限额综合剩余最多的账号"
+        }
         "Automatic redemption consumes reset credits only when all eligible subscriptions are exhausted." => {
             "仅在所有符合条件的订阅账号额度耗尽后，自动兑换才会消耗重置券。"
         }

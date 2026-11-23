@@ -2183,8 +2183,14 @@ impl App {
             AppEvent::AccountPoolLoaded { result } => {
                 self.chat_widget.open_account_pool_picker(result);
             }
+            AppEvent::AccountPoolPrefetched { pool } => {
+                self.chat_widget.apply_account_pool_read_response(&pool);
+            }
             AppEvent::ActivateAccountPoolProfile { profile_id, force } => {
                 self.activate_account_pool_profile(app_server, profile_id, force);
+            }
+            AppEvent::ResolveAndActivateAccountPoolProfile { selector, force } => {
+                self.resolve_and_activate_account_pool_profile(app_server, selector, force);
             }
             AppEvent::AccountPoolActivated { result } => {
                 let switched = result.is_ok();
@@ -2218,6 +2224,7 @@ impl App {
                             codex_config::AccountPoolRotationStrategy::EarliestReset => {
                                 "earliest-reset"
                             }
+                            codex_config::AccountPoolRotationStrategy::LeastUsed => "least-used",
                         };
                         self.chat_widget.add_info_message(
                             format!("Account rotation strategy set to {label}."),

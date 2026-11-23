@@ -234,6 +234,7 @@ async fn restoring_a_fully_cooling_down_pool_succeeds() {
 
     let resets_at = Utc::now() + Duration::hours(2);
     let state = AccountRuntimeState {
+        manual_selection: false,
         selection_revision: 0,
         active_profile_id: Some(first.id.clone()),
         profiles: vec![
@@ -655,6 +656,7 @@ async fn restore_runtime_state_keeps_warmup_retry_deadline() {
     restore_runtime_state(
         &pool,
         &AccountRuntimeState {
+            manual_selection: false,
             selection_revision: 0,
             active_profile_id: Some(first.id.clone()),
             profiles: vec![
@@ -910,4 +912,51 @@ async fn account_pool_profiles_ignore_process_auth_after_reload() -> anyhow::Res
         vec!["first-seat", "root-seat", "second-seat"]
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn clear_selection_if_active_unpins_disabled_profile_and_identity_lease_rotates() {
+    let home = TempDir::new().unwrap();
+    let profiles = AccountProfileStore::new(home.path().to_path_buf());
+    let first = profiles
+        .allocate_profile(Some("First".to_string()), 0)
+        .unwrap();
+    profiles.complete_profile(&first.id).unwrap();
+    let second = profiles
+        .allocate_profile(Some("Second".to_string()), 10)
+        .unwrap();
+    profiles.complete_profile(&second.id).unwrap();
+
+    let store = crate::AccountRuntimeStateStore::new(home.path().to_path_buf());
+    store
+        .select(first.id.clone(), crate::AccountSelectionMode::AvailableOnly)
+        .unwrap();
+    let before = store.load().unwrap();
+    assert_eq!(before.active_profile_id.as_ref(), Some(&first.id));
+    assert!(before.manual_selection);
+
+    assert!(!store.clear_selection_if_active(&second.id).unwrap());
+    assert!(store.clear_selection_if_active(&first.id).unwrap());
+    let after = store.load().unwrap();
+    assert_eq!(after.active_profile_id, None);
+    assert!(!after.manual_selection);
+    assert_eq!(after.selection_revision, before.selection_revision + 1);
+
+    let manager = test_auth_manager(home.path()).await;
+    let pool = AccountPool::new();
+    pool.register(first.clone(), Arc::clone(&manager)).unwrap();
+    pool.register(second.clone(), manager).unwrap();
+    pool.activate(&first.id).unwrap();
+    profiles
+        .update_profile_metadata(
+            &first.id,
+            crate::AccountProfileMetadataUpdate {
+                disabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut previous = before;
+    store.synchronize_pool(&pool, &mut previous).unwrap();
+    assert_eq!(pool.identity_lease().unwrap().profile().id, second.id);
 }

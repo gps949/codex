@@ -221,7 +221,10 @@ fn mobile_account_settings_explain_effective_controls() {
     Auto reset credits: only when all accounts exhaust and natural reset is more than 60 min away
 
     Controls
-    /account strategy fill-first|earliest-reset
+    /account overview
+    /account refresh [all|<label|@selector>]
+    /account enable|disable <label|@selector>
+    /account strategy fill-first|earliest-reset|least-used
     /account warmup on|off
     /account resume on|off
     /account wait <minutes: 0..1440>
@@ -360,5 +363,71 @@ fn mobile_warmup_status_reports_off_and_requested_pass() {
     insta::assert_snapshot!(
         "mobile_warmup_now_requested",
         warmup_status(&pool, &debug, 1).unwrap()
+    );
+}
+
+#[test]
+fn mobile_account_resolve_supports_case_insensitive_unique_fallback() {
+    let mut pool = pool();
+    pool.accounts[0].email = Some("Work@Example.com".into());
+    assert_eq!(resolve(&pool, "work").unwrap(), &pool.accounts[0]);
+    assert_eq!(
+        resolve(&pool, "work@example.com").unwrap(),
+        &pool.accounts[0]
+    );
+    assert_eq!(resolve(&pool, "@SECRET-W").unwrap(), &pool.accounts[0]);
+
+    // Exact match still wins when two labels differ only in casing.
+    let mut lower = pool.accounts[0].clone();
+    lower.profile_id = "lower-work-id".into();
+    lower.label = Some("work".into());
+    lower.email = None;
+    pool.accounts.push(lower);
+    assert_eq!(resolve(&pool, "Work").unwrap().profile_id, "secret-work-id");
+    assert_eq!(resolve(&pool, "work").unwrap().profile_id, "lower-work-id");
+    assert!(resolve(&pool, "WORK").unwrap_err().contains("Ambiguous"));
+}
+
+#[test]
+fn mobile_account_overview_renders_visual_bars_and_pool_summary() {
+    let now = DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut pool = pool();
+    pool.accounts[0].rate_limits.primary = Some(AccountPoolRateLimitWindow {
+        used_percent: 37.0,
+        resets_at: Some((now + chrono::Duration::minutes(90)).timestamp()),
+    });
+    let mut cooling = pool.accounts[0].clone();
+    cooling.profile_id = "backup-cooling".into();
+    cooling.label = Some("Backup".into());
+    cooling.is_active = false;
+    cooling.priority = 20;
+    cooling.availability = AccountPoolAvailability::Exhausted {
+        resets_at: Some((now + chrono::Duration::minutes(30)).timestamp()),
+    };
+    cooling.rate_limits.primary = Some(AccountPoolRateLimitWindow {
+        used_percent: 100.0,
+        resets_at: Some((now + chrono::Duration::minutes(30)).timestamp()),
+    });
+    pool.accounts.push(cooling);
+
+    let rendered = overview_at(
+        &pool,
+        codex_config::AccountPoolRotationStrategy::LeastUsed,
+        now,
+    );
+    assert!(
+        rendered.contains("Pool overview · 1/2 ready · least-used"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Cooling: 1 · Disabled: 0"), "{rendered}");
+    assert!(
+        rendered.contains("[████░░░░░░] 37% used (63% left)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("[██████████] 100% used (0% left)"),
+        "{rendered}"
     );
 }

@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import tarfile
@@ -17,6 +18,10 @@ INSTALLER = Path(__file__).resolve().parents[1] / "install.sh"
 
 
 class InstallerTests(unittest.TestCase):
+    def setUp(self):
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
     @contextmanager
     def fixture(
         self, *, damaged=False, executable=True, bad_checksum=False, old_bundle="codex"
@@ -387,6 +392,48 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(str(stages[0] / "backup"), result.stderr)
             self.assertIn("Restore", result.stderr)
             self.assertFalse((install / ".codex-install.lock").exists())
+
+    def test_canonical_install_prunes_superseded_generations_keeping_rollback_and_live(self):
+        with self.canonical_fixture() as (root, install, env, _):
+            packages = install / ".codex-packages"
+            packages.mkdir()
+            generations = []
+            base_ns = time.time_ns() - 100_000_000_000
+            for idx, name in enumerate(
+                ["release.old1", "release.inuse", "release.old2", "release.prev"]
+            ):
+                gen = packages / name
+                (gen / "package/bin").mkdir(parents=True)
+                (gen / "package/bin/codex").write_bytes(b"#!/bin/sh\necho old\n")
+                (gen / "package/bin/codex").chmod(0o755)
+                stamp = base_ns + idx * 1_000_000_000
+                os.utime(gen, ns=(stamp, stamp))
+                generations.append(gen)
+
+            # Point existing `codex` symlink at `release.prev`.
+            (install / "codex").unlink()
+            (install / "codex").symlink_to(
+                packages / "release.prev/package/bin/codex"
+            )
+
+            # Mock `lsof` to report `release.inuse` as open by a live process, and others unused.
+            lsof = root / "mock/lsof"
+            lsof.write_text(
+                '#!/bin/sh\nfor arg in "$@"; do case "$arg" in *release.inuse) exit 0;; esac; done\nexit 1\n'
+            )
+            lsof.chmod(0o755)
+
+            result = self.run_command(env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            active_gen = (install / "codex").resolve().parent.parent.parent
+            remaining = {path.name for path in packages.iterdir()}
+            self.assertEqual(
+                remaining,
+                {active_gen.name, "release.prev", "release.inuse"},
+                result.stdout + result.stderr,
+            )
+            self.assertIn("Pruned 2 superseded release package(s)", result.stdout)
 
 
 if __name__ == "__main__":

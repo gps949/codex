@@ -3,8 +3,8 @@
 set -euo pipefail
 repo="$1"
 sha="$2"
-attempts="${3:-120}"
-delay="${4:-60}"
+attempts="${3:-480}"
+delay="${4:-15}"
 for ((attempt=1; attempt<=attempts; attempt++)); do
   result="$(gh run list --repo "$repo" --workflow fork-ci.yml \
     --branch feature/native-multi-account --event push --commit "$sha" --limit 1 \

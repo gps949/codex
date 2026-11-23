@@ -119,7 +119,23 @@ pub(crate) fn resolve<'a>(
         return match (matches.next(), matches.next()) {
             (Some(account), None) => Ok(account),
             (None, _) => {
-                Err("Account not found. Use /account list to see account selectors.".into())
+                let lower_prefix = prefix.to_ascii_lowercase();
+                let mut ci_matches = pool.accounts.iter().filter(|account| {
+                    account
+                        .profile_id
+                        .to_ascii_lowercase()
+                        .starts_with(&lower_prefix)
+                });
+                match (ci_matches.next(), ci_matches.next()) {
+                    (Some(account), None) => Ok(account),
+                    (None, _) => {
+                        Err("Account not found. Use /account list to see account selectors.".into())
+                    }
+                    (Some(_), Some(_)) => Err(
+                        "Ambiguous account selector. Use a longer profile ID prefix from /account list."
+                            .into(),
+                    ),
+                }
             }
             (Some(_), Some(_)) => Err(
                 "Ambiguous account selector. Use a longer profile ID prefix from /account list."
@@ -134,7 +150,26 @@ pub(crate) fn resolve<'a>(
     });
     match (matches.next(), matches.next()) {
         (Some(account), None) => Ok(account),
-        (None, _) => Err("Account not found. Use /account to see available names.".into()),
+        (None, _) => {
+            let mut ci_matches = pool.accounts.iter().filter(|account| {
+                account
+                    .label
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(selector))
+                    || account
+                        .email
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(selector))
+                    || label(account).eq_ignore_ascii_case(selector)
+            });
+            match (ci_matches.next(), ci_matches.next()) {
+                (Some(account), None) => Ok(account),
+                (None, _) => Err("Account not found. Use /account to see available names.".into()),
+                (Some(_), Some(_)) => Err(
+                    "Ambiguous account name. Use an @account selector from /account list.".into(),
+                ),
+            }
+        }
         (Some(_), Some(_)) => {
             Err("Ambiguous account name. Use an @account selector from /account list.".into())
         }
@@ -297,6 +332,9 @@ pub(crate) fn settings(pool: &codex_config::AccountPoolConfigToml) -> String {
         codex_config::AccountPoolRotationStrategy::EarliestReset => {
             "earliest-reset — use the window that resets soonest"
         }
+        codex_config::AccountPoolRotationStrategy::LeastUsed => {
+            "least-used — use the account with the most remaining headroom"
+        }
     };
     let early = pool
         .effective_preemptive_switch_percent()
@@ -321,10 +359,117 @@ pub(crate) fn settings(pool: &codex_config::AccountPoolConfigToml) -> String {
         ),
     };
     format!(
-        "Pool settings\nStrategy: {strategy}\nEarly rotation: {early}\nReturn to preferred: {}\nWarmup: {warmup}; every {} min, uses a tiny request\nWait and resume: {resume}\nAuto reset credits: {credits}\n\nControls\n/account strategy fill-first|earliest-reset\n/account warmup on|off\n/account resume on|off\n/account wait <minutes: 0..1440>\n/account reset-credits never|when-pool-exhausted\n\nQuota observations are not additive balances. Partial output or unresolved tools may require manual reconciliation.",
+        "Pool settings\nStrategy: {strategy}\nEarly rotation: {early}\nReturn to preferred: {}\nWarmup: {warmup}; every {} min, uses a tiny request\nWait and resume: {resume}\nAuto reset credits: {credits}\n\nControls\n/account overview\n/account refresh [all|<label|@selector>]\n/account enable|disable <label|@selector>\n/account strategy fill-first|earliest-reset|least-used\n/account warmup on|off\n/account resume on|off\n/account wait <minutes: 0..1440>\n/account reset-credits never|when-pool-exhausted\n\nQuota observations are not additive balances. Partial output or unresolved tools may require manual reconciliation.",
         pool.effective_return_to_preferred(),
         pool.effective_window_warmup_interval().as_secs() / 60,
     )
+}
+
+pub(crate) fn overview(
+    pool: &AccountPoolReadResponse,
+    strategy: codex_config::AccountPoolRotationStrategy,
+) -> String {
+    overview_at(pool, strategy, Utc::now())
+}
+
+fn overview_at(
+    pool: &AccountPoolReadResponse,
+    strategy: codex_config::AccountPoolRotationStrategy,
+    now: DateTime<Utc>,
+) -> String {
+    const MAX_OVERVIEW_ACCOUNTS: usize = 10;
+    let ready = pool
+        .accounts
+        .iter()
+        .filter(|account| matches!(account.availability, AccountPoolAvailability::Available))
+        .count();
+    let cooling = pool
+        .accounts
+        .iter()
+        .filter(|account| {
+            matches!(
+                account.availability,
+                AccountPoolAvailability::Exhausted { .. }
+            )
+        })
+        .count();
+    let disabled = pool
+        .accounts
+        .iter()
+        .filter(|account| matches!(account.availability, AccountPoolAvailability::Disabled))
+        .count();
+    let strategy_name = match strategy {
+        codex_config::AccountPoolRotationStrategy::FillFirst => "fill-first",
+        codex_config::AccountPoolRotationStrategy::EarliestReset => "earliest-reset",
+        codex_config::AccountPoolRotationStrategy::LeastUsed => "least-used",
+    };
+    let mut summary = format!(
+        "Pool overview · {ready}/{} ready · {strategy_name}",
+        pool.accounts.len()
+    );
+    if cooling > 0 || disabled > 0 {
+        summary.push_str(&format!("\nCooling: {cooling} · Disabled: {disabled}"));
+    }
+    let mut accounts: Vec<_> = pool.accounts.iter().collect();
+    accounts.sort_by_key(|account| (!account.is_active, account.priority, &account.profile_id));
+    let mut lines = vec![summary];
+    for account in accounts.iter().take(MAX_OVERVIEW_ACCOUNTS) {
+        let name = label(account);
+        let selector = account_selector(pool, account);
+        let current = if account.is_active { " · Current" } else { "" };
+        let state = availability(account, now);
+        lines.push(format!("\n{name}{current}{state} ({selector})"));
+        lines.push(format!(
+            "  5h {} · {}",
+            visual_window_bar(account.rate_limits.primary.as_ref(), now),
+            reset_label(
+                account.rate_limits.primary.as_ref(),
+                /*primary*/ true,
+                now
+            )
+        ));
+        lines.push(format!(
+            "  7d {} · {}",
+            visual_window_bar(account.rate_limits.secondary.as_ref(), now),
+            reset_label(
+                account.rate_limits.secondary.as_ref(),
+                /*primary*/ false,
+                now
+            )
+        ));
+    }
+    if accounts.len() > MAX_OVERVIEW_ACCOUNTS {
+        lines.push(format!(
+            "\n+{} more · /account list <page>",
+            accounts.len() - MAX_OVERVIEW_ACCOUNTS
+        ));
+    }
+    lines.push(
+        "\nQuick menu: /account [en|zh] · Refresh all: /account refresh\nSwitch: /account use <@selector> · Auto: /account auto"
+            .into(),
+    );
+    lines.join("\n")
+}
+
+fn visual_window_bar(window: Option<&AccountPoolRateLimitWindow>, now: DateTime<Utc>) -> String {
+    let Some(window) = window.filter(|window| window.used_percent.is_finite()) else {
+        return "[··········] unknown".into();
+    };
+    if window
+        .resets_at
+        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+        .is_some_and(|reset| reset <= now)
+    {
+        return format!(
+            "[··········] {:.0}% cached (reset passed)",
+            window.used_percent.clamp(0.0, 100.0)
+        );
+    }
+    let used = window.used_percent.clamp(0.0, 100.0);
+    let left = (100.0 - used).clamp(0.0, 100.0);
+    let filled = ((used / 10.0).round() as usize).min(10);
+    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+    format!("[{bar}] {used:.0}% used ({left:.0}% left)")
 }
 
 pub(crate) fn warmup_status(

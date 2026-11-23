@@ -166,6 +166,10 @@ pub(crate) enum StatusLineItem {
     /// Model provider ID for the active thread.
     #[strum(to_string = "provider", serialize = "model-provider")]
     Provider,
+
+    /// Active multi-account pool profile and ready count.
+    #[strum(to_string = "account-pool", serialize = "account")]
+    AccountPool,
 }
 
 impl serde::Serialize for StatusLineItem {
@@ -238,6 +242,9 @@ impl StatusLineItem {
             StatusLineItem::TaskProgress => {
                 "Latest task progress from update_plan (omitted until available)"
             }
+            StatusLineItem::AccountPool => {
+                "Active account-pool profile and ready count (omitted when pool is inactive)"
+            }
         }
     }
 
@@ -248,6 +255,7 @@ impl StatusLineItem {
             StatusLineItem::Reasoning => StatusSurfacePreviewItem::Reasoning,
             StatusLineItem::Profile => StatusSurfacePreviewItem::Profile,
             StatusLineItem::Provider => StatusSurfacePreviewItem::Provider,
+            StatusLineItem::AccountPool => StatusSurfacePreviewItem::AccountPool,
             StatusLineItem::CurrentDir => StatusSurfacePreviewItem::CurrentDir,
             StatusLineItem::ProjectRoot => StatusSurfacePreviewItem::ProjectRoot,
             StatusLineItem::Hostname => StatusSurfacePreviewItem::Hostname,

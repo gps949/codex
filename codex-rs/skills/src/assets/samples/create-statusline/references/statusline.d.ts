@@ -78,7 +78,7 @@ export type Usage = { context: Context, total?: TokenUsage, cost?: Cost, };
 
 export type Workspace = { cwd: string, };
 
-export type StatuslineItemId = "model" | "model-with-reasoning" | "reasoning" | "current-dir" | "project-name" | "hostname" | "git-branch" | "pull-request-number" | "branch-changes" | "run-state" | "permissions" | "approval-mode" | "context-remaining" | "context-used" | "five-hour-limit" | "weekly-limit" | "codex-version" | "context-window-size" | "used-tokens" | "total-input-tokens" | "total-output-tokens" | "thread-credits" | "estimated-thread-cost" | "thread-id" | "fast-mode" | "daybreak" | "raw-output" | "thread-name" | "thread-title" | "workspace-headline" | "task-progress" | "profile" | "provider";
+export type StatuslineItemId = "model" | "model-with-reasoning" | "reasoning" | "current-dir" | "project-name" | "hostname" | "git-branch" | "pull-request-number" | "branch-changes" | "run-state" | "permissions" | "approval-mode" | "context-remaining" | "context-used" | "five-hour-limit" | "weekly-limit" | "codex-version" | "context-window-size" | "used-tokens" | "total-input-tokens" | "total-output-tokens" | "thread-credits" | "estimated-thread-cost" | "thread-id" | "fast-mode" | "daybreak" | "raw-output" | "thread-name" | "thread-title" | "workspace-headline" | "task-progress" | "profile" | "provider" | "account-pool";
 export type TextElement = Extract<Element, { type: "text" }>;
 export type BoldElement = Extract<Element, { type: "bold" }>;
 export type ItalicElement = Extract<Element, { type: "italic" }>;

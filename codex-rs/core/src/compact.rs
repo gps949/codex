@@ -346,12 +346,22 @@ async fn run_compact_task_inner_impl(
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
     let execution_auth = ExecutionAuth::shared(Arc::clone(&sess.services.auth_manager));
-    let mut execution = LocalCompactionExecution::capture(
+    let mut recovery_budget = crate::account_pool_recovery::SamplingRecoveryBudget::new(
+        execution_auth
+            .account_pool()
+            .map_or(0, |pool| pool.snapshots().len()),
+    );
+    let wait_budget = crate::account_pool_recovery::RecoveryWaitBudget::new(
+        turn_context.config.account_pool.effective_reset_wait(),
+    );
+    // Box pool-aware capture and failover futures to keep unoptimized debug turn/compaction
+    // state machines well below the 2 MiB default test-thread stack limit.
+    let mut execution = Box::pin(LocalCompactionExecution::capture(
         sess.as_ref(),
         turn_context.as_ref(),
         execution_auth.as_ref(),
         &history,
-    )
+    ))
     .await?;
     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
     // request tracking)
@@ -404,6 +414,7 @@ async fn run_compact_task_inner_impl(
             &mut request,
             &sess,
             &step_context,
+            execution_auth.as_ref(),
             &mut execution,
             &responses_metadata,
             &Arc::new(prompt),
@@ -428,24 +439,41 @@ async fn run_compact_task_inner_impl(
                 sess.set_total_tokens_full(turn_context.as_ref()).await;
                 return Err(e);
             }
-            Err(e) if retries < max_retries => {
-                retries += 1;
-                let Some(delay) = e.retry_delay(retries) else {
+            Err(e) => {
+                if Box::pin(execution.try_recover_from_error(
+                    sess.as_ref(),
+                    step_context.as_ref(),
+                    execution_auth.as_ref(),
+                    &history,
+                    &e,
+                    &mut recovery_budget,
+                    &wait_budget,
+                ))
+                .await?
+                {
+                    retries = 0;
+                    continue;
+                }
+                if retries < max_retries {
+                    retries += 1;
+                    let Some(delay) = e.retry_delay(retries) else {
+                        return Err(e);
+                    };
+                    let retry_after = e.retry_after();
+                    sess.notify_stream_error(
+                        turn_context.as_ref(),
+                        format!("Reconnecting... {retries}/{max_retries}"),
+                        e,
+                    )
+                    .await;
+                    let retry_at = retry_after
+                        .map(RetryAfter::deadline)
+                        .unwrap_or_else(|| tokio::time::Instant::now() + delay);
+                    tokio::time::sleep_until(retry_at).await;
+                } else {
                     return Err(e);
-                };
-                let retry_after = e.retry_after();
-                sess.notify_stream_error(
-                    turn_context.as_ref(),
-                    format!("Reconnecting... {retries}/{max_retries}"),
-                    e,
-                )
-                .await;
-                let retry_at = retry_after
-                    .map(RetryAfter::deadline)
-                    .unwrap_or_else(|| tokio::time::Instant::now() + delay);
-                tokio::time::sleep_until(retry_at).await;
+                }
             }
-            Err(e) => return Err(e),
         }
     };
 
@@ -1052,10 +1080,12 @@ struct CompactionResponse {
     output: Vec<ResponseItem>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drain_to_completed(
     request: &mut crate::hook_runtime::sampling::SamplingRequest,
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
+    execution_auth: &ExecutionAuth,
     execution: &mut LocalCompactionExecution,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Arc<Prompt>,
@@ -1116,6 +1146,7 @@ async fn drain_to_completed(
             }
             Ok(ResponseEvent::RateLimits(snapshot)) => {
                 if execution.identity.api_target.is_none() {
+                    execution.observe_rate_limits(execution_auth, &snapshot);
                     sess.update_rate_limits(turn_context, snapshot).await;
                 }
             }

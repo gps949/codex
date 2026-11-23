@@ -189,6 +189,7 @@ impl NativeMenuSession {
                 (title, description, operation)
             }
             MenuOperation::Reload
+            | MenuOperation::RefreshAll
             | MenuOperation::Refresh(_)
             | MenuOperation::RefreshQuick(_)
             | MenuOperation::RefreshAccount(_)

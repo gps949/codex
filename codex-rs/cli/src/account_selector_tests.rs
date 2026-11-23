@@ -188,3 +188,41 @@ async fn non_oauth_profile_cannot_be_selected_using_an_obsolete_email() -> anyho
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn at_prefix_and_case_insensitive_unique_fallback_resolve_cleanly() -> anyhow::Result<()> {
+    let home = tempfile::TempDir::new()?;
+    let store = AccountProfileStore::new(home.path().to_path_buf());
+    let work = store.allocate_profile(Some("WorkPrimary".into()), /*priority*/ 10)?;
+    store.complete_profile(&work.id)?;
+    let backup = store.allocate_profile(Some("Backup".into()), /*priority*/ 20)?;
+    store.complete_profile(&backup.id)?;
+    let records = store.load_profile_records()?;
+    save_email(&records[0], "alice@example.com")?;
+    save_email(&records[1], "bob@example.com")?;
+    let config = codex_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    for selector in ["@workprimary", "WORKPRIMARY", "@ALICE@EXAMPLE.COM"] {
+        assert_eq!(
+            resolve_account_with_config(&records, selector, &config.auth_config())
+                .map_err(anyhow::Error::msg)?
+                .profile
+                .id,
+            work.id
+        );
+    }
+
+    let mut colliding = records;
+    colliding[1].profile.label = Some("workprimary".into());
+    assert_eq!(
+        resolve_account_with_config(&colliding, "WorkPrimary", &config.auth_config())
+            .map_err(anyhow::Error::msg)?
+            .profile
+            .id,
+        work.id
+    );
+    assert!(resolve_account_with_config(&colliding, "WORKPRIMARY", &config.auth_config()).is_err());
+    Ok(())
+}

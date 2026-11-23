@@ -23,44 +23,70 @@ jobs:
     # 4-core free runner; warm runs settle far below this.
     timeout-minutes: 120
     env:
-      # Bound compilation and subprocess-heavy tests on the standard hosted runner.
-      CARGO_BUILD_JOBS: "2"
+      # Parallelize compilation with lld while keeping subprocess-heavy test concurrency bounded.
+      CARGO_BUILD_JOBS: "3"
       NEXTEST_TEST_THREADS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       # Synced TUI async tests exceed the previous 8 MiB test-thread stack.
       RUST_MIN_STACK: "16777216"
       NEXTEST_PROFILE: default
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99.1"
-          components: rustfmt, clippy
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Detect changed paths
+        id: changes
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base_sha="${PR_BASE_SHA:-$PUSH_BEFORE_SHA}"
+          rust_needed="true"
+          if [[ -n "$base_sha" && "$base_sha" != "0000000000000000000000000000000000000000" ]] \
+            && git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+            changed="$(git diff --name-only "$base_sha" HEAD)"
+            if [[ -n "$changed" ]]; then
+              docs_only="true"
+              while IFS= read -r file; do
+                [[ -z "$file" ]] && continue
+                case "$file" in
+                  *.md|.codespellrc|.codespellignore) ;;
+                  *) docs_only="false"; break ;;
+                esac
+              done <<< "$changed"
+              if [[ "$docs_only" == "true" ]]; then
+                rust_needed="false"
+                echo "Docs/spelling-only change detected; skipping heavy Rust/V8 steps while keeping CI gate green."
+              fi
+            fi
+          fi
+          echo "rust_needed=$rust_needed" >> "$GITHUB_OUTPUT"
 
       # Text checks run before the Rust cache restores codex-rs/target, so
       # codespell never scans restored build artifacts.
       - name: Spelling (codespell)
         run: pipx run codespell --config .codespellrc --ignore-words .codespellignore
 
-      - name: Formatting (rustfmt)
-        working-directory: codex-rs
-        run: cargo fmt --all -- --check
-
       - name: Prettier on fork-owned files
         run: npx --yes prettier@3.5.3 --check FORK_MAINTENANCE.md fork/README.md fork/README.zh-CN.md fork/ACCOUNT_MANAGER.md fork/ACCOUNT_MANAGER.zh-CN.md fork/DECISION_MODELS.md fork/DECISION_MODELS.zh-CN.md fork/MODEL_ROUTING_DESIGN.md fork/MODEL_ROUTING_DESIGN.zh-CN.md .github/workflows/fork-ci.yml .github/workflows/fork-release.yml .github/workflows/upstream-sync-check.yml codex-rs/app-server/src/account_management/webui
 
       - name: Account manager browser lifecycle
+        if: steps.changes.outputs.rust_needed == 'true'
         run: |
           node codex-rs/app-server/src/account_management/web_lifecycle_browser_tests.cjs
           node codex-rs/app-server/src/account_management/web_reset_operations_tests.cjs
           node codex-rs/app-server/src/account_management/web_routing_browser_tests.cjs
 
       - name: Fork installer and release gate regressions
+        if: steps.changes.outputs.rust_needed == 'true'
         run: |
           python3 -m unittest discover -s scripts -p test_fork_install.py
           python3 -m unittest discover -s third_party/voice -p test_assemble_package.py
@@ -70,18 +96,33 @@ jobs:
           python3 -m unittest discover -s .github/scripts -p test_restore_rusty_v8_native.py
           python3 -m unittest discover -s .github/scripts -p test_latest_upstream_stable_tag.py
 
+      - name: Set up pinned Rust toolchain
+        if: steps.changes.outputs.rust_needed == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - name: Formatting (rustfmt)
+        if: steps.changes.outputs.rust_needed == 'true'
+        working-directory: codex-rs
+        run: cargo fmt --all -- --check
+
       - name: Rust cache
+        if: steps.changes.outputs.rust_needed == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs
-          # Start a separate cache lineage for smaller, non-incremental artifacts.
-          shared-key: fork-ci-bounded-v1
+          # Cache workspace crates too so warm runs skip recompiling untouched codex-* crates.
+          cache-all-crates: "true"
+          shared-key: fork-ci-lld-allcrates-v2
           cache-on-failure: false
 
       - name: Install system dependencies
+        if: steps.changes.outputs.rust_needed == 'true'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config libcap-dev bubblewrap
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config libcap-dev bubblewrap clang lld
           # Match upstream setup-ci for bubblewrap on hosted Ubuntu runners.
           sudo sysctl -w kernel.unprivileged_userns_clone=1
           if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
@@ -89,41 +130,49 @@ jobs:
           fi
 
       - name: Install cargo tools
+        if: steps.changes.outputs.rust_needed == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,cargo-shear@1.11.2
 
       - name: Set up Codex-built rusty_v8 artifacts
+        if: steps.changes.outputs.rust_needed == 'true'
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-unknown-linux-gnu
 
       - name: Restore verified V8 native archive after Cargo cache
+        if: steps.changes.outputs.rust_needed == 'true'
         run: python3 .github/scripts/restore_rusty_v8_native.py --archive "$RUSTY_V8_ARCHIVE" --target x86_64-unknown-linux-gnu --profile debug --host-layout
 
       - name: Unused dependencies (cargo shear)
+        if: steps.changes.outputs.rust_needed == 'true'
         working-directory: codex-rs
         run: cargo shear
 
       - name: Clippy on fork-touched crates
+        if: steps.changes.outputs.rust_needed == 'true'
         working-directory: codex-rs
         run: bash ../.github/scripts/run-fork-ci-command.sh clippy cargo clippy --tests -p codex-backend-client -p codex-login -p codex-config -p codex-history -p codex-model-provider -p codex-models-manager -p codex-core -p codex-cli -p codex-tui -p codex-app-server -p codex-app-server-transport -p codex-app-server-protocol -p codex-app-server-daemon -p codex-app-server-client -p codex-install-context -- -D warnings
 
       - name: Build test helper binaries
+        if: steps.changes.outputs.rust_needed == 'true'
         working-directory: codex-rs
         # Package-scoped nextest builds do not produce standalone fixture helpers.
         run: bash ../.github/scripts/run-fork-ci-command.sh helpers cargo build -p codex-linux-sandbox -p codex-rmcp-client -p codex-code-mode-host --bin codex-linux-sandbox --bin test_stdio_server --bin codex-code-mode-host
 
       - name: Compile multi-account tests
+        if: steps.changes.outputs.rust_needed == 'true'
         working-directory: codex-rs
         run: bash ../.github/scripts/run-fork-ci-command.sh test-build bash ../.github/scripts/run-fork-ci-tests.sh build
 
       - name: Run multi-account tests
+        if: steps.changes.outputs.rust_needed == 'true'
         working-directory: codex-rs
         run: bash ../.github/scripts/run-fork-ci-command.sh tests bash ../.github/scripts/run-fork-ci-tests.sh run
 
       - name: Preserve CI diagnostics
-        if: always()
+        if: always() && steps.changes.outputs.rust_needed == 'true'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:

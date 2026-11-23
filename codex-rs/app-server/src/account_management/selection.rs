@@ -113,7 +113,7 @@ impl AccountManager {
             .map(|lease| lease.profile().id.clone());
         context.ensure_current().await?;
         if let Some(selected) = selected {
-            state.select(selected, AccountSelectionMode::AvailableOnly)?;
+            state.select_automatic(Some(selected))?;
             self.api_store()
                 .select(codex_login::ApiAccountSelection::Subscription)?;
             codex_login::AccountPoolRuntime::resume_home(&self.config.codex_home)?;
@@ -122,6 +122,11 @@ impl AccountManager {
                     .into(),
             )
         } else {
+            let preserved = state
+                .load()
+                .ok()
+                .and_then(|current| current.active_profile_id);
+            state.select_automatic(preserved)?;
             self.api_store()
                 .select(codex_login::ApiAccountSelection::Subscription)?;
             codex_login::AccountPoolRuntime::resume_home(&self.config.codex_home)?;

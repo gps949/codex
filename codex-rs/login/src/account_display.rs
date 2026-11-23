@@ -17,6 +17,43 @@ pub fn account_display_name<'a>(
         .unwrap_or(profile_id)
 }
 
+/// Control-stripped display name suitable for single-line status bars and plain-text notices.
+pub fn clean_account_display_name(
+    label: Option<&str>,
+    email: Option<&str>,
+    profile_id: &str,
+) -> String {
+    let raw = account_display_name(label, email, profile_id);
+    let cleaned: String = raw
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        profile_id.to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Markdown-friendly account reference for user-visible switch/failover/rescue notices.
+///
+/// Includes both the human label/email and the stable `profile_id` when they differ so notices
+/// remain immediately recognizable to humans while preserving profile-id diagnostics.
+pub fn format_account_notice_label(
+    label: Option<&str>,
+    email: Option<&str>,
+    profile_id: &str,
+) -> String {
+    let display = clean_account_display_name(label, email, profile_id).replace('`', "'");
+    if display == profile_id {
+        format!("`{profile_id}`")
+    } else {
+        format!("`{display}` (`{profile_id}`)")
+    }
+}
+
 /// Formats an exhausted-until / reset timestamp for CLI-style surfaces.
 ///
 /// Prefer [`format_primary_window_reset`] when rendering primary quota windows so idle

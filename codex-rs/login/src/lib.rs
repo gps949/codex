@@ -45,6 +45,8 @@ pub use reset_credit_reconciliation::reconcile_reset_credit_recovery;
 pub use reset_credit_spending_barrier::automatic_reset_spending_blocked;
 pub use reset_credit_spending_barrier::manual_reset_spending_blocked;
 pub mod api_account;
+pub use account_display::clean_account_display_name;
+pub use account_display::format_account_notice_label;
 pub use account_display::format_exhausted_reset;
 pub use account_display::format_exhausted_reset_unix;
 pub use account_display::format_plan_type_label;

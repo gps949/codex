@@ -189,6 +189,7 @@ fn rotation_strategy_label(strategy: AccountPoolRotationStrategy) -> &'static st
     match strategy {
         AccountPoolRotationStrategy::FillFirst => "fillFirst",
         AccountPoolRotationStrategy::EarliestReset => "earliestReset",
+        AccountPoolRotationStrategy::LeastUsed => "leastUsed",
     }
 }
 

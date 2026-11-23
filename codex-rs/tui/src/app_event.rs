@@ -996,14 +996,25 @@ pub(crate) enum AppEvent {
         result: Result<codex_app_server_protocol::AccountPoolWarmupDebugResponse, String>,
     },
 
-    /// Result of fetching the multi-account pool state.
+    /// Result of fetching the multi-account pool state for the `/account` picker.
     AccountPoolLoaded {
         result: Result<codex_app_server_protocol::AccountPoolReadResponse, String>,
+    },
+
+    /// Background startup/refresh snapshot of the multi-account pool without opening a popup.
+    AccountPoolPrefetched {
+        pool: codex_app_server_protocol::AccountPoolReadResponse,
     },
 
     /// Activate a pool profile (`None` re-enters automatic scheduling).
     ActivateAccountPoolProfile {
         profile_id: Option<String>,
+        force: bool,
+    },
+
+    /// Resolve a profile ID, label, or email from `accountPool/read` and activate it.
+    ResolveAndActivateAccountPoolProfile {
+        selector: String,
         force: bool,
     },
 

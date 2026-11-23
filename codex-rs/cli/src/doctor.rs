@@ -74,6 +74,7 @@ use http::Method;
 use serde::Serialize;
 use supports_color::Stream;
 
+mod account_pool;
 mod background;
 mod desktop;
 mod disk;
@@ -96,6 +97,8 @@ mod windows_dev_drive;
 #[path = "doctor/desktop_tests.rs"]
 mod desktop_tests;
 
+use account_pool::account_pool_check;
+use account_pool::pool_backed_auth_check;
 use background::background_server_check;
 use git::git_check;
 use output::HumanOutputOptions;
@@ -422,6 +425,7 @@ async fn build_report(
             let (
                 config_check,
                 auth_check,
+                account_pool_check,
                 updates_check,
                 network_check,
                 websocket_check,
@@ -456,6 +460,11 @@ async fn build_report(
                         .remediation(
                             "Fix the reported authentication error, then rerun codex doctor.",
                         ),
+                    })
+                },
+                async {
+                    run_sync_check("account pool", progress.clone(), || {
+                        account_pool_check(config)
                     })
                 },
                 run_async_check("updates", progress.clone(), updates_check(config)),
@@ -512,6 +521,7 @@ async fn build_report(
             checks.extend([
                 config_check,
                 auth_check,
+                account_pool_check,
                 updates_check,
                 network_check,
                 websocket_check,
@@ -1310,14 +1320,18 @@ fn auth_check(config: &Config) -> DoctorCheck {
             "auth is provided by environment",
         )
         .details(details),
-        Ok(None) => DoctorCheck::new(
-            "auth.credentials",
-            "auth",
-            CheckStatus::Fail,
-            "no Codex credentials were found",
-        )
-        .details(details)
-        .remediation("Run codex login or provide an API key through a supported auth env var."),
+        Ok(None) => pool_backed_auth_check(config, details.clone()).unwrap_or_else(|| {
+            DoctorCheck::new(
+                "auth.credentials",
+                "auth",
+                CheckStatus::Fail,
+                "no Codex credentials were found",
+            )
+            .details(details)
+            .remediation(
+                "Run codex login, codex account add, or provide an API key through a supported auth env var.",
+            )
+        }),
         Err(err) => DoctorCheck::new(
             "auth.credentials",
             "auth",

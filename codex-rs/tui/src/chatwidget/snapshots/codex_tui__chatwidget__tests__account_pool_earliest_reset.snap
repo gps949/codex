@@ -4,7 +4,7 @@ assertion_line: 4488
 expression: "render_bottom_popup(&chat, 80)"
 ---
   Automatic selection
-  Both strategies use eligible accounts and preserve reserve quota.
+  All strategies use eligible accounts and preserve reserve quota.
 
    Accounts (0)   Strategy   Help
 
@@ -14,5 +14,7 @@ expression: "render_bottom_popup(&chat, 80)"
                            reset
   By priority              Use the lowest priority number first; keep others for
                            failover
+  By remaining quota       Prefer the most remaining headroom across 5h and
+                           weekly limits
 
   ← previous tab · → next tab · enter select · esc back

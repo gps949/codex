@@ -191,13 +191,18 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            if let Err(error) = fetch_account_pool(request_handle).await {
-                if error.downcast_ref::<AccountPoolUnsupported>().is_some() {
-                    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                        history_cell::new_visible_warning_event(error.to_string()),
-                    )));
-                } else {
-                    tracing::warn!(%error, "failed to prefetch account-pool quotas");
+            match fetch_account_pool(request_handle).await {
+                Ok(pool) => {
+                    app_event_tx.send(AppEvent::AccountPoolPrefetched { pool });
+                }
+                Err(error) => {
+                    if error.downcast_ref::<AccountPoolUnsupported>().is_some() {
+                        app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                            history_cell::new_visible_warning_event(error.to_string()),
+                        )));
+                    } else {
+                        tracing::warn!(%error, "failed to prefetch account-pool quotas");
+                    }
                 }
             }
         });
@@ -213,6 +218,50 @@ impl App {
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             let result = use_account_pool_profile(request_handle, profile_id, force)
+                .await
+                .map_err(|err| format!("{err:#}"));
+            app_event_tx.send(AppEvent::AccountPoolActivated { result });
+        });
+    }
+
+    pub(super) fn resolve_and_activate_account_pool_profile(
+        &mut self,
+        app_server: &AppServerSession,
+        selector: String,
+        force: bool,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let pool = match fetch_account_pool(request_handle.clone()).await {
+                Ok(pool) => pool,
+                Err(error) => {
+                    app_event_tx.send(AppEvent::AccountPoolActivated {
+                        result: Err(format!("{error:#}")),
+                    });
+                    return;
+                }
+            };
+            app_event_tx.send(AppEvent::AccountPoolPrefetched { pool: pool.clone() });
+            if !pool.enabled || pool.accounts.is_empty() {
+                app_event_tx.send(AppEvent::AccountPoolActivated {
+                    result: Err(
+                        "The multi-account pool is not configured. Add accounts with `codex account add`."
+                            .to_string(),
+                    ),
+                });
+                return;
+            }
+            let profile_id = match resolve_tui_pool_selector(&pool.accounts, &selector) {
+                Ok(profile_id) => profile_id,
+                Err(message) => {
+                    app_event_tx.send(AppEvent::AccountPoolActivated {
+                        result: Err(message),
+                    });
+                    return;
+                }
+            };
+            let result = use_account_pool_profile(request_handle, Some(profile_id), force)
                 .await
                 .map_err(|err| format!("{err:#}"));
             app_event_tx.send(AppEvent::AccountPoolActivated { result });
@@ -1046,6 +1095,67 @@ pub(super) async fn use_account_pool_profile(
         })
         .await
         .wrap_err("accountPool/use failed in TUI")
+}
+
+fn resolve_tui_pool_selector(
+    accounts: &[codex_app_server_protocol::AccountPoolAccount],
+    selector: &str,
+) -> std::result::Result<String, String> {
+    let selector = selector.trim().strip_prefix('@').unwrap_or(selector.trim());
+    if let Some(exact_id) = accounts
+        .iter()
+        .find(|account| account.profile_id == selector)
+    {
+        return Ok(exact_id.profile_id.clone());
+    }
+    let exact_label: Vec<_> = accounts
+        .iter()
+        .filter(|account| {
+            account
+                .label
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|label| label == selector)
+        })
+        .collect();
+    if exact_label.len() == 1 {
+        return Ok(exact_label[0].profile_id.clone());
+    }
+    if exact_label.len() > 1 {
+        let ids: Vec<_> = exact_label.iter().map(|a| a.profile_id.as_str()).collect();
+        return Err(format!(
+            "Account label {selector:?} matches multiple profiles ({}). Pass an exact profile ID.",
+            ids.join(", ")
+        ));
+    }
+    let ci_matches: Vec<_> = accounts
+        .iter()
+        .filter(|account| {
+            account
+                .label
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|label| label.eq_ignore_ascii_case(selector))
+                || account
+                    .email
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|email| email.eq_ignore_ascii_case(selector))
+        })
+        .collect();
+    match ci_matches.len() {
+        1 => Ok(ci_matches[0].profile_id.clone()),
+        0 => Err(format!(
+            "No account in the pool matched {selector:?}. Run `/account` to inspect available accounts."
+        )),
+        _ => {
+            let ids: Vec<_> = ci_matches.iter().map(|a| a.profile_id.as_str()).collect();
+            Err(format!(
+                "Selector {selector:?} matches multiple profiles ({}). Pass an exact profile ID.",
+                ids.join(", ")
+            ))
+        }
+    }
 }
 
 pub(super) async fn fetch_thread_usage(

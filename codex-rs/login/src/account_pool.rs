@@ -271,6 +271,32 @@ impl AccountLease {
     pub fn quota_reset_at(&self) -> Option<DateTime<Utc>> {
         self.quota_reset_at
     }
+
+    /// Human-friendly display name (`label` -> cached account email -> `profile.id`).
+    pub fn display_name(&self) -> String {
+        let email = self
+            .auth_manager
+            .auth_cached()
+            .and_then(|auth| auth.get_account_email());
+        crate::account_display::clean_account_display_name(
+            self.profile.label.as_deref(),
+            email.as_deref(),
+            self.profile.id.as_str(),
+        )
+    }
+
+    /// Markdown-formatted account reference (`\`Label\` (\`id\`)` or `\`id\``) for notices.
+    pub fn notice_label(&self) -> String {
+        let email = self
+            .auth_manager
+            .auth_cached()
+            .and_then(|auth| auth.get_account_email());
+        crate::account_display::format_account_notice_label(
+            self.profile.label.as_deref(),
+            email.as_deref(),
+            self.profile.id.as_str(),
+        )
+    }
 }
 
 struct ManagedAccount {
@@ -301,6 +327,9 @@ struct AccountPoolState {
     /// Latched when any cooldown expires (including via `snapshots()`), so a later `lease()` can
     /// still honor `return_to_preferred` even if this call did not itself flip availability.
     pending_return_to_preferred: bool,
+    /// True when the active profile was explicitly chosen by the user (`activate` / `use`).
+    /// Automatic failover, preemptive rotation, or `activate_automatic` returns to false.
+    manual_selection: bool,
     rotation_strategy: AccountPoolRotationStrategy,
 }
 
@@ -313,6 +342,7 @@ impl Default for AccountPoolState {
             generation: 1,
             return_to_preferred: true,
             pending_return_to_preferred: false,
+            manual_selection: false,
             rotation_strategy: AccountPoolRotationStrategy::FillFirst,
         }
     }
@@ -434,11 +464,11 @@ impl AccountPool {
                 .map(|account| (active_id, account.profile.priority))
         });
         if let Some((active_id, active_priority)) = active {
-            // Return to a more preferred profile when a cooldown has expired. The expiry may have
-            // been observed earlier by `snapshots()` / activate, so honor the latched pending bit
-            // as well as a refresh that happened on this call.
-            let consider_preferred =
-                state.return_to_preferred && (refreshed || state.pending_return_to_preferred);
+            // Return to a more preferred profile when a cooldown has expired, unless the user
+            // explicitly pinned a healthy profile for subsequent turns.
+            let consider_preferred = state.return_to_preferred
+                && !state.manual_selection
+                && (refreshed || state.pending_return_to_preferred);
             let preferred = consider_preferred
                 .then(|| select_eligible_account(&state, &now))
                 .flatten()
@@ -466,8 +496,10 @@ impl AccountPool {
             return Ok(lease);
         }
 
-        // Active is ineligible; selecting a replacement also consumes the preferred-return latch.
+        // Active is ineligible; selecting a replacement also consumes the preferred-return latch
+        // and hands control back to automatic scheduling.
         state.pending_return_to_preferred = false;
+        state.manual_selection = false;
         let selected_id =
             select_eligible_account(&state, &now).ok_or(AccountPoolError::NoEligibleAccount)?;
         let active_changed = set_active_profile(&mut state, &selected_id);
@@ -492,7 +524,15 @@ impl AccountPool {
         let selected_id = state
             .active_profile
             .clone()
-            .filter(|id| state.accounts.contains_key(id))
+            .filter(|id| {
+                state.accounts.get(id).is_some_and(|account| {
+                    !matches!(
+                        account.availability,
+                        AccountAvailability::Disabled
+                            | AccountAvailability::AuthenticationUnavailable { .. }
+                    )
+                })
+            })
             .or_else(|| select_eligible_account(&state, &now))
             .or_else(|| {
                 state
@@ -528,6 +568,23 @@ impl AccountPool {
         &self,
         profile_id: &AccountProfileId,
     ) -> Result<AccountLease, AccountPoolError> {
+        self.activate_with_mode(profile_id, /*manual_selection*/ true)
+    }
+
+    /// Restores a persisted active profile while preserving whether it was manually chosen.
+    pub(crate) fn restore_active_profile(
+        &self,
+        profile_id: &AccountProfileId,
+        manual_selection: bool,
+    ) -> Result<AccountLease, AccountPoolError> {
+        self.activate_with_mode(profile_id, manual_selection)
+    }
+
+    fn activate_with_mode(
+        &self,
+        profile_id: &AccountProfileId,
+        manual_selection: bool,
+    ) -> Result<AccountLease, AccountPoolError> {
         let mut state = self.lock_state();
         let refreshed = refresh_expired_exhaustion(&mut state);
         let now = Utc::now();
@@ -539,10 +596,13 @@ impl AccountPool {
             return Err(AccountPoolError::ProfileUnavailable(profile_id.clone()));
         }
 
-        let unparked = state
-            .accounts
-            .get_mut(profile_id)
-            .is_some_and(|account| account.preemptive_rotation_until.take().is_some());
+        state.pending_return_to_preferred = false;
+        state.manual_selection = manual_selection;
+        let unparked = manual_selection
+            && state
+                .accounts
+                .get_mut(profile_id)
+                .is_some_and(|account| account.preemptive_rotation_until.take().is_some());
         let active_changed = set_active_profile(&mut state, profile_id);
         let account = state
             .accounts
@@ -562,6 +622,11 @@ impl AccountPool {
         self.activate_automatic(AutomaticSelectionEligibility::AvailableOnly)
     }
 
+    /// Returns whether the currently active profile was explicitly chosen by the user.
+    pub fn is_manual_selection(&self) -> bool {
+        self.lock_state().manual_selection
+    }
+
     /// Re-enters automatic scheduling while allowing one user-requested probe of a quota-cooled
     /// profile whose observed rate-limit window has already reached its reset time.
     pub fn force_activate_automatic(&self) -> Result<AccountLease, AccountPoolError> {
@@ -577,6 +642,8 @@ impl AccountPool {
         let now = Utc::now();
         let selected_id =
             select_account(&state, &now, eligibility).ok_or(AccountPoolError::NoEligibleAccount)?;
+        state.pending_return_to_preferred = false;
+        state.manual_selection = false;
         let forced = if eligibility == AutomaticSelectionEligibility::IncludeDueResetCooldowns {
             let account = state
                 .accounts
@@ -632,6 +699,8 @@ impl AccountPool {
             }
             account.preemptive_rotation_until.take().is_some() || forced
         };
+        state.pending_return_to_preferred = false;
+        state.manual_selection = true;
         let active_changed = set_active_profile(&mut state, profile_id);
         let account = state
             .accounts
@@ -682,6 +751,8 @@ impl AccountPool {
             };
             account.preemptive_rotation_until = Some(resets_at);
             state.active_profile = None;
+            state.manual_selection = false;
+            state.pending_return_to_preferred = false;
             let Some(selected_id) = select_eligible_account(&state, &now) else {
                 break 'rotation None;
             };
@@ -777,10 +848,18 @@ impl AccountPool {
         let Some(active) = state.accounts.get(active_id) else {
             return false;
         };
-        let Some(primary) = active.rate_limits.primary.as_ref() else {
-            return false;
-        };
-        if primary.used_percent + f64::EPSILON < threshold {
+        let active_near_threshold = [
+            active.rate_limits.primary.as_ref(),
+            active.rate_limits.secondary.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|window| {
+            window.used_percent.is_finite()
+                && window.resets_at.is_none_or(|reset| reset > now)
+                && window.used_percent + f64::EPSILON >= threshold
+        });
+        if !active_near_threshold {
             return false;
         }
         state.accounts.values().any(|account| {
@@ -788,6 +867,96 @@ impl AccountPool {
                 && Some(&account.profile.id) != state.active_profile.as_ref()
                 && standby_needs_window_warmup(account, now)
         })
+    }
+
+    /// Standby profiles that warrant a passive read-only `GET /wham/usage` quota refresh:
+    /// - any standby with a positive rate-limit window whose `resets_at` has already elapsed, or
+    /// - stale standbys (`observed_at` missing or older than `stale_after`) when the active
+    ///   account's usage reaches `urgent_active_percent`.
+    pub fn stale_standby_quota_refresh_candidates(
+        &self,
+        stale_after: chrono::Duration,
+        urgent_active_percent: f64,
+        max_candidates: usize,
+    ) -> Vec<AccountProfileId> {
+        if max_candidates == 0 {
+            return Vec::new();
+        }
+        let mut state = self.lock_state();
+        let refreshed = refresh_expired_exhaustion(&mut state);
+        let now = Utc::now();
+        let active_urgent = urgent_active_percent.is_finite()
+            && state
+                .active_profile
+                .as_ref()
+                .and_then(|id| state.accounts.get(id))
+                .is_some_and(|active| {
+                    [
+                        active.rate_limits.primary.as_ref(),
+                        active.rate_limits.secondary.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|window| {
+                        window.used_percent.is_finite()
+                            && window.resets_at.is_none_or(|reset| reset > now)
+                            && window.used_percent + f64::EPSILON >= urgent_active_percent
+                    })
+                });
+        let mut candidates: Vec<(bool, Option<DateTime<Utc>>, u32, AccountProfileId)> = state
+            .accounts
+            .values()
+            .filter(|account| {
+                Some(&account.profile.id) != state.active_profile.as_ref()
+                    && !account.profile.disabled
+                    && !matches!(
+                        account.availability,
+                        AccountAvailability::Disabled
+                            | AccountAvailability::AuthenticationUnavailable { .. }
+                    )
+            })
+            .filter_map(|account| {
+                let due_window_reset = [
+                    account.rate_limits.primary.as_ref(),
+                    account.rate_limits.secondary.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|window| {
+                    window.used_percent.is_finite()
+                        && window.used_percent > 0.0
+                        && window.resets_at.is_some_and(|reset| reset <= now)
+                });
+                let observed_at = account.rate_limits.observed_at;
+                let is_stale = observed_at.is_none_or(|observed| now - observed >= stale_after);
+                if due_window_reset || (active_urgent && is_stale) {
+                    Some((
+                        !due_window_reset,
+                        observed_at,
+                        account.profile.priority,
+                        account.profile.id.clone(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        drop(state);
+        if refreshed {
+            self.notify_change();
+        }
+        candidates.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+                .then_with(|| left.3.as_str().cmp(right.3.as_str()))
+        });
+        candidates
+            .into_iter()
+            .take(max_candidates)
+            .map(|(_, _, _, id)| id)
+            .collect()
     }
 
     /// Marks a lease exhausted and rotates only when that exact lease is still the active
@@ -897,6 +1066,7 @@ impl AccountPool {
 
         let active_changed = if disabled && state.active_profile.as_ref() == Some(profile_id) {
             state.active_profile = None;
+            state.manual_selection = false;
             state.generation = state.generation.wrapping_add(1);
             true
         } else {
@@ -1151,6 +1321,7 @@ impl AccountPool {
         }
 
         state.active_profile = None;
+        state.manual_selection = false;
 
         let now = Utc::now();
         let next = if let Some(selected_id) = select_eligible_account(&state, &now) {
@@ -1264,6 +1435,7 @@ fn select_account(
         AccountPoolRotationStrategy::EarliestReset => {
             select_earliest_reset(state, now, eligibility)
         }
+        AccountPoolRotationStrategy::LeastUsed => select_least_used(state, now, eligibility),
     }
 }
 
@@ -1314,6 +1486,90 @@ fn select_earliest_reset(
                 .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
         })
         .map(|account| account.profile.id.clone())
+}
+
+fn select_least_used(
+    state: &AccountPoolState,
+    now: &DateTime<Utc>,
+    eligibility: AutomaticSelectionEligibility,
+) -> Option<AccountProfileId> {
+    state
+        .accounts
+        .values()
+        .filter(|account| account_is_eligible(account, now, eligibility))
+        .min_by(|left, right| {
+            has_fresh_exhausted_window(&left.rate_limits, now)
+                .cmp(&has_fresh_exhausted_window(&right.rate_limits, now))
+                .then_with(|| {
+                    left.preemptive_rotation_until
+                        .is_some()
+                        .cmp(&right.preemptive_rotation_until.is_some())
+                })
+                .then_with(|| least_used_key(left, now).cmp(&least_used_key(right, now)))
+                .then_with(|| earliest_reset_key(left, now).cmp(&earliest_reset_key(right, now)))
+                .then_with(|| left.profile.priority.cmp(&right.profile.priority))
+                .then_with(|| left.profile.id.as_str().cmp(right.profile.id.as_str()))
+        })
+        .map(|account| account.profile.id.clone())
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum LeastUsedKey {
+    /// At least one window is known and the tightest known window still has headroom (`< 100%`).
+    ///
+    /// Ordered by lowest bottleneck usage (`max(primary, secondary)`), then lowest weekly usage
+    /// (since weekly quota replenishes much slower than 5h), then lowest 5h usage. Missing
+    /// secondary/primary sub-keys sort as `u32::MAX` so `None` is never treated as `0%`.
+    Known {
+        constraining_bps: u32,
+        secondary_bps: u32,
+        primary_bps: u32,
+    },
+    /// Neither window has an observation yet; prefer accounts with confirmed headroom first,
+    /// while still probing unknown accounts before unreset 100% windows.
+    Unknown,
+    /// An unreset window was observed at `100%` usage.
+    ExhaustedWindow {
+        secondary_bps: u32,
+        primary_bps: u32,
+    },
+}
+
+fn window_effective_used_bps(
+    window: Option<&AccountRateLimitWindow>,
+    now: &DateTime<Utc>,
+) -> Option<u32> {
+    let window = window?;
+    if !window.used_percent.is_finite() {
+        return None;
+    }
+    if window.resets_at.is_some_and(|resets_at| resets_at <= *now) {
+        return Some(0);
+    }
+    let clamped = window.used_percent.clamp(0.0, 100.0);
+    Some((clamped * 100.0).round() as u32)
+}
+
+fn least_used_key(account: &ManagedAccount, now: &DateTime<Utc>) -> LeastUsedKey {
+    let primary_bps = window_effective_used_bps(account.rate_limits.primary.as_ref(), now);
+    let secondary_bps = window_effective_used_bps(account.rate_limits.secondary.as_ref(), now);
+    let Some(constraining_bps) = primary_bps.into_iter().chain(secondary_bps).max() else {
+        return LeastUsedKey::Unknown;
+    };
+    let primary_rank = primary_bps.unwrap_or(u32::MAX);
+    let secondary_rank = secondary_bps.unwrap_or(u32::MAX);
+    if constraining_bps >= 10_000 {
+        LeastUsedKey::ExhaustedWindow {
+            secondary_bps: secondary_rank,
+            primary_bps: primary_rank,
+        }
+    } else {
+        LeastUsedKey::Known {
+            constraining_bps,
+            secondary_bps: secondary_rank,
+            primary_bps: primary_rank,
+        }
+    }
 }
 
 fn account_is_eligible(
@@ -2929,5 +3185,175 @@ mod tests {
             .expect("mark exhausted without fallback");
         assert!(changes.has_changed().expect("watch channel open"));
         assert!(*changes.borrow_and_update() > after_rate_limit);
+    }
+
+    #[tokio::test]
+    async fn manual_activate_blocks_return_to_preferred_until_automatic_mode_resumes() {
+        let pool = AccountPool::new();
+        pool.set_return_to_preferred(true);
+        let first = profile("first", 10);
+        let second = profile("second", 20);
+        for account in [&first, &second] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let initial = pool.lease().expect("initial lease");
+        assert_eq!(initial.profile().id, first.id);
+
+        // Exhaust `first` briefly so failover moves to `second`, then let the cooldown expire
+        // and call `snapshots()` so `pending_return_to_preferred` is latched before `activate()`.
+        let fallback = pool
+            .mark_exhausted(&initial, Some(Utc::now() + Duration::milliseconds(30)))
+            .expect("exhaust first");
+        let AccountAvailabilityMutation::Rebound(fallback) = fallback else {
+            panic!("expected fallback lease");
+        };
+        assert_eq!(fallback.profile().id, second.id);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = pool.snapshots();
+
+        // User explicitly selects `second`: `lease()` must NOT immediately snap back to `first`.
+        let manual = pool.activate(&second.id).expect("manual activate second");
+        assert_eq!(manual.profile().id, second.id);
+        assert!(pool.is_manual_selection());
+        assert_eq!(
+            pool.lease().expect("sticky manual lease").profile().id,
+            second.id
+        );
+
+        // Even if another cooldown expires while manually pinned, `second` stays selected.
+        let temp_first = pool
+            .force_activate(&first.id)
+            .expect("force activate first");
+        let _ = pool
+            .mark_exhausted(&temp_first, Some(Utc::now() + Duration::milliseconds(30)))
+            .expect("exhaust first again");
+        let manual_again = pool
+            .force_activate(&second.id)
+            .expect("force activate second");
+        assert_eq!(manual_again.profile().id, second.id);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = pool.snapshots();
+        assert_eq!(
+            pool.lease()
+                .expect("manual force_activate stays sticky")
+                .profile()
+                .id,
+            second.id
+        );
+
+        // Returning to automatic mode resumes normal preferred selection.
+        let automatic = pool
+            .activate_fill_first()
+            .expect("resume automatic selection");
+        assert!(!pool.is_manual_selection());
+        assert_eq!(automatic.profile().id, first.id);
+    }
+
+    #[tokio::test]
+    async fn least_used_rotation_prefers_lowest_constraining_usage_and_guards_unknowns() {
+        let pool = AccountPool::new();
+        pool.set_rotation_strategy(AccountPoolRotationStrategy::LeastUsed);
+        let heavy_weekly = profile("heavy_weekly", 10);
+        let balanced = profile("balanced", 20);
+        let unknown = profile("unknown", 5);
+        for account in [&heavy_weekly, &balanced, &unknown] {
+            pool.register(
+                account.clone(),
+                test_auth_manager(&account.credential_home).await,
+            )
+            .expect("register account");
+        }
+
+        let now = Utc::now();
+        let initial_observed = now - Duration::minutes(50);
+        // `heavy_weekly` resets its 5h window sooner and has higher priority,
+        // but its weekly window is 92% consumed (`constraining = 92%`).
+        pool.update_rate_limits(
+            &heavy_weekly.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 10.0,
+                    resets_at: Some(now + Duration::minutes(30)),
+                    window_minutes: Some(300),
+                }),
+                secondary: Some(AccountRateLimitWindow {
+                    used_percent: 92.0,
+                    resets_at: Some(now + Duration::days(3)),
+                    window_minutes: Some(10_080),
+                }),
+                observed_at: Some(initial_observed),
+                window_observed_at: None,
+            },
+        )
+        .expect("update heavy_weekly");
+
+        // `balanced` has 20% 5h and 15% weekly (`constraining = 20%`, 80% bottleneck headroom).
+        pool.update_rate_limits(
+            &balanced.id,
+            AccountRateLimits {
+                primary: Some(AccountRateLimitWindow {
+                    used_percent: 20.0,
+                    resets_at: Some(now + Duration::hours(4)),
+                    window_minutes: Some(300),
+                }),
+                secondary: Some(AccountRateLimitWindow {
+                    used_percent: 15.0,
+                    resets_at: Some(now + Duration::days(5)),
+                    window_minutes: Some(10_080),
+                }),
+                observed_at: Some(initial_observed),
+                window_observed_at: None,
+            },
+        )
+        .expect("update balanced");
+
+        // `balanced` beats `heavy_weekly` (20% < 92%) and `unknown` (None is never assumed 0%).
+        let selected = pool.activate_fill_first().expect("select least_used");
+        assert_eq!(selected.profile().id, balanced.id);
+
+        // If `balanced` and `heavy_weekly` both reach 100% weekly in their current windows
+        // (>30m ago), `unknown` is probed before the confirmed-100% windows.
+        let stale_observed = now - Duration::minutes(45);
+        for (id, primary_reset, secondary_reset) in [
+            (
+                &heavy_weekly.id,
+                now + Duration::minutes(30),
+                now + Duration::days(3),
+            ),
+            (
+                &balanced.id,
+                now + Duration::hours(4),
+                now + Duration::days(5),
+            ),
+        ] {
+            pool.update_rate_limits(
+                id,
+                AccountRateLimits {
+                    primary: Some(AccountRateLimitWindow {
+                        used_percent: 20.0,
+                        resets_at: Some(primary_reset),
+                        window_minutes: Some(300),
+                    }),
+                    secondary: Some(AccountRateLimitWindow {
+                        used_percent: 100.0,
+                        resets_at: Some(secondary_reset),
+                        window_minutes: Some(10_080),
+                    }),
+                    observed_at: Some(stale_observed),
+                    window_observed_at: None,
+                },
+            )
+            .expect("update stale 100% weekly");
+        }
+
+        let fallback = pool
+            .activate_fill_first()
+            .expect("select unknown before unreset 100% weekly");
+        assert_eq!(fallback.profile().id, unknown.id);
     }
 }

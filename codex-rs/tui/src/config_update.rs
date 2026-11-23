@@ -157,6 +157,7 @@ pub(crate) fn build_account_pool_rotation_strategy_edits(
         serde_json::json!(match strategy {
             AccountPoolRotationStrategy::FillFirst => "fill_first",
             AccountPoolRotationStrategy::EarliestReset => "earliest_reset",
+            AccountPoolRotationStrategy::LeastUsed => "least_used",
         }),
     )]
 }

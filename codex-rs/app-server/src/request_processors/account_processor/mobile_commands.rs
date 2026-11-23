@@ -69,31 +69,18 @@ impl AccountRequestProcessor {
         }
         if command == MobileSlashCommand::Account
             && let Some(V2UserInput::Text { text, .. }) = params.input.first()
+            && let Some(reply) = self.try_mobile_capabilities_reply(&request_id, text)?
         {
-            let mut words = text.split_whitespace();
-            words.next();
-            let verb = words.next().unwrap_or_default();
-            if verb == "capabilities" {
-                let language = NativeAccountLanguage::parse(words.next().unwrap_or_default())
-                    .filter(|_| words.next().is_none())
-                    .ok_or_else(|| invalid_request(format!("Usage: /account {verb} [en|zh-CN]")))?;
-                let text = self
-                    .native_account_manager
-                    .describe(request_id.connection_id, language);
-                return Ok(MobileSlashTurnResult::Completed(Box::new(
-                    complete_mobile_slash_turn(
-                        &self.outgoing,
-                        &request_id,
-                        thread_id,
-                        &params,
-                        text,
-                    )
+            return Ok(MobileSlashTurnResult::Completed(Box::new(
+                complete_mobile_slash_turn(&self.outgoing, &request_id, thread_id, &params, reply)
                     .await,
-                )));
-            }
+            )));
         }
+        let V2UserInput::Text { text, .. } = &params.input[0] else {
+            unreachable!()
+        };
         let text = match self
-            .mobile_account_reply(&params, command, config_processor, queues)
+            .mobile_account_reply_text(text, command, config_processor, queues)
             .await
         {
             Ok(text) => text,
@@ -104,6 +91,26 @@ impl AccountRequestProcessor {
         )))
     }
 
+    fn try_mobile_capabilities_reply(
+        &self,
+        request_id: &ConnectionRequestId,
+        text: &str,
+    ) -> Result<Option<String>, JSONRPCErrorError> {
+        let mut words = text.split_whitespace();
+        words.next();
+        let verb = words.next().unwrap_or_default();
+        if !verb.eq_ignore_ascii_case("capabilities") {
+            return Ok(None);
+        }
+        let language = NativeAccountLanguage::parse(words.next().unwrap_or_default())
+            .filter(|_| words.next().is_none())
+            .ok_or_else(|| invalid_request(format!("Usage: /account {verb} [en|zh-CN]")))?;
+        Ok(Some(
+            self.native_account_manager
+                .describe(request_id.connection_id, language),
+        ))
+    }
+
     fn native_menu_options(
         &self,
         input: &[V2UserInput],
@@ -111,7 +118,9 @@ impl AccountRequestProcessor {
     ) -> Result<Option<NativeMenuOptions>, JSONRPCErrorError> {
         match native_menu_command(input, client_name) {
             NativeMenuCommand::Other => Ok(None),
-            NativeMenuCommand::Invalid => Err(invalid_request("Usage: /account manage [en|zh-CN]")),
+            NativeMenuCommand::Invalid => {
+                Err(invalid_request("Usage: /account [manage] [en|zh-CN]"))
+            }
             NativeMenuCommand::Language { entry, language } => {
                 Ok(Some(NativeMenuOptions { entry, language }))
             }
@@ -135,8 +144,36 @@ impl AccountRequestProcessor {
         request_id: &ConnectionRequestId,
         params: &TurnSteerParams,
         client_name: Option<&str>,
+        config_processor: &ConfigRequestProcessor,
+        queues: &RequestSerializationQueues,
     ) -> Result<bool, JSONRPCErrorError> {
-        let Some(options) = self.native_menu_options(&params.input, client_name)? else {
+        if let Some(options) = self.native_menu_options(&params.input, client_name)? {
+            let thread_id = ThreadId::from_string(&params.thread_id)
+                .map_err(|error| invalid_request(format!("invalid thread id: {error}")))?;
+            let thread = self
+                .thread_manager
+                .get_thread(thread_id)
+                .await
+                .map_err(|_| invalid_request("Thread not found"))?;
+            super::super::thread_input::ensure_direct_input_allowed(thread.as_ref()).await?;
+            self.native_account_manager
+                .start_attached(
+                    request_id,
+                    thread,
+                    crate::native_account_manager::NativeMenuTarget {
+                        thread_id,
+                        turn_id: params.expected_turn_id.clone(),
+                    },
+                    Arc::clone(&self.native_account_inventory),
+                    Arc::clone(&self.outgoing),
+                    options,
+                )
+                .await
+                .map_err(invalid_request)?;
+            return Ok(true);
+        }
+
+        let Some(command) = mobile_slash_command(&params.input, client_name) else {
             return Ok(false);
         };
         let thread_id = ThreadId::from_string(&params.thread_id)
@@ -147,34 +184,51 @@ impl AccountRequestProcessor {
             .await
             .map_err(|_| invalid_request("Thread not found"))?;
         super::super::thread_input::ensure_direct_input_allowed(thread.as_ref()).await?;
-        self.native_account_manager
-            .start_attached(
-                request_id,
-                thread,
-                crate::native_account_manager::NativeMenuTarget {
-                    thread_id,
-                    turn_id: params.expected_turn_id.clone(),
-                },
-                Arc::clone(&self.native_account_inventory),
-                Arc::clone(&self.outgoing),
-                options,
-            )
+        if thread
+            .current_turn_environment_selections(&params.expected_turn_id)
             .await
-            .map_err(invalid_request)?;
+            .is_none()
+        {
+            return Err(invalid_request("The requested turn is no longer running."));
+        }
+        let V2UserInput::Text { text, .. } = &params.input[0] else {
+            return Ok(false);
+        };
+        let reply = if command == MobileSlashCommand::Account
+            && let Some(reply) = match self.try_mobile_capabilities_reply(request_id, text) {
+                Ok(reply) => reply,
+                Err(error) => Some(error.message),
+            } {
+            reply
+        } else {
+            match self
+                .mobile_account_reply_text(text, command, config_processor, queues)
+                .await
+            {
+                Ok(reply) => reply,
+                Err(error) => error.message,
+            }
+        };
+        crate::mobile_account_bridge::complete_mobile_slash_steer(
+            &self.outgoing,
+            request_id,
+            thread_id,
+            &params.expected_turn_id,
+            &params.input,
+            reply,
+        )
+        .await;
         Ok(true)
     }
 
-    async fn mobile_account_reply(
+    async fn mobile_account_reply_text(
         &self,
-        params: &TurnStartParams,
+        raw_text: &str,
         command: MobileSlashCommand,
         config_processor: &ConfigRequestProcessor,
         queues: &RequestSerializationQueues,
     ) -> Result<String, JSONRPCErrorError> {
-        let V2UserInput::Text { text, .. } = &params.input[0] else {
-            unreachable!()
-        };
-        let text = text.trim().trim_start_matches('/').trim_start();
+        let text = raw_text.trim().trim_start_matches('/').trim_start();
         let args = text
             .split_once(char::is_whitespace)
             .map_or("", |(_, rest)| rest.trim());
@@ -214,6 +268,81 @@ impl AccountRequestProcessor {
                 } else {
                     view::list(&pool, page).map_err(invalid_request)
                 }
+            }
+            (_, "overview" | "summary") => {
+                if !value.is_empty() {
+                    return Err(invalid_request("Usage: /account overview"));
+                }
+                let strategy = self
+                    .load_latest_config()
+                    .await
+                    .account_pool
+                    .effective_rotation_strategy();
+                Ok(view::overview(&pool, strategy))
+            }
+            (_, "refresh") => {
+                let config = self.load_latest_config().await;
+                let strategy = config.account_pool.effective_rotation_strategy();
+                if value.is_empty() || value.eq_ignore_ascii_case("all") {
+                    pool_quota::refresh(
+                        &config,
+                        &mut pool,
+                        pool_quota::RefreshScope::All,
+                        &self.execution_account_pool,
+                    )
+                    .await;
+                    Ok(format!(
+                        "Refreshed eligible accounts.\n\n{}",
+                        view::overview(&pool, strategy)
+                    ))
+                } else {
+                    let profile_id = view::resolve(&pool, value)
+                        .map_err(invalid_request)?
+                        .profile_id
+                        .clone();
+                    pool_quota::refresh(
+                        &config,
+                        &mut pool,
+                        pool_quota::RefreshScope::Profiles(vec![profile_id]),
+                        &self.execution_account_pool,
+                    )
+                    .await;
+                    view::detail(&pool, value).map_err(invalid_request)
+                }
+            }
+            (_, "enable" | "disable") => {
+                if value.is_empty() {
+                    return Err(invalid_request(format!(
+                        "Usage: /account {verb} <label|@selector>"
+                    )));
+                }
+                let target = view::resolve(&pool, value).map_err(invalid_request)?;
+                let target_id = target.profile_id.clone();
+                let display_name = view::label(target);
+                let disabled = verb == "disable";
+                self.native_account_inventory
+                    .execute_with_context(
+                        crate::account_management::AccountManagerOperation::Update {
+                            profile_id: target_id,
+                            label: None,
+                            priority: None,
+                            disabled: Some(disabled),
+                        },
+                        &crate::account_management::AccountOperationContext::Independent,
+                    )
+                    .await
+                    .map_err(|err| invalid_request(err.to_string()))?;
+                pool = self.get_account_pool_response().await?;
+                let strategy = self
+                    .load_latest_config()
+                    .await
+                    .account_pool
+                    .effective_rotation_strategy();
+                let action = if disabled { "Disabled" } else { "Enabled" };
+                Ok(format!(
+                    "{action}: {display_name}\n\n{}",
+                    view::overview(&pool, strategy)
+                ))
             }
             (_, "use" | "auto" | "retry") => {
                 let profile_id = if verb == "auto" {
@@ -291,7 +420,8 @@ impl AccountRequestProcessor {
                     "" => self.load_latest_config().await.account_pool.effective_rotation_strategy(),
                     "fill-first" | "fill_first" => codex_config::AccountPoolRotationStrategy::FillFirst,
                     "earliest-reset" | "earliest_reset" => codex_config::AccountPoolRotationStrategy::EarliestReset,
-                    _ => return Err(invalid_request("Usage: /account strategy [fill-first|earliest-reset]")),
+                    "least-used" | "least_used" => codex_config::AccountPoolRotationStrategy::LeastUsed,
+                    _ => return Err(invalid_request("Usage: /account strategy [fill-first|earliest-reset|least-used]")),
                 };
                 if !value.is_empty() {
                     let value = serde_json::to_value(strategy).map_err(|err| internal_error(err.to_string()))?;
@@ -305,10 +435,11 @@ impl AccountRequestProcessor {
                 let name = match strategy {
                     codex_config::AccountPoolRotationStrategy::FillFirst => "fill-first",
                     codex_config::AccountPoolRotationStrategy::EarliestReset => "earliest-reset",
+                    codex_config::AccountPoolRotationStrategy::LeastUsed => "least-used",
                 };
                 Ok(format!("Strategy: {name}\nUsed at the next automatic selection. Select now: /account auto"))
             }
-            (_, "help") if value.is_empty() => Ok("/account list [page] — accounts and quota\n/account show <label|@selector> — details\n/account use <label|@selector> — select an available account\n/account retry <label|@selector> — clear local cooldown and probe again\n/account auto — let the strategy select now\n/account strategy [fill-first|earliest-reset]\n/account settings — effective settings and controls\n/account warmup [page|now|on|off] — status or request one pass\nQuote names containing spaces. Use @selectors for duplicate names. Selection does not permanently pin an account.".into()),
+            (_, "help") if value.is_empty() => Ok("/account [en|zh] — interactive quick menu\n/account manage [en|zh-CN] — full native account manager\n/account overview — compact pool summary with quota bars\n/account refresh [all|<label|@selector>] — refresh backend quota\n/account list [page] — accounts and quota\n/account show <label|@selector> — details\n/account use <label|@selector> — select an available account\n/account retry <label|@selector> — clear local cooldown and probe again\n/account enable|disable <label|@selector> — toggle scheduling\n/account auto — let the strategy select now\n/account strategy [fill-first|earliest-reset|least-used]\n/account settings — effective settings and controls\n/account warmup [page|now|on|off] — status or request one pass\nQuote names containing spaces. Use @selectors for duplicate names. Selection does not permanently pin an account.".into()),
             _ => Err(invalid_request("Unknown /account command. Use /account help.")),
         }
     }

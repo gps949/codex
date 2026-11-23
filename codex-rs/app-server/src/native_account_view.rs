@@ -127,6 +127,7 @@ pub(crate) enum MenuPage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MenuOperation {
     Reload,
+    RefreshAll,
     Refresh(usize),
     RefreshQuick(usize),
     RefreshAccount(usize),

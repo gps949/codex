@@ -321,7 +321,9 @@ impl AccountPoolRuntime {
             && let Some(selected) = state.active_profile_id
             && added.contains(&selected)
         {
-            let _ = self.pool.activate(&selected);
+            let _ = self
+                .pool
+                .restore_active_profile(&selected, state.manual_selection);
         }
         Ok(added)
     }
@@ -437,7 +439,7 @@ fn restore_runtime_state(
         if reset_at <= Utc::now() || !known_profiles.contains(&profile_state.profile_id) {
             continue;
         }
-        if let Ok(lease) = pool.activate(&profile_state.profile_id) {
+        if let Ok(lease) = pool.restore_active_profile(&profile_state.profile_id, false) {
             let recovery = match profile_state.backend_resets_at {
                 Some(backend_reset) => crate::AccountQuotaRecovery::BackendReset {
                     resets_at: backend_reset,
@@ -456,7 +458,9 @@ fn restore_runtime_state(
 
     if let Some(active_profile_id) = runtime_state.active_profile_id.as_ref()
         && known_profiles.contains(active_profile_id)
-        && pool.activate(active_profile_id).is_ok()
+        && pool
+            .restore_active_profile(active_profile_id, runtime_state.manual_selection)
+            .is_ok()
     {
         return Ok(());
     }

@@ -201,6 +201,7 @@ impl SlashCommand {
                 | SlashCommand::Cd
                 | SlashCommand::Pwd
                 | SlashCommand::Usage
+                | SlashCommand::Account
                 | SlashCommand::Warmup
                 | SlashCommand::Pets
                 | SlashCommand::Side
@@ -226,6 +227,8 @@ impl SlashCommand {
                 | SlashCommand::Warnings
                 | SlashCommand::Pwd
                 | SlashCommand::Usage
+                | SlashCommand::Account
+                | SlashCommand::Warmup
                 | SlashCommand::Ide
                 | SlashCommand::Rename
         )
@@ -256,6 +259,8 @@ impl SlashCommand {
                 | SlashCommand::Rollout
                 | SlashCommand::Copy
                 | SlashCommand::Raw
+                | SlashCommand::Account
+                | SlashCommand::Warmup
         )
     }
 

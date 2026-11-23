@@ -595,3 +595,116 @@ fn active_account_hides_leftover_warmup_failure() {
         "{description:?}"
     );
 }
+
+#[tokio::test]
+async fn statusline_account_pool_item_and_inline_account_commands_work() {
+    let (mut chat, _tx, mut rx, _op_rx) =
+        crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+
+    // Omitted when multi-account pool is inactive.
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::AccountPool),
+        None
+    );
+
+    chat.apply_account_pool_read_response(&AccountPoolReadResponse {
+        enabled: true,
+        active_profile_id: Some("acct-1".into()),
+        active_generation: Some(1),
+        accounts: vec![
+            AccountPoolAccount {
+                profile_id: "acct-1".into(),
+                label: Some("Work Pro".into()),
+                priority: 0,
+                is_active: true,
+                availability: AccountPoolAvailability::Available,
+                plan_type: None,
+                email: Some("work@example.com".into()),
+                rate_limits: AccountPoolRateLimits::default(),
+                window_warmup: None,
+                backend_resets_at: None,
+            },
+            AccountPoolAccount {
+                profile_id: "acct-2".into(),
+                label: Some("Backup".into()),
+                priority: 10,
+                is_active: false,
+                availability: AccountPoolAvailability::Exhausted { resets_at: None },
+                plan_type: None,
+                email: None,
+                rate_limits: AccountPoolRateLimits::default(),
+                window_warmup: None,
+                backend_resets_at: None,
+            },
+        ],
+    });
+    assert_eq!(
+        chat.status_line_value_for_item(crate::bottom_pane::StatusLineItem::AccountPool),
+        Some("Work Pro (1/2)".to_string())
+    );
+    assert_eq!(
+        "account".parse::<crate::bottom_pane::StatusLineItem>(),
+        Ok(crate::bottom_pane::StatusLineItem::AccountPool)
+    );
+    assert_eq!(
+        "account-pool".parse::<crate::bottom_pane::StatusLineItem>(),
+        Ok(crate::bottom_pane::StatusLineItem::AccountPool)
+    );
+
+    // Inline `/account` commands dispatch cleanly, including in side conversations.
+    assert!(crate::slash_command::SlashCommand::Account.supports_inline_args());
+    assert!(crate::slash_command::SlashCommand::Account.available_in_side_conversation());
+    assert!(crate::slash_command::SlashCommand::Warmup.available_in_side_conversation());
+
+    while rx.try_recv().is_ok() {}
+    chat.handle_slash_command_with_args_dispatch(
+        crate::slash_command::SlashCommand::Account,
+        "auto".to_string(),
+        Vec::new(),
+    );
+    match rx.try_recv().expect("account auto event") {
+        AppEvent::ActivateAccountPoolProfile { profile_id, force } => {
+            assert_eq!((profile_id, force), (None, false));
+        }
+        other => panic!("expected ActivateAccountPoolProfile, got {other:?}"),
+    }
+
+    chat.handle_slash_command_with_args_dispatch(
+        crate::slash_command::SlashCommand::Account,
+        "retry \"Backup\"".to_string(),
+        Vec::new(),
+    );
+    match rx.try_recv().expect("account retry event") {
+        AppEvent::ResolveAndActivateAccountPoolProfile { selector, force } => {
+            assert_eq!((selector.as_str(), force), ("Backup", true));
+        }
+        other => panic!("expected ResolveAndActivateAccountPoolProfile, got {other:?}"),
+    }
+
+    chat.handle_slash_command_with_args_dispatch(
+        crate::slash_command::SlashCommand::Account,
+        "strategy least-used".to_string(),
+        Vec::new(),
+    );
+    match rx.try_recv().expect("account strategy event") {
+        AppEvent::UpdateAccountPoolRotationStrategy { strategy } => {
+            assert_eq!(
+                strategy,
+                codex_config::AccountPoolRotationStrategy::LeastUsed
+            );
+        }
+        other => panic!("expected UpdateAccountPoolRotationStrategy, got {other:?}"),
+    }
+
+    for subcommand in ["refresh", "overview", "list"] {
+        chat.handle_slash_command_with_args_dispatch(
+            crate::slash_command::SlashCommand::Account,
+            subcommand.to_string(),
+            Vec::new(),
+        );
+        match rx.try_recv().expect("account refresh event") {
+            AppEvent::RefreshAccountPool => {}
+            other => panic!("expected RefreshAccountPool for {subcommand}, got {other:?}"),
+        }
+    }
+}
