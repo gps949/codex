@@ -320,24 +320,40 @@ impl AccountPool {
                 account.last_active_generation = Some(generation);
             }
         }
-        let desired =
-            if external_selection || remote.active_profile_id != previous.active_profile_id {
-                remote.active_profile_id.as_ref()
-            } else {
-                state.active_profile.as_ref()
-            };
+        let use_remote_selection =
+            external_selection || remote.active_profile_id != previous.active_profile_id;
+        let desired_remote = use_remote_selection
+            .then_some(remote.active_profile_id.as_ref())
+            .flatten()
+            .filter(|id| state.accounts.contains_key(id))
+            .cloned();
+        if use_remote_selection {
+            state.pending_return_to_preferred = false;
+            state.manual_selection = desired_remote.is_some() && remote.manual_selection;
+        }
+        let desired = if use_remote_selection {
+            desired_remote
+        } else {
+            state
+                .active_profile
+                .as_ref()
+                .filter(|id| state.accounts.contains_key(id))
+                .cloned()
+        };
         // Keep the selected profile even while it cools down. Clearing it made restart look
         // "logged out" whenever every account was exhausted, and undid force/reset reactivation.
-        let desired = desired
-            .filter(|id| state.accounts.contains_key(id))
-            .cloned()
-            .or_else(|| select_eligible_account(&state, &now))
-            .or_else(|| {
-                state
-                    .active_profile
-                    .clone()
-                    .filter(|id| state.accounts.contains_key(id))
-            });
+        let desired = match desired {
+            Some(id) => Some(id),
+            None => {
+                state.manual_selection = false;
+                select_eligible_account(&state, &now).or_else(|| {
+                    state
+                        .active_profile
+                        .clone()
+                        .filter(|id| state.accounts.contains_key(id))
+                })
+            }
+        };
         if let Some(id) = desired {
             changed |= set_active_profile(&mut state, &id);
         } else if state
@@ -346,6 +362,7 @@ impl AccountPool {
             .is_some_and(|id| !state.accounts.contains_key(id))
         {
             state.active_profile = None;
+            state.manual_selection = false;
             state.generation = state.generation.wrapping_add(1);
             changed = true;
         }
@@ -357,6 +374,7 @@ impl AccountPool {
                     .is_some_and(|records| !records.iter().any(|record| &record.profile.id == id))
         }) {
             merged.active_profile_id = state.active_profile.clone();
+            merged.manual_selection = state.manual_selection && merged.active_profile_id.is_some();
         }
         // HashMap iteration order is nondeterministic; keep persisted profiles stable and
         // aligned with AccountPool::snapshots (priority, then id).

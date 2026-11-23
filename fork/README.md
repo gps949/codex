@@ -63,19 +63,19 @@ Older `legacy-root` pool entries stay visible after upgrading. Remove that entry
 
 ## Everyday controls
 
-| Goal                       | CLI on the host                                             | TUI inside Codex                        | Mobile remote client               |
-| -------------------------- | ----------------------------------------------------------- | --------------------------------------- | ---------------------------------- |
-| See accounts               | `codex account list`                                        | `/account`                              | `/account` or `/account list`      |
-| Inspect quota              | `codex account status` (alias: `pool`)                      | `/status` and `/account`                | `/status`; `/account show "Work"`  |
-| Select an account          | `codex account use "Work"`                                  | Select Work in `/account`               | `/account use "Work"`              |
-| Let the scheduler select   | Use `/account` in Codex                                     | Select Choose automatically on Accounts | `/account auto`                    |
-| Choose a rotation strategy | `codex account config set-rotation-strategy earliest-reset` | Choose an entry on Strategy             | `/account strategy earliest-reset` |
-| Inspect pool settings      | `codex account config show`                                 | Open Help in `/account`                 | `/account settings`                |
-| Repair a login             | `codex account login "Work"`                                | Run the CLI command on the host         | Run the CLI command on the host    |
-| Save an account for later  | `codex account disable "Work"`                              | Run the CLI command on the host         | Run the CLI command on the host    |
-| Bring it back              | `codex account enable "Work"`                               | Run the CLI command on the host         | Run the CLI command on the host    |
+| Goal                       | CLI on the host                                         | TUI inside Codex                               | Mobile remote client                               |
+| -------------------------- | ------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
+| See accounts               | `codex account list` (`--refresh` for live quota)       | `/account`                                     | `/account` (or `/account zh`), `/account overview` |
+| Inspect or refresh quota   | `codex account status` / `codex account refresh`        | `/status`, `/account`, and `/statusline`       | `/account refresh`, `/account show "Work"`         |
+| Select an account          | `codex account use "Work"`                              | `/account "Work"` or select Work in `/account` | `/account use "Work"` (case-insensitive fallback)  |
+| Let the scheduler select   | `codex account auto`                                    | `/account auto` or Choose automatically        | `/account auto`                                    |
+| Choose a rotation strategy | `codex account config set-rotation-strategy least-used` | `/account strategy least-used` or Strategy tab | `/account strategy least-used`                     |
+| Inspect pool settings      | `codex account config show` / `codex doctor`            | Open Help in `/account`                        | `/account settings`                                |
+| Repair a login             | `codex account login "Work"`                            | Run the CLI command on the host                | `/account manage` or CLI on the host               |
+| Save an account for later  | `codex account disable "Work"`                          | Run the CLI command on the host                | `/account disable "Work"` or `/account manage`     |
+| Bring it back              | `codex account enable "Work"`                           | Run the CLI command on the host                | `/account enable "Work"` or `/account manage`      |
 
-Selection applies to subsequent requests and keeps automatic failover enabled. It does not permanently pin a thread to an account. Pools sharing the same `CODEX_HOME` also share their active selection and cooldown state.
+Selection applies to subsequent requests, stays respected across cooldown expiries instead of snapping back via `return_to_preferred` until you run `codex account auto` (or automatic failover/preemptive rotation fires), and keeps automatic failover enabled. Pools sharing the same `CODEX_HOME` also share their active selection and cooldown state. TUI `/statusline` and `/title` offer an `account-pool` (alias `account`) item showing the active profile and ready count, and `/account` and `/warmup` work inside `/side` (`/btw`) conversations as well.
 
 Use quoted labels with spaces. CLI selectors accept an exact profile ID, a unique custom label, or a unique account email. If an email matches several seats or another account's label, use an exact ID or distinct labels; ambiguous matches are rejected. `codex account list --show-profile` reveals IDs for scripts or duplicate names. Mobile accepts the `@selector` shown by `/account list`, which also distinguishes accounts sharing an email. JSON/TSV keep the stored nullable label rather than turning an automatic email into a custom label.
 
@@ -94,9 +94,9 @@ codex account set "Personal" --priority 0
 codex account set "Work" --priority 10
 ```
 
-**earliest-reset** selects eligible accounts whose observed reset is due soonest, preferring idle primary windows so their countdown can start. It can help when you use the pool steadily throughout the day. Reset times and available quota come from observations; they are not a guarantee of runtime. Choose this strategy with the command in the table above.
+**earliest-reset** selects eligible accounts whose observed reset is due soonest, preferring idle primary windows so their countdown can start. **least-used** prefers the eligible account with the most remaining headroom across its 5-hour and weekly windows (lowest bottleneck usage percentage, without treating unknown windows as 0%). Reset times and available quota come from observations; they are not a guarantee of runtime. Choose a strategy with the command in the table above.
 
-Codex normally switches at **95% observed usage** when another account is eligible. The remaining quota stays available as a fallback after other accounts run out. Changing the threshold trades a larger margin against more account switches; it does not increase any account's quota.
+Codex normally switches at **95% observed usage** when another account is eligible — both at turn entry and cleanly between tool-execution steps in long multi-step turns (as well as before/during context compaction), syncing the session rate-limit view immediately after switching. The remaining quota stays available as a fallback after other accounts run out. Changing the threshold trades a larger margin against more account switches; it does not increase any account's quota.
 
 **Standby warmup** is enabled by default. It sends a small generating request to an eligible idle standby account to try to start its primary window without changing the account used by your task. Maintenance uses the lowest reasoning effort supported by its model and asks for a one-digit reply. This still consumes some quota. Completed or interrupted attempts are protected from repeated generation for five hours while quota-only checks can confirm their result. Near an early switch, warmup checks can accelerate to five-minute intervals. Leave it enabled for sustained use; turn it off when preserving every unused standby allocation matters more than starting its countdown early.
 
@@ -139,7 +139,7 @@ Run `codex account config show` to inspect effective settings. CLI setters save 
 
 ```toml
 [account_pool]
-rotation_strategy = "fill_first" # or "earliest_reset"
+rotation_strategy = "fill_first" # or "earliest_reset" / "least_used"
 return_to_preferred = true
 preemptive_switch_percent = 95
 window_warmup = true
@@ -219,7 +219,7 @@ The fork supplies pool captions, status replies, and controls through interfaces
 | Login required / auth unavailable           | Run `codex account login "Work"`; use the same user and workspace.                                                                                    |
 | Disabled                                    | Intentionally parked. Run `codex account enable "Work"` to schedule it again.                                                                         |
 | Cached / unknown quota                      | Inspect the account again. Retained cached values are not a fresh quota check.                                                                        |
-| Pool remains paused after logout            | Explicitly select a profile with `codex account use "Work"` to resume pooling.                                                                        |
+| Pool remains paused after logout            | Resume pooling with `codex account auto` or `codex account use "Work"`.                                                                               |
 | `/account` is unavailable after an update   | Verify the `+ma.N` binary on PATH, stop the managed daemon with `codex app-server daemon stop`, and relaunch. For mobile, start remote control again. |
 | Old thread reports opaque compacted history | Switch to its owning account and run `/compact` before using another account.                                                                         |
 
@@ -235,7 +235,7 @@ Run the fork installer again, or download a newer matching release bundle. To pi
 curl -fsSL https://raw.githubusercontent.com/gps949/codex/feature/native-multi-account/install.sh | bash -s -- rust-vX.Y.Z-ma.N
 ```
 
-The macOS/Linux installer validates published SHA256 checksums, installs the helpers with the main binary, and stops a stale managed daemon. Restart remote control afterward if you use it. `codex update` directs you to the fork's releases.
+The macOS/Linux installer validates published SHA256 checksums, installs the helpers with the main binary, stops a stale managed daemon, and prunes superseded `.codex-packages` release generations that are no longer in use (retaining the active and one rollback generation). Restart remote control afterward if you use it. `codex doctor` recognizes pool-backed auth and reports `account_pool.health`, and `codex update` directs you to the fork's releases.
 
 Account profiles and credentials stay on the host under `CODEX_HOME`; credential storage follows the configured file/keyring mode. Keep that directory private. API-key provider configuration does not turn an API key into a subscription-pool profile.
 

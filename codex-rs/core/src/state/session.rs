@@ -404,6 +404,15 @@ impl SessionState {
         ));
     }
 
+    pub(crate) fn replace_rate_limits(&mut self, mut snapshot: Option<RateLimitSnapshot>) {
+        if let Some(snapshot) = snapshot.as_mut()
+            && snapshot.limit_id.is_none()
+        {
+            snapshot.limit_id = Some("codex".to_string());
+        }
+        self.latest_rate_limits = snapshot;
+    }
+
     pub(crate) fn token_info_and_rate_limits(
         &self,
     ) -> (Option<TokenUsageInfo>, Option<RateLimitSnapshot>) {

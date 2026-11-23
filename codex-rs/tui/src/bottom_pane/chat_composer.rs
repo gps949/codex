@@ -566,6 +566,7 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::Daemon
                 | SlashCommand::Usage
                 | SlashCommand::Ide
+                | SlashCommand::Account
                 | SlashCommand::Warmup
                 | SlashCommand::DebugConfig
                 | SlashCommand::Theme

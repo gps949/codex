@@ -63,19 +63,19 @@ codex account primary status
 
 ## 日常操作速查
 
-| 想做什么         | 主机 CLI                                                    | Codex TUI                               | 手机远程端                         |
-| ---------------- | ----------------------------------------------------------- | --------------------------------------- | ---------------------------------- |
-| 看有哪些账号     | `codex account list`                                        | `/account`                              | `/account` 或 `/account list`      |
-| 看配额           | `codex account status`（别名：`pool`）                      | `/status` 与 `/account`                 | `/status`；`/account show "Work"`  |
-| 选择账号         | `codex account use "Work"`                                  | 在 `/account` 中选择 Work               | `/account use "Work"`              |
-| 交给调度器选择   | 在 Codex 中打开 `/account`                                  | 在 Accounts 页选择 Choose automatically | `/account auto`                    |
-| 调整轮换策略     | `codex account config set-rotation-strategy earliest-reset` | 在 Strategy 页选择策略                  | `/account strategy earliest-reset` |
-| 查看账号池设置   | `codex account config show`                                 | 打开 `/account` 的 Help 页              | `/account settings`                |
-| 修复登录         | `codex account login "Work"`                                | 在主机运行 CLI 命令                     | 在主机运行 CLI 命令                |
-| 暂留一个账号不用 | `codex account disable "Work"`                              | 在主机运行 CLI 命令                     | 在主机运行 CLI 命令                |
-| 重新加入调度     | `codex account enable "Work"`                               | 在主机运行 CLI 命令                     | 在主机运行 CLI 命令                |
+| 想做什么         | 主机 CLI                                                | Codex TUI                                     | 手机远程端                                          |
+| ---------------- | ------------------------------------------------------- | --------------------------------------------- | --------------------------------------------------- |
+| 看有哪些账号     | `codex account list`（`--refresh` 刷新）                | `/account`                                    | `/account`（或 `/account zh`）、`/account overview` |
+| 看配额与主动刷新 | `codex account status` / `codex account refresh`        | `/status`、`/account`、`/statusline`          | `/account refresh`、`/account show "Work"`          |
+| 选择账号         | `codex account use "Work"`                              | `/account "Work"` 或弹窗选择                  | `/account use "Work"`（忽略大小写唯一回退）         |
+| 交给调度器选择   | `codex account auto`                                    | `/account auto` 或选择 Choose automatically   | `/account auto`                                     |
+| 调整轮换策略     | `codex account config set-rotation-strategy least-used` | `/account strategy least-used` 或 Strategy 页 | `/account strategy least-used`                      |
+| 查看账号池设置   | `codex account config show` / `codex doctor`            | 打开 `/account` 的 Help 页                    | `/account settings`                                 |
+| 修复登录         | `codex account login "Work"`                            | 在主机运行 CLI 命令                           | `/account manage` 或在主机运行 CLI                  |
+| 暂留一个账号不用 | `codex account disable "Work"`                          | 在主机运行 CLI 命令                           | `/account disable "Work"` 或 `/account manage`      |
+| 重新加入调度     | `codex account enable "Work"`                           | 在主机运行 CLI 命令                           | `/account enable "Work"` 或 `/account manage`       |
 
-手动选择对后续请求生效，自动故障切换仍然开启；它不会永久将一个对话固定在该账号。使用同一个 `CODEX_HOME` 的进程也会共享当前选择与冷却状态。
+手动选择对后续请求生效，自动故障切换仍然开启，并且在显式切回 `codex account auto`（或触发自动容灾/提前轮换）前不会被 `return_to_preferred` 自动抢回首选账号。使用同一个 `CODEX_HOME` 的进程也会共享当前选择与冷却状态。TUI 的 `/statusline` 与 `/title` 支持添加 `account-pool`（别名 `account`）实时显示当前池账号与可用席位数，`/account` 与 `/warmup` 在 `/side`（`/btw`）支线对话中也可直接使用。
 
 名称含空格时加引号。CLI 支持完整档案 ID、唯一自定义名称或唯一邮箱。邮箱对应多个席位，或与其他账号的名称重合时，会拒绝不明确的匹配，请使用完整 ID 或不同名称；`codex account list --show-profile` 可查看 ID。手机端可直接使用 `/account list` 给出的 `@selector`，也适用于邮箱相同的多个账号。JSON/TSV 保留存储中的可空名称，不会把自动显示的邮箱误写成自定义名称。
 
@@ -94,9 +94,9 @@ codex account set "Personal" --priority 0
 codex account set "Work" --priority 10
 ```
 
-**earliest-reset** 优先选择观察到的重置时间更近的可用账号，并优先启动尚未开始的主窗口倒计时。整天持续使用时，可以尝试这一策略。观察到的重置时间与额度不等于保证可用的时长；切换策略的命令见上表。
+**earliest-reset** 优先选择观察到的重置时间更近的可用账号，并优先启动尚未开始的主窗口倒计时。**least-used** 优先选择 5h 与周限额综合剩余最多的可用账号（按瓶颈窗口最低已用比例排序，未知额度不会误当成 0%）。观察到的重置时间与额度不等于保证可用的时长；切换策略的命令见上表。
 
-有其他可用账号时，Codex 默认在观察到的使用率到 **95%** 后提前切换。保留下来的额度仍可在其他账号耗尽后作为备用额度重新使用。更改阈值会改变余量与切换次数，不会增加账号配额。
+有其他可用账号时，Codex 默认在观察到的使用率到 **95%** 后提前切换（不仅在回合开始前生效，在包含多轮工具调用的长回合步骤边界以及上下文自动/手动压缩前同样会自动切换，切换后立即同步会话限额视图，避免中途撞上 429）。保留下来的额度仍可在其他账号耗尽后作为备用额度重新使用。更改阈值会改变余量与切换次数，不会增加账号配额。
 
 **备用账号预热**默认开启：向符合条件的空闲备用账号发送少量生成请求，尝试提前开启主窗口倒计时，同时保留任务当前使用的身份。维护请求采用模型支持的最低推理强度，并要求仅返回一位数字，但仍会消耗配额。已完成或可能中断的尝试受到五小时防重复生成保护；期间可以只查询额度来确认结果。临近切号时，预热检查可加快到每五分钟。持续使用时可保留开启；更在意备用额度完全不动、能够接受稍后才启动倒计时时，可以关闭。
 
@@ -139,7 +139,7 @@ TUI 的 `/warmup now` 或手机端的 `/account warmup now` 请求立即检查�
 
 ```toml
 [account_pool]
-rotation_strategy = "fill_first" # or "earliest_reset"
+rotation_strategy = "fill_first" # or "earliest_reset" / "least_used"
 return_to_preferred = true
 preemptive_switch_percent = 95
 window_warmup = true
@@ -219,7 +219,7 @@ fork 通过手机端已有界面提供账号池标题、状态回复与控制，
 | Login required / auth unavailable   | 运行 `codex account login "Work"`，使用原用户与原工作区登录。                                                            |
 | Disabled                            | 账号被暂留；运行 `codex account enable "Work"` 重新参与调度。                                                            |
 | Cached / unknown 配额               | 再次查看账号；保留的缓存不代表刚检查成功。                                                                               |
-| 退出登录后账号池持续暂停            | 用 `codex account use "Work"` 明确选择账号以恢复。                                                                       |
+| 退出登录后账号池持续暂停            | 用 `codex account auto` 或 `codex account use "Work"` 恢复账号池。                                                       |
 | 更新后 `/account` 不可用            | 确认 PATH 中程序版本含 `+ma.N`，运行 `codex app-server daemon stop` 停止受管理后台，再启动；手机使用时重新启动远程控制。 |
 | 旧对话提示 opaque compacted history | 先切回历史所属账号运行 `/compact`，再使用另一个账号。                                                                    |
 
@@ -235,7 +235,7 @@ fork 通过手机端已有界面提供账号池标题、状态回复与控制，
 curl -fsSL https://raw.githubusercontent.com/gps949/codex/feature/native-multi-account/install.sh | bash -s -- rust-vX.Y.Z-ma.N
 ```
 
-macOS/Linux 安装脚本会检查发布的 SHA256，将主程序与辅助程序一起安装，并停止过期的受管理后台。手机用户需要随后重新启动远程控制。`codex update` 会引导至 fork 发布页。
+macOS/Linux 安装脚本会检查发布的 SHA256，将主程序与辅助程序一起安装，停止过期的受管理后台，并自动清理 `.codex-packages` 中不再被进程占用的旧发行代际（保留当前版本与最近一个回滚代际）。手机用户需要随后重新启动远程控制。`codex doctor` 原生识别账号池凭据并提供 `account_pool.health` 只读诊断，`codex update` 会引导至 fork 发布页。
 
 账号配置档与凭据存放在主机 `CODEX_HOME` 内，凭据遵循文件或系统钥匙串配置，请妥善保管该目录。配置 API-key provider 不会将 API key 转变为订阅账号池配置档。
 

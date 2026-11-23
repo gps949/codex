@@ -210,6 +210,7 @@ fn immediate_import_and_stale_background_sync_keep_subsequent_local_failover() {
 
             let saved = fixture.store.load().unwrap();
             expected.active_profile_id = Some(fixture.first.clone());
+            expected.manual_selection = false;
             let expected_second = expected
                 .profiles
                 .iter_mut()
@@ -283,6 +284,7 @@ fn failed_immediate_save_keeps_local_failover_pending_for_the_next_sync() {
 
         let saved = fixture.store.load().unwrap();
         expected.active_profile_id = Some(fixture.first.clone());
+        expected.manual_selection = false;
         let expected_second = expected
             .profiles
             .iter_mut()

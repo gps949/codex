@@ -900,6 +900,9 @@ impl ChatWidget {
                     .send(AppEvent::FetchWarmupDebug { run_now: true }),
                 _ => self.add_error_message("Usage: /warmup [now]".to_string()),
             },
+            SlashCommand::Account => {
+                self.handle_account_command_args(trimmed);
+            }
             SlashCommand::Mcp => {
                 if trimmed.eq_ignore_ascii_case("verbose") {
                     self.add_mcp_output(McpServerStatusDetail::Full);
@@ -1486,5 +1489,122 @@ impl ChatWidget {
         ));
         self.bottom_pane.drain_pending_submission_state();
         false
+    }
+
+    fn handle_account_command_args(&mut self, raw: &str) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            self.app_event_tx.send(AppEvent::RefreshAccountPool);
+            return;
+        }
+        let unquote = |value: &str| -> String {
+            let value = value.trim();
+            if value.len() >= 2
+                && ((value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\'')))
+            {
+                value[1..value.len() - 1].trim().to_string()
+            } else {
+                value.to_string()
+            }
+        };
+        let lower = trimmed.to_ascii_lowercase();
+        if matches!(lower.as_str(), "refresh" | "list" | "overview" | "status") {
+            self.app_event_tx.send(AppEvent::RefreshAccountPool);
+            return;
+        }
+        if lower == "auto" {
+            self.app_event_tx
+                .send(AppEvent::ActivateAccountPoolProfile {
+                    profile_id: None,
+                    force: false,
+                });
+            return;
+        }
+        if lower == "auto --force" || lower == "auto force" {
+            self.app_event_tx
+                .send(AppEvent::ActivateAccountPoolProfile {
+                    profile_id: None,
+                    force: true,
+                });
+            return;
+        }
+        if lower == "help" {
+            self.add_info_message(
+                "Usage: /account [refresh | auto [--force] | retry <name|id> | use <name|id> | strategy [fill-first|earliest-reset|least-used] | <name|id>]"
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+        if lower == "strategy" || lower.starts_with("strategy ") {
+            let rest = trimmed["strategy".len()..].trim();
+            if rest.is_empty() {
+                let label = match self.config_ref().account_pool.effective_rotation_strategy() {
+                    codex_config::AccountPoolRotationStrategy::FillFirst => "fill-first",
+                    codex_config::AccountPoolRotationStrategy::EarliestReset => "earliest-reset",
+                    codex_config::AccountPoolRotationStrategy::LeastUsed => "least-used",
+                };
+                self.add_info_message(
+                    format!(
+                        "Account rotation strategy is {label}. Pass fill-first, earliest-reset, or least-used to change it."
+                    ),
+                    /*hint*/ None,
+                );
+                return;
+            }
+            let strategy = match rest.to_ascii_lowercase().as_str() {
+                "fill-first" | "fill_first" => codex_config::AccountPoolRotationStrategy::FillFirst,
+                "earliest-reset" | "earliest_reset" => {
+                    codex_config::AccountPoolRotationStrategy::EarliestReset
+                }
+                "least-used" | "least_used" => codex_config::AccountPoolRotationStrategy::LeastUsed,
+                _ => {
+                    self.add_error_message(
+                        "Usage: /account strategy [fill-first|earliest-reset|least-used]"
+                            .to_string(),
+                    );
+                    return;
+                }
+            };
+            self.app_event_tx
+                .send(AppEvent::UpdateAccountPoolRotationStrategy { strategy });
+            return;
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("retry ")
+            .or_else(|| trimmed.strip_prefix("RETRY "))
+        {
+            let selector = unquote(rest);
+            if selector.is_empty() {
+                self.add_error_message("Usage: /account retry <label|id>".to_string());
+                return;
+            }
+            self.app_event_tx
+                .send(AppEvent::ResolveAndActivateAccountPoolProfile {
+                    selector,
+                    force: true,
+                });
+            return;
+        }
+        let selector = if let Some(rest) = trimmed
+            .strip_prefix("use ")
+            .or_else(|| trimmed.strip_prefix("USE "))
+        {
+            unquote(rest)
+        } else {
+            unquote(trimmed)
+        };
+        if selector.is_empty() {
+            self.add_error_message(
+                "Usage: /account [auto | retry <label|id> | <label|id>]".to_string(),
+            );
+            return;
+        }
+        self.app_event_tx
+            .send(AppEvent::ResolveAndActivateAccountPoolProfile {
+                selector,
+                force: false,
+            });
     }
 }

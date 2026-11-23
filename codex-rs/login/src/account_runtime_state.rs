@@ -36,6 +36,11 @@ const ACCOUNT_RUNTIME_STATE_FILE: &str = "account-runtime-state.json";
 pub struct AccountRuntimeState {
     #[serde(default)]
     pub active_profile_id: Option<AccountProfileId>,
+    /// True when `active_profile_id` came from an explicit user choice (`use` / `/account`)
+    /// rather than automatic pool scheduling. Cleared when automatic scheduling resumes or
+    /// failover rotates to another account.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual_selection: bool,
     #[serde(default)]
     pub selection_revision: u64,
     #[serde(default)]
@@ -129,8 +134,10 @@ impl AccountRuntimeStateStore {
         }
 
         let now = Utc::now();
+        let manual_selection = wire.manual_selection && wire.active_profile_id.is_some();
         Ok(AccountRuntimeState {
             active_profile_id: wire.active_profile_id,
+            manual_selection,
             selection_revision: wire.selection_revision,
             profiles: wire
                 .profiles
@@ -172,6 +179,7 @@ impl AccountRuntimeStateStore {
         let wire = AccountRuntimeStateWire {
             version: ACCOUNT_RUNTIME_STATE_VERSION,
             active_profile_id: state.active_profile_id.clone(),
+            manual_selection: state.manual_selection && state.active_profile_id.is_some(),
             selection_revision: state.selection_revision,
             profiles: state.profiles.clone(),
         };
@@ -208,7 +216,8 @@ impl AccountRuntimeStateStore {
                 .find(|previous| previous.profile_id == profile.profile_id)
                 .and_then(|previous| previous.reset_credit_excluded_until);
         }
-        state.active_profile_id = merged.active_profile_id;
+        state.active_profile_id = merged.active_profile_id.clone();
+        state.manual_selection = merged.manual_selection && state.active_profile_id.is_some();
         state.selection_revision = merged.selection_revision;
         for profile in merged.profiles {
             if !state
@@ -478,6 +487,32 @@ impl AccountRuntimeStateStore {
             profile.preemptive_rotation_until = None;
         }
         state.active_profile_id = Some(profile_id);
+        state.manual_selection = true;
+        state.selection_revision = state
+            .selection_revision
+            .checked_add(1)
+            .ok_or(AccountRuntimeStateError::RevisionOverflow)?;
+        self.save_unlocked(&state)
+    }
+
+    /// Returns shared scheduling to automatic mode, clearing sticky manual selection while
+    /// preserving observed quota cooldowns across processes.
+    pub fn select_automatic(
+        &self,
+        active_profile_id: Option<AccountProfileId>,
+    ) -> Result<(), AccountRuntimeStateError> {
+        let _lock = crate::account_file::lock(&self.codex_home)?;
+        let mut state = self.load_unlocked()?;
+        if let Some(ref profile_id) = active_profile_id
+            && let Some(profile) = state
+                .profiles
+                .iter_mut()
+                .find(|entry| &entry.profile_id == profile_id)
+        {
+            profile.preemptive_rotation_until = None;
+        }
+        state.active_profile_id = active_profile_id;
+        state.manual_selection = false;
         state.selection_revision = state
             .selection_revision
             .checked_add(1)
@@ -535,6 +570,27 @@ impl AccountRuntimeStateStore {
         self.save_unlocked(&state)
     }
 
+    /// Clears persisted active/manual selection when that exact profile is disabled,
+    /// allowing running sessions and CLI views to rotate immediately without losing quota history.
+    pub fn clear_selection_if_active(
+        &self,
+        profile_id: &AccountProfileId,
+    ) -> Result<bool, AccountRuntimeStateError> {
+        let _lock = crate::account_file::lock(&self.codex_home)?;
+        let mut state = self.load_unlocked()?;
+        if state.active_profile_id.as_ref() != Some(profile_id) {
+            return Ok(false);
+        }
+        state.active_profile_id = None;
+        state.manual_selection = false;
+        state.selection_revision = state
+            .selection_revision
+            .checked_add(1)
+            .ok_or(AccountRuntimeStateError::RevisionOverflow)?;
+        self.save_unlocked(&state)?;
+        Ok(true)
+    }
+
     /// Removes stale runtime observations after a profile is deleted without touching OAuth
     /// credentials or the profile manifest.
     pub fn remove_profile(
@@ -545,6 +601,7 @@ impl AccountRuntimeStateStore {
         let mut state = self.load_unlocked()?;
         if state.active_profile_id.as_ref() == Some(profile_id) {
             state.active_profile_id = None;
+            state.manual_selection = false;
         }
         state
             .profiles
@@ -556,6 +613,7 @@ impl AccountRuntimeStateStore {
 fn runtime_state_from_snapshots(snapshots: &[AccountPoolSnapshot]) -> AccountRuntimeState {
     let now = Utc::now();
     AccountRuntimeState {
+        manual_selection: false,
         selection_revision: 0,
         active_profile_id: snapshots
             .iter()
@@ -591,6 +649,8 @@ struct AccountRuntimeStateWire {
     version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_profile_id: Option<AccountProfileId>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    manual_selection: bool,
     #[serde(default)]
     selection_revision: u64,
     #[serde(default)]
@@ -648,6 +708,7 @@ mod tests {
         let profile_id = AccountProfileId::new("account-a").expect("profile id");
         store
             .save(&AccountRuntimeState {
+                manual_selection: false,
                 selection_revision: 0,
                 active_profile_id: Some(profile_id.clone()),
                 profiles: vec![AccountRuntimeProfileState {
@@ -677,6 +738,7 @@ mod tests {
         let profile_id = AccountProfileId::new("account-a").expect("profile id");
         let reset = Utc::now() + Duration::minutes(30);
         let state = AccountRuntimeState {
+            manual_selection: false,
             selection_revision: 0,
             active_profile_id: Some(profile_id.clone()),
             profiles: vec![AccountRuntimeProfileState {

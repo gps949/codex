@@ -47,6 +47,7 @@ pub(crate) enum StatusSurfacePreviewItem {
     Reasoning,
     Profile,
     Provider,
+    AccountPool,
     TaskProgress,
 }
 
@@ -87,6 +88,7 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::Reasoning => "medium",
             StatusSurfacePreviewItem::Profile => "profile: <name>",
             StatusSurfacePreviewItem::Provider => "provider: <id>",
+            StatusSurfacePreviewItem::AccountPool => "Work Pro (2/3)",
             StatusSurfacePreviewItem::TaskProgress => "Tasks 0/0",
         }
     }
@@ -127,6 +129,7 @@ impl StatusSurfacePreviewItem {
             Self::Reasoning,
             Self::Profile,
             Self::Provider,
+            Self::AccountPool,
             Self::TaskProgress,
         ]
         .into_iter()

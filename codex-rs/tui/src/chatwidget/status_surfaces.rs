@@ -842,7 +842,32 @@ impl ChatWidget {
             }
             StatusLineItem::WorkspaceHeadline => self.status_line_workspace_headline.clone(),
             StatusLineItem::TaskProgress => self.terminal_title_task_progress(),
+            StatusLineItem::AccountPool => self.status_line_account_pool_display(),
         }
+    }
+
+    fn status_line_account_pool_display(&self) -> Option<String> {
+        if !self.account_pool_enabled || self.account_pool_accounts.is_empty() {
+            return None;
+        }
+        let active = self
+            .account_pool_accounts
+            .iter()
+            .find(|account| account.is_active)
+            .map(super::account_popups::account_display_name)
+            .unwrap_or_else(|| "pool cooldown".to_string());
+        let ready = self
+            .account_pool_accounts
+            .iter()
+            .filter(|account| {
+                matches!(
+                    account.availability,
+                    codex_app_server_protocol::AccountPoolAvailability::Available
+                )
+            })
+            .count();
+        let total = self.account_pool_accounts.len();
+        Some(format!("{active} ({ready}/{total})"))
     }
 
     pub(super) fn status_line_pull_request_url(&self) -> Option<&str> {
@@ -892,6 +917,7 @@ impl ChatWidget {
             StatusSurfacePreviewItem::Reasoning => StatusLineItem::Reasoning,
             StatusSurfacePreviewItem::Profile => StatusLineItem::Profile,
             StatusSurfacePreviewItem::Provider => StatusLineItem::Provider,
+            StatusSurfacePreviewItem::AccountPool => StatusLineItem::AccountPool,
         };
         self.status_line_value_for_item(status_line_item)
     }
@@ -972,6 +998,9 @@ impl ChatWidget {
                 /*max_chars*/ 32,
             )),
             TerminalTitleItem::TaskProgress => self.terminal_title_task_progress(),
+            TerminalTitleItem::AccountPool => self
+                .status_line_value_for_item(StatusLineItem::AccountPool)
+                .map(|value| Self::truncate_terminal_title_part(value, /*max_chars*/ 32)),
         }
     }
 

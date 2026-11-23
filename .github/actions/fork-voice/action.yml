@@ -14,7 +14,8 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/prepare-bazel-ci
+    - id: prepare_bazel
+      uses: ./.github/actions/prepare-bazel-ci
       with:
         target: ${{ inputs.target }}
         cache-scope: fork-voice
@@ -22,17 +23,40 @@ runs:
       if: runner.os == 'Windows'
       with:
         target: ${{ inputs.target }}
+    - name: Configure Bazel disk cache for Voice
+      id: voice_disk_cache
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        VOICE_HASH: ${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelversion', 'third_party/voice/**', 'codex-rs/voice-host/**', 'codex-rs/Cargo.lock') }}
+      run: |
+        set -euo pipefail
+        disk_cache_path="$CI_BUILD_ROOT/bazel-disk-cache"
+        mkdir -p "$disk_cache_path"
+        echo "disk-cache-path=$disk_cache_path" >> "$GITHUB_OUTPUT"
+        echo "disk-cache-key=bazel-disk-fork-voice-v1-${TARGET}-${VOICE_HASH}" >> "$GITHUB_OUTPUT"
+        echo "disk-cache-restore-key=bazel-disk-fork-voice-v1-${TARGET}-" >> "$GITHUB_OUTPUT"
+    - name: Restore Bazel disk cache for Voice
+      id: restore_voice_disk_cache
+      continue-on-error: true
+      uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      with:
+        path: ${{ steps.voice_disk_cache.outputs.disk-cache-path }}
+        key: ${{ steps.voice_disk_cache.outputs.disk-cache-key }}
+        restore-keys: |
+          ${{ steps.voice_disk_cache.outputs.disk-cache-restore-key }}
     - name: Build and stage matching Voice inputs
       id: build
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
+        BAZEL_DISK_CACHE: ${{ steps.voice_disk_cache.outputs.disk-cache-path }}
       run: |
         set -euo pipefail
         arch="${TARGET%%-*}"
         suffix=""
         wrapper=(--remote-download-toplevel --print-failed-action-summary)
-        flags=(--config=release --build_metadata="COMMIT_SHA=$GITHUB_SHA")
+        flags=(--config=release --disk_cache="$BAZEL_DISK_CACHE" --build_metadata="COMMIT_SHA=$GITHUB_SHA")
         case "$RUNNER_OS" in
           Windows)
             prefix="windows_$arch"
@@ -65,6 +89,13 @@ runs:
         python3 third_party/voice/release_runtime.py stage \
           --target "$TARGET" --source "bazel-bin/third_party/voice/native_runtime_$prefix" --output "$output/runtime"
         cp "bazel-bin/codex-rs/voice-host/codex-voice-host$suffix" "$output/codex-voice-host$suffix"
+        # Shut down the Bazel JVM server so Windows releases cache file handles
+        # and Cargo ThinLTO reclaims ~2 GiB of runner memory.
+        if [[ "$RUNNER_OS" == Windows ]]; then
+          MSYS2_ARG_CONV_EXCL='*' bazel --output_user_root="$BAZEL_OUTPUT_USER_ROOT" shutdown >/dev/null 2>&1 || true
+        else
+          bazel --output_user_root="$BAZEL_OUTPUT_USER_ROOT" shutdown >/dev/null 2>&1 || true
+        fi
         # Bazel outputs can be read-only; stripping and signing mutate this staged copy.
         chmod u+w "$output/codex-voice-host$suffix"
         if [[ "$RUNNER_OS" == macOS ]]; then
@@ -81,3 +112,17 @@ runs:
         fi
         echo "helper=$output/codex-voice-host$suffix" >> "$GITHUB_OUTPUT"
         echo "runtime=$output/runtime" >> "$GITHUB_OUTPUT"
+    - name: Save Bazel repository cache
+      if: steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      with:
+        path: ${{ steps.prepare_bazel.outputs.repository-cache-path }}
+        key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
+    - name: Save Bazel disk cache for Voice
+      if: steps.restore_voice_disk_cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      with:
+        path: ${{ steps.voice_disk_cache.outputs.disk-cache-path }}
+        key: ${{ steps.voice_disk_cache.outputs.disk-cache-key }}

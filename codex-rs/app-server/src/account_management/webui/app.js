@@ -503,7 +503,9 @@
         strategy: t(
           settings.rotation_strategy === "earliest_reset"
             ? "Earliest reset"
-            : "Priority order",
+            : settings.rotation_strategy === "least_used"
+              ? "Most remaining quota"
+              : "Priority order",
         ),
         warmup: t(settings.window_warmup === false ? "Off" : "On"),
         credits: t(
@@ -1898,11 +1900,12 @@
         "Selection strategy",
         "select",
         "fill_first",
-        "Priority order prefers lower priority numbers. Earliest reset prefers the eligible account whose quota resets first.",
+        "Priority order prefers lower priority numbers. Earliest reset prefers the eligible account whose quota resets first. Most remaining quota prefers the account with the most headroom across 5h and weekly limits.",
         {
           options: [
             ["fill_first", t("Priority order")],
             ["earliest_reset", t("Earliest reset")],
+            ["least_used", t("Most remaining quota")],
           ],
         },
       ],

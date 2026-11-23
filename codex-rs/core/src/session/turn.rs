@@ -379,16 +379,16 @@ pub(crate) async fn run_turn(
         && let Some(switch) = execution_auth.preemptive_rotation(threshold)
     {
         execution_auth.compatibility_auth_manager().reload().await;
+        crate::failover_turn::sync_session_rate_limits_with_active_account(
+            sess.as_ref(),
+            &turn_context,
+            execution_auth.as_ref(),
+        )
+        .await;
         sess.send_event(
             &turn_context,
             EventMsg::Warning(WarningEvent {
-                message: format!(
-                    "Switched to Codex account `{}`: account `{}` reached {:.0}% of a usage window (resets at {}).",
-                    switch.to_profile,
-                    switch.from_profile,
-                    switch.used_percent,
-                    switch.resets_at.format("%Y-%m-%d %H:%M UTC"),
-                ),
+                message: crate::failover_turn::preemptive_switch_message(&switch),
             }),
         )
         .await;
@@ -732,7 +732,9 @@ pub(crate) async fn run_turn(
     let mut next_step_context = Some(first_step_context);
     let mut guardian_budget_compacted = false;
     let mut unfinished_plan_id = None;
+    let mut is_first_step = true;
     loop {
+        let is_subsequent_step = !std::mem::replace(&mut is_first_step, false);
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
@@ -770,6 +772,52 @@ pub(crate) async fn run_turn(
             &window_id,
         )
         .await;
+
+        if is_subsequent_step
+            && multi_account_enabled
+            && turn_context
+                .extension_data
+                .get::<ApiExecutionTarget>()
+                .is_none()
+            && let Some(threshold) = turn_context
+                .config
+                .account_pool
+                .effective_preemptive_switch_percent()
+            && Box::pin(async {
+                if history_contains_opaque_compaction(sess.clone_history().await.annotated_items())
+                {
+                    return false;
+                }
+                let Some(switch) = execution_auth.preemptive_rotation(threshold) else {
+                    return false;
+                };
+                execution_auth.compatibility_auth_manager().reload().await;
+                turn_context
+                    .extension_data
+                    .remove::<codex_api::ResponseId>();
+                sess.refresh_mcp_if_dirty().await;
+                crate::failover_turn::sync_session_rate_limits_with_active_account(
+                    sess.as_ref(),
+                    &turn_context,
+                    execution_auth.as_ref(),
+                )
+                .await;
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: crate::failover_turn::preemptive_switch_message(&switch),
+                    }),
+                )
+                .await;
+                true
+            })
+            .await
+        {
+            sess.services
+                .model_client
+                .replace_session_for_execution_identity_change(&mut client_session);
+            next_step_context = None;
+        }
 
         // Capture once so context, advertised tools, and tool calls share one request view.
         let mut step_context = match next_step_context.take() {
@@ -2548,6 +2596,12 @@ async fn run_sampling_request(
                             // Make the outer provider observe the selected pool identity now rather
                             // than racing the background auth-sync task.
                             execution_auth.compatibility_auth_manager().reload().await;
+                            crate::failover_turn::sync_session_rate_limits_with_active_account(
+                                &sess,
+                                &turn_context,
+                                execution_auth.as_ref(),
+                            )
+                            .await;
                             if transition
                                 == crate::failover_turn::AccountFailoverTransition::Rebound
                                 && let Some(message) = account_switch_message(
@@ -2587,17 +2641,24 @@ async fn run_sampling_request(
                             // original error is surfaced.
                             if transition
                                 == crate::failover_turn::AccountFailoverTransition::Rebound
-                                && let Some(message) = account_switch_message(
+                            {
+                                crate::failover_turn::sync_session_rate_limits_with_active_account(
+                                    &sess,
+                                    &turn_context,
+                                    execution_auth.as_ref(),
+                                )
+                                .await;
+                                if let Some(message) = account_switch_message(
                                     execution_auth.as_ref(),
                                     execution_lease,
                                     AccountSwitchContinuation::ResendRequired,
-                                )
-                            {
-                                sess.send_event(
-                                    &turn_context,
-                                    EventMsg::Warning(WarningEvent { message }),
-                                )
-                                .await;
+                                ) {
+                                    sess.send_event(
+                                        &turn_context,
+                                        EventMsg::Warning(WarningEvent { message }),
+                                    )
+                                    .await;
+                                }
                             }
                             return Err(err);
                         }
@@ -2631,6 +2692,21 @@ async fn run_sampling_request(
                             {
                                 recovery_budget.record_recovery();
                                 execution_auth.compatibility_auth_manager().reload().await;
+                                crate::failover_turn::sync_session_rate_limits_with_active_account(
+                                    &sess,
+                                    &turn_context,
+                                    execution_auth.as_ref(),
+                                )
+                                .await;
+                                sess.send_event(
+                                    &turn_context,
+                                    EventMsg::Warning(WarningEvent {
+                                        message: crate::failover_turn::recovery_continuation_message(
+                                            execution_auth.as_ref(),
+                                        ),
+                                    }),
+                                )
+                                .await;
                                 sess.services
                                     .model_client
                                     .replace_session_for_execution_identity_change(client_session);
@@ -2672,25 +2748,22 @@ async fn run_sampling_request(
                             {
                                 recovery_budget.record_recovery();
                                 execution_auth.compatibility_auth_manager().reload().await;
+                                crate::failover_turn::sync_session_rate_limits_with_active_account(
+                                    &sess,
+                                    &turn_context,
+                                    execution_auth.as_ref(),
+                                )
+                                .await;
                                 let safe_to_continue =
                                     crate::account_pool_recovery::can_continue(retry_mode);
                                 sess.send_event(
                                     &turn_context,
                                     EventMsg::Warning(WarningEvent {
-                                        message: format!(
-                                            "{} `{}`. {}",
-                                            match rescue.redeemed_profile_id.as_ref() {
-                                                Some(profile_id) => format!(
-                                                    "Redeemed one rate-limit reset credit on Codex account `{profile_id}`. Execution account:"
-                                                ),
-                                                None => "Codex account recovered:".to_string(),
-                                            },
-                                            rescue.profile_id,
-                                            if safe_to_continue {
-                                                "The turn continues on that account."
-                                            } else {
-                                                "Partial output or an unfinished tool result requires reconciliation; re-send your message to continue."
-                                            },
+                                        message: crate::failover_turn::reset_credit_rescue_message(
+                                            execution_auth.as_ref(),
+                                            rescue.redeemed_profile_id.as_ref(),
+                                            &rescue.profile_id,
+                                            safe_to_continue,
                                         ),
                                     }),
                                 )
@@ -2742,12 +2815,13 @@ async fn run_sampling_request(
                                 && (api_fallback_enabled
                                     || (reset - chrono::Utc::now())
                                         .to_std()
-                                        .is_ok_and(|wait| wait <= max_wait))
+                                        .unwrap_or(Duration::ZERO)
+                                        <= max_wait)
                             {
                                 sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
                                     message: format!(
                                         "All Codex accounts are cooling down. Waiting to retry (earliest check: {}). Cancel to stop waiting.",
-                                        reset.format("%Y-%m-%d %H:%M UTC"),
+                                        codex_login::format_exhausted_reset(reset),
                                     ),
                                 })).await;
                                 let recovered = await_recovery!(async {
@@ -2761,6 +2835,12 @@ async fn run_sampling_request(
                                 if recovered {
                                     recovery_budget.record_recovery();
                                     execution_auth.compatibility_auth_manager().reload().await;
+                                    crate::failover_turn::sync_session_rate_limits_with_active_account(
+                                        &sess,
+                                        &turn_context,
+                                        execution_auth.as_ref(),
+                                    )
+                                    .await;
                                     sess.services
                                         .model_client
                                         .replace_session_for_execution_identity_change(
@@ -2777,9 +2857,16 @@ async fn run_sampling_request(
                                             &cancellation_token,
                                         )
                                         .await?;
-                                    sess.send_event(&turn_context, EventMsg::Warning(WarningEvent {
-                                        message: "A Codex account became available for retry. The turn continues automatically.".into(),
-                                    })).await;
+                                    sess.send_event(
+                                        &turn_context,
+                                        EventMsg::Warning(WarningEvent {
+                                            message:
+                                                crate::failover_turn::recovery_continuation_message(
+                                                    execution_auth.as_ref(),
+                                                ),
+                                        }),
+                                    )
+                                    .await;
                                     turn_context.turn_timing_state.record_sampling_retry();
                                     continue;
                                 }

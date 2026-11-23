@@ -93,3 +93,105 @@ fn stale_recovery_failure_cannot_install_backend_reset_on_a_new_lease() {
         (AccountAvailability::Available, None)
     );
 }
+
+#[test]
+fn stale_standby_quota_refresh_candidates_prioritizes_due_resets_and_urgent_stale_standbys() {
+    let pool = AccountPool::new();
+    let now = Utc::now();
+    for (name, priority) in [("active", 0), ("due", 1), ("stale", 2), ("fresh", 3)] {
+        let id = AccountProfileId::new(name).unwrap();
+        pool.register(
+            AccountProfile::new(id, name.into(), priority, None),
+            AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+        )
+        .unwrap();
+    }
+    let active_id = AccountProfileId::new("active").unwrap();
+    let due_id = AccountProfileId::new("due").unwrap();
+    let stale_id = AccountProfileId::new("stale").unwrap();
+    let fresh_id = AccountProfileId::new("fresh").unwrap();
+    pool.activate(&active_id).unwrap();
+
+    pool.update_rate_limits(
+        &active_id,
+        AccountRateLimits {
+            primary: Some(crate::AccountRateLimitWindow {
+                used_percent: 25.0,
+                resets_at: Some(now + chrono::Duration::hours(2)),
+                window_minutes: Some(300),
+            }),
+            secondary: None,
+            observed_at: Some(now),
+            window_observed_at: None,
+        },
+    )
+    .unwrap();
+    pool.update_rate_limits(
+        &due_id,
+        AccountRateLimits {
+            primary: Some(crate::AccountRateLimitWindow {
+                used_percent: 88.0,
+                resets_at: Some(now - chrono::Duration::minutes(1)),
+                window_minutes: Some(300),
+            }),
+            secondary: None,
+            observed_at: Some(now - chrono::Duration::hours(2)),
+            window_observed_at: None,
+        },
+    )
+    .unwrap();
+    pool.update_rate_limits(
+        &stale_id,
+        AccountRateLimits {
+            primary: Some(crate::AccountRateLimitWindow {
+                used_percent: 30.0,
+                resets_at: Some(now + chrono::Duration::hours(3)),
+                window_minutes: Some(300),
+            }),
+            secondary: None,
+            observed_at: Some(now - chrono::Duration::minutes(25)),
+            window_observed_at: None,
+        },
+    )
+    .unwrap();
+    pool.update_rate_limits(
+        &fresh_id,
+        AccountRateLimits {
+            primary: Some(crate::AccountRateLimitWindow {
+                used_percent: 15.0,
+                resets_at: Some(now + chrono::Duration::hours(4)),
+                window_minutes: Some(300),
+            }),
+            secondary: None,
+            observed_at: Some(now - chrono::Duration::minutes(2)),
+            window_observed_at: None,
+        },
+    )
+    .unwrap();
+
+    // Below urgent threshold, only the standby whose window reset already elapsed is selected.
+    assert_eq!(
+        pool.stale_standby_quota_refresh_candidates(chrono::Duration::minutes(10), 80.0, 2),
+        vec![due_id.clone()]
+    );
+
+    // Once active crosses 80%, stale standbys are included after due-reset standbys.
+    pool.update_rate_limits(
+        &active_id,
+        AccountRateLimits {
+            primary: Some(crate::AccountRateLimitWindow {
+                used_percent: 82.0,
+                resets_at: Some(now + chrono::Duration::hours(2)),
+                window_minutes: Some(300),
+            }),
+            secondary: None,
+            observed_at: Some(now),
+            window_observed_at: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        pool.stale_standby_quota_refresh_candidates(chrono::Duration::minutes(10), 80.0, 2),
+        vec![due_id, stale_id]
+    );
+}

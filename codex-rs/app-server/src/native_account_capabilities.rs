@@ -13,8 +13,8 @@ pub(crate) enum NativeAccountLanguage {
 impl NativeAccountLanguage {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
-            "" | "en" => Some(Self::English),
-            "zh" | "zh-CN" | "zh-cn" => Some(Self::Chinese),
+            "" | "en" | "en-US" | "en-us" => Some(Self::English),
+            "zh" | "zh-CN" | "zh-cn" | "cn" => Some(Self::Chinese),
             _ => None,
         }
     }

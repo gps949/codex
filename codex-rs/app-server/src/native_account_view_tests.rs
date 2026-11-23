@@ -728,3 +728,42 @@ fn incomplete_quota_refresh_keeps_window_ages_separate_from_the_last_check_and_c
     );
     insta::assert_snapshot!("mobile_incomplete_quota_refresh", render(question));
 }
+
+#[test]
+fn refresh_page_offers_refresh_all_and_home_shows_readiness_counts() {
+    let mut inventory = fixture();
+    let mut ready = inventory.accounts[0].clone();
+    ready.id = "slot-2".into();
+    ready.label = "Beta".into();
+    ready.current = false;
+    ready.state = "ready".into();
+    inventory.accounts.push(ready);
+    inventory.total = 2;
+
+    let home_en = inventory.question_at(MenuPage::Home, NativeAccountLanguage::English, NOW);
+    assert!(
+        home_en.choices[0]
+            .description
+            .contains("2 accounts (1 ready, 1 cooling)"),
+        "{}",
+        home_en.choices[0].description
+    );
+    let home_zh = inventory.question_at(MenuPage::Home, NativeAccountLanguage::Chinese, NOW);
+    assert!(
+        home_zh.choices[0]
+            .description
+            .contains("2 个账号（1 可用，1 冷却中）"),
+        "{}",
+        home_zh.choices[0].description
+    );
+
+    let refresh = inventory.question_at(MenuPage::Refresh(0), NativeAccountLanguage::English, NOW);
+    assert!(
+        refresh
+            .choices
+            .iter()
+            .any(|choice| choice.action == MenuAction::Execute(MenuOperation::RefreshAll)),
+        "{:?}",
+        refresh.choices
+    );
+}

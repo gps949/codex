@@ -37,12 +37,43 @@ impl FrozenAccountInventory {
                 self.quick_question(page, language, now)
             }
             MenuPage::Home => {
+                let ready = self
+                    .accounts
+                    .iter()
+                    .filter(|account| {
+                        !account.disabled
+                            && account.login_state == "signedIn"
+                            && account.state == "ready"
+                    })
+                    .count();
+                let cooling = self
+                    .accounts
+                    .iter()
+                    .filter(|account| !account.disabled && account.state == "coolingDown")
+                    .count();
+                let readiness = if self.accounts.is_empty() {
+                    String::new()
+                } else if cooling > 0 {
+                    match language {
+                        NativeAccountLanguage::English => {
+                            format!(" ({ready} ready, {cooling} cooling)")
+                        }
+                        NativeAccountLanguage::Chinese => {
+                            format!("（{ready} 可用，{cooling} 冷却中）")
+                        }
+                    }
+                } else {
+                    match language {
+                        NativeAccountLanguage::English => format!(" ({ready} ready)"),
+                        NativeAccountLanguage::Chinese => format!("（{ready} 可用）"),
+                    }
+                };
                 let mut choices = vec![
                     nav(
                         "Accounts",
                         "账号列表",
                         format!(
-                            "{} {} · {}{}",
+                            "{} {}{readiness} · {}{}",
                             self.total,
                             language.text("accounts", "个账号"),
                             if self.paused {
@@ -367,6 +398,7 @@ impl FrozenAccountInventory {
                     0 => vec![nav("Rotation strategy", "轮换策略", match settings.effective_rotation_strategy() {
                             codex_config::AccountPoolRotationStrategy::FillFirst => language.text("By priority", "按优先级"),
                             codex_config::AccountPoolRotationStrategy::EarliestReset => language.text("By reset time", "按重置时间"),
+                            codex_config::AccountPoolRotationStrategy::LeastUsed => language.text("By remaining quota", "按剩余额度"),
                         }.into(), MenuPage::Strategy(MenuOrigin::Settings(0))),
                         toggle("Window warmup", "窗口预热", settings.effective_window_warmup(), 1), toggle("Resume after reset", "重置后接续", settings.resume_after_reset.unwrap_or(true), 2),
                         nav("More settings", "更多设置", "".into(), MenuPage::Settings(1)), back(MenuPage::Home)],
@@ -411,6 +443,15 @@ impl FrozenAccountInventory {
                         MenuPage::Refresh(next),
                     ));
                 }
+                choices.push(read(
+                    "Refresh all accounts",
+                    "刷新全部账号",
+                    language.text(
+                        "Check all signed-in subscription accounts; no reset credit is used",
+                        "查询全部已登录订阅账号；不会使用重置券",
+                    ),
+                    MenuOperation::RefreshAll,
+                ));
                 choices.push(back(MenuPage::Settings(2)));
                 MenuQuestion::new(
                     language.text("Refresh quota batch", "分批刷新额度"),

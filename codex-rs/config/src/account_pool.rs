@@ -36,6 +36,10 @@ pub enum AccountPoolRotationStrategy {
     /// Idle 5h windows (0% used) are preferred over already-started future windows so real
     /// traffic can start their countdown earlier for multi-account durability.
     EarliestReset,
+    /// Prefer the eligible profile with the lowest observed constraining usage across active
+    /// primary and secondary windows (most remaining headroom), breaking ties by reset timing
+    /// and then priority.
+    LeastUsed,
 }
 
 /// Default cadence for identity-preserving 5h-window warmup of standby accounts.
@@ -141,6 +145,18 @@ mod tests {
             AccountPoolConfigToml::default().effective_rotation_strategy(),
             AccountPoolRotationStrategy::FillFirst
         );
+    }
+
+    #[test]
+    fn least_used_rotation_strategy_round_trips_toml() {
+        let parsed: AccountPoolConfigToml =
+            toml::from_str(r#"rotation_strategy = "least_used""#).expect("parse least_used");
+        assert_eq!(
+            parsed.effective_rotation_strategy(),
+            AccountPoolRotationStrategy::LeastUsed
+        );
+        let encoded = toml::to_string(&parsed).expect("serialize least_used");
+        assert!(encoded.contains(r#"rotation_strategy = "least_used""#));
     }
 
     #[test]

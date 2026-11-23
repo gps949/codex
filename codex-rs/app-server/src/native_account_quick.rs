@@ -39,6 +39,9 @@ impl FrozenAccountInventory {
             AccountPoolRotationStrategy::EarliestReset => {
                 language.text("By reset time", "按重置时间")
             }
+            AccountPoolRotationStrategy::LeastUsed => {
+                language.text("By remaining quota", "按剩余额度")
+            }
         };
         match page {
             MenuPage::Quick(page) => {
@@ -202,6 +205,7 @@ impl FrozenAccountInventory {
                 let choices = [
                     AccountPoolRotationStrategy::FillFirst,
                     AccountPoolRotationStrategy::EarliestReset,
+                    AccountPoolRotationStrategy::LeastUsed,
                 ]
                 .into_iter()
                 .map(|strategy| {
@@ -222,6 +226,10 @@ impl FrozenAccountInventory {
                                 AccountPoolRotationStrategy::EarliestReset => language.text(
                                     "Start idle windows, then prefer the soonest reset",
                                     "先启动未开始的窗口，再优先使用最早重置的账号"
+                                ),
+                                AccountPoolRotationStrategy::LeastUsed => language.text(
+                                    "Prefer the most remaining headroom across 5h and weekly limits",
+                                    "优先使用 5h 与周限额综合剩余最多的账号"
                                 ),
                             }
                         ),

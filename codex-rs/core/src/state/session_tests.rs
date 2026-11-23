@@ -273,3 +273,61 @@ async fn set_rate_limits_carries_account_metadata_from_codex_to_codex_other() {
         Some(false)
     );
 }
+
+#[tokio::test]
+async fn replace_rate_limits_clears_previous_account_metadata() {
+    let mut state = SessionState::new(make_session_configuration_for_tests().await);
+    state.set_rate_limits(RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("codex".to_string()),
+        normal_model_slug: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 100.0,
+            window_minutes: Some(300),
+            resets_at: Some(500),
+        }),
+        secondary: None,
+        credits: Some(CreditsSnapshot {
+            has_credits: false,
+            unlimited: false,
+            balance: Some("0".to_string()),
+        }),
+        individual_limit: None,
+        spend_control_reached: Some(true),
+        plan_type: Some(codex_protocol::account::PlanType::Plus),
+        rate_limit_reached_type: None,
+    });
+
+    state.replace_rate_limits(Some(RateLimitSnapshot {
+        limit_id: None,
+        limit_name: None,
+        normal_model_slug: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 14.0,
+            window_minutes: Some(300),
+            resets_at: Some(900),
+        }),
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: Some(codex_protocol::account::PlanType::Pro),
+        rate_limit_reached_type: None,
+    }));
+
+    let latest = state
+        .latest_rate_limits
+        .as_ref()
+        .expect("replacement snapshot");
+    assert_eq!(latest.limit_id.as_deref(), Some("codex"));
+    assert_eq!(latest.primary.as_ref().map(|w| w.used_percent), Some(14.0));
+    assert_eq!(latest.credits, None);
+    assert_eq!(latest.spend_control_reached, None);
+    assert_eq!(
+        latest.plan_type,
+        Some(codex_protocol::account::PlanType::Pro)
+    );
+
+    state.replace_rate_limits(None);
+    assert_eq!(state.latest_rate_limits, None);
+}

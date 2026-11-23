@@ -166,7 +166,7 @@ impl AccountManager {
                         AccountLabelUpdate::Set(label)
                     }
                 });
-                self.store().update_profile_metadata(
+                let updated = self.store().update_profile_metadata(
                     &record.profile.id,
                     AccountProfileMetadataUpdate {
                         label,
@@ -174,6 +174,13 @@ impl AccountManager {
                         disabled,
                     },
                 )?;
+                if updated.disabled
+                    && let Err(error) =
+                        AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf())
+                            .clear_selection_if_active(&updated.id)
+                {
+                    tracing::warn!(%error, profile_id = %updated.id, "failed to clear active selection for disabled profile");
+                }
                 "Account details saved. Running clients synchronize the change.".into()
             }
             AccountManagerOperation::Remove {

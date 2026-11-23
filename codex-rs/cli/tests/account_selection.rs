@@ -344,3 +344,117 @@ fn account_config_controls_preserve_comments_and_disable_early_rotation() {
         assert_eq!(std::fs::read(&config_path).unwrap(), before);
     }
 }
+
+#[test]
+fn account_auto_clears_manual_pin_resumes_pool_and_supports_least_used() {
+    let home = TempDir::new().unwrap();
+    write_sample_profiles(&home).unwrap();
+    for (id, used_weekly) in [("first", 90.0), ("second", 15.0), ("third", 50.0)] {
+        let cred_dir = home.path().join("auth-profiles").join(id);
+        std::fs::create_dir_all(&cred_dir).unwrap();
+        let auth = json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": "eyJhbGciOiJub25lIn0.e30.c2ln",
+                "access_token": format!("access-{id}"),
+                "refresh_token": format!("refresh-{id}"),
+                "account_id": format!("acct-{id}")
+            },
+            "last_refresh": "2026-01-01T00:00:00Z"
+        });
+        std::fs::write(cred_dir.join("auth.json"), auth.to_string()).unwrap();
+        let _ = used_weekly;
+    }
+
+    let set_strategy = Command::new(cargo_bin("codex").unwrap())
+        .env("CODEX_HOME", home.path())
+        .args(["account", "config", "set-rotation-strategy", "least_used"])
+        .output()
+        .unwrap();
+    assert!(
+        set_strategy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set_strategy.stderr)
+    );
+
+    // Manually pin `third` and suspend the pool.
+    let manual = Command::new(cargo_bin("codex").unwrap())
+        .env("CODEX_HOME", home.path())
+        .args(["account", "use", "third"])
+        .output()
+        .unwrap();
+    assert!(manual.status.success());
+    let state_path = home.path().join("account-runtime-state.json");
+    let manual_state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(manual_state["active_profile_id"], json!("third"));
+    assert_eq!(manual_state["manual_selection"], json!(true));
+
+    // Seed cached quota observations so `second` has the lowest constraining usage.
+    let now = chrono::Utc::now();
+    let seeded = json!({
+        "version": 1,
+        "active_profile_id": "third",
+        "manual_selection": true,
+        "selection_revision": 3,
+        "profiles": [
+            {
+                "profile_id": "first",
+                "rate_limits": {
+                    "primary": {"used_percent": 10.0, "resets_at": now + chrono::Duration::hours(1), "window_minutes": 300},
+                    "secondary": {"used_percent": 90.0, "resets_at": now + chrono::Duration::days(3), "window_minutes": 10080},
+                    "observed_at": now
+                }
+            },
+            {
+                "profile_id": "second",
+                "rate_limits": {
+                    "primary": {"used_percent": 20.0, "resets_at": now + chrono::Duration::hours(4), "window_minutes": 300},
+                    "secondary": {"used_percent": 15.0, "resets_at": now + chrono::Duration::days(5), "window_minutes": 10080},
+                    "observed_at": now
+                }
+            },
+            {
+                "profile_id": "third",
+                "rate_limits": {
+                    "primary": {"used_percent": 40.0, "resets_at": now + chrono::Duration::hours(2), "window_minutes": 300},
+                    "secondary": {"used_percent": 50.0, "resets_at": now + chrono::Duration::days(4), "window_minutes": 10080},
+                    "observed_at": now
+                }
+            }
+        ]
+    });
+    std::fs::write(&state_path, seeded.to_string()).unwrap();
+    codex_login::AccountPoolRuntime::suspend_home(home.path()).unwrap();
+
+    let auto = Command::new(cargo_bin("codex").unwrap())
+        .env("CODEX_HOME", home.path())
+        .args(["account", "auto"])
+        .output()
+        .unwrap();
+    assert!(
+        auto.status.success(),
+        "{}",
+        String::from_utf8_lossy(&auto.stderr)
+    );
+    assert!(!codex_login::AccountPoolRuntime::is_home_suspended(
+        home.path()
+    ));
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(after["active_profile_id"], json!("second"));
+    assert!(
+        after.get("manual_selection").is_none() || after["manual_selection"] == json!(false),
+        "{after}"
+    );
+
+    // `codex account refresh` rejects disabled or ambiguous selectors before any network traffic.
+    for bad_selector in ["Parked", "Shared", "missing"] {
+        let refresh = Command::new(cargo_bin("codex").unwrap())
+            .env("CODEX_HOME", home.path())
+            .args(["account", "refresh", bad_selector])
+            .output()
+            .unwrap();
+        assert!(!refresh.status.success());
+    }
+}

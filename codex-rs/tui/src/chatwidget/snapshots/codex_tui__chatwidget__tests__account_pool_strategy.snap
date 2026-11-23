@@ -4,7 +4,7 @@ assertion_line: 3665
 expression: "render_bottom_popup(&chat, 80)"
 ---
   Automatic selection
-  Both strategies use eligible accounts and preserve reserve quota.
+  All strategies use eligible accounts and preserve reserve quota.
 
    Accounts (3)   Strategy   Help
 
@@ -14,5 +14,7 @@ expression: "render_bottom_popup(&chat, 80)"
                          failover
   By reset time          Start idle 5h windows early, then prefer the soonest
                          reset
+  By remaining quota     Prefer the most remaining headroom across 5h and weekly
+                         limits
 
   ← previous tab · → next tab · enter select · esc back

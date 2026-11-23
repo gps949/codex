@@ -431,6 +431,26 @@ impl NativeMenuSession {
                 None,
                 self.page,
             ),
+            MenuOperation::RefreshAll => {
+                let profiles = self
+                    .inventory
+                    .accounts
+                    .iter()
+                    .filter(|account| {
+                        !account.disabled
+                            && account.login_state == "signedIn"
+                            && matches!(account.detail, AccountDetail::Subscription { .. })
+                    })
+                    .map(|account| account.id.clone())
+                    .collect();
+                (
+                    AccountManagerOperation::Refresh {
+                        profile_ids: Some(profiles),
+                    },
+                    None,
+                    self.page,
+                )
+            }
             MenuOperation::Refresh(first) | MenuOperation::RefreshQuick(first) => {
                 let (indices, return_page) = if matches!(operation, MenuOperation::RefreshQuick(_))
                 {

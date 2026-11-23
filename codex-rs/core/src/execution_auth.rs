@@ -156,8 +156,12 @@ const PREEMPTIVE_UNKNOWN_RESET_REPROBE_DELAY: chrono::Duration = chrono::Duratio
 /// Describes one completed preemptive account rotation for logging and user notification.
 #[derive(Clone, Debug)]
 pub(crate) struct PreemptiveSwitch {
+    #[allow(dead_code)]
     pub(crate) from_profile: AccountProfileId,
+    #[allow(dead_code)]
     pub(crate) to_profile: AccountProfileId,
+    pub(crate) from_label: String,
+    pub(crate) to_label: String,
     pub(crate) used_percent: f64,
     pub(crate) resets_at: DateTime<Utc>,
 }
@@ -633,6 +637,8 @@ impl ExecutionAuth {
         Some(PreemptiveSwitch {
             from_profile: lease.profile().id.clone(),
             to_profile: next.profile().id.clone(),
+            from_label: lease.notice_label(),
+            to_label: next.notice_label(),
             used_percent,
             resets_at,
         })
@@ -767,6 +773,10 @@ impl ExecutionAuthLease {
 
     pub(crate) fn profile_id(&self) -> Option<&AccountProfileId> {
         self.account.as_ref().map(|lease| &lease.profile().id)
+    }
+
+    pub(crate) fn notice_label(&self) -> Option<String> {
+        self.account.as_ref().map(AccountLease::notice_label)
     }
 
     pub(crate) fn generation(&self) -> u64 {

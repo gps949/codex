@@ -271,3 +271,54 @@ async fn native_account_quick_rechecks_workspace_before_immediate_selection() ->
     assert!(fixture.inference_requests().await.is_empty());
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mobile_slash_subcommands_during_running_turn_answer_locally_without_steering_model()
+-> Result<()> {
+    let mut fixture = NativeFixture::new(PoolFixture::ManagedAccount).await?;
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .respond_with(
+            core_test_support::responses::sse_response(
+                create_final_assistant_message_sse_response("real task completed")?,
+            )
+            .set_delay(Duration::from_secs(2)),
+        )
+        .expect(1)
+        .mount(&fixture.backend)
+        .await;
+    let turn = fixture
+        .start("keep working while I inspect pool overview")
+        .await?;
+    let _: TurnStartedNotification =
+        timeout(READ_TIMEOUT, fixture.app.read_notification("turn/started")).await??;
+    let steer = fixture
+        .app
+        .send_raw_request(
+            "turn/steer",
+            Some(json!({
+                "threadId": fixture.thread_id,
+                "expectedTurnId": turn.turn.id,
+                "input": [{"type": "text", "text": "/account overview", "textElements": []}]
+            })),
+        )
+        .await?;
+    let result: TurnSteerResponse =
+        timeout(READ_TIMEOUT, fixture.app.read_response(steer)).await??;
+    assert_eq!(result.turn_id, turn.turn.id);
+    let completed: TurnCompletedNotification = timeout(
+        READ_TIMEOUT,
+        fixture.app.read_notification("turn/completed"),
+    )
+    .await??;
+    assert_eq!(
+        (completed.turn.id, completed.turn.status),
+        (turn.turn.id, TurnStatus::Completed)
+    );
+    let requests = fixture.inference_requests().await;
+    assert_eq!(requests.len(), 1);
+    let input =
+        serde_json::to_string(&serde_json::from_slice::<Value>(&requests[0].body)?["input"])?;
+    assert!(!input.contains("/account"), "{input}");
+    Ok(())
+}

@@ -79,6 +79,13 @@
             "earliest_reset"
           ],
           "type": "string"
+        },
+        {
+          "description": "Prefer the eligible profile with the lowest observed constraining usage across active primary and secondary windows (most remaining headroom), breaking ties by reset timing and then priority.",
+          "enum": [
+            "least_used"
+          ],
+          "type": "string"
         }
       ]
     },

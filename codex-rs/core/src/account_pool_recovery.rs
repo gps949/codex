@@ -154,6 +154,7 @@ pub(crate) async fn wait_for_recovery(
             return false;
         }
         if now >= next_probe {
+            let probe_started_utc = Utc::now();
             let outcome = tokio::select! {
                 _ = cancellation.cancelled() => return false,
                 _ = tokio::time::sleep_until(deadline) => return false,
@@ -162,26 +163,34 @@ pub(crate) async fn wait_for_recovery(
             if outcome == metadata::ProbeOutcome::Recovered {
                 return true;
             }
-            next_probe = Instant::now()
-                + if outcome == metadata::ProbeOutcome::Busy {
-                    Duration::from_millis(200)
-                } else {
-                    Duration::from_secs(30)
-                };
+            let probe_completed = Instant::now();
+            let mut interval = if outcome == metadata::ProbeOutcome::Busy {
+                Duration::from_millis(200)
+            } else {
+                Duration::from_secs(30)
+            };
+            if outcome != metadata::ProbeOutcome::Busy
+                && let Some(due_reset) =
+                    next_future_exhausted_reset(execution_auth, probe_started_utc)
+            {
+                let until_reset = (due_reset - Utc::now())
+                    .to_std()
+                    .unwrap_or(Duration::ZERO)
+                    .saturating_add(Duration::from_millis(250));
+                interval = interval.min(until_reset);
+            }
+            next_probe = probe_completed + interval;
         }
         let now = Instant::now();
         if now >= deadline {
             return false;
         }
         let delay = earliest_exhausted_reset(execution_auth)
-            .map(|reset| {
-                (reset - Utc::now())
-                    .to_std()
-                    .unwrap_or(Duration::from_secs(1))
-            })
+            .and_then(|reset| (reset - Utc::now()).to_std().ok())
+            .map(|until_reset| until_reset.saturating_add(Duration::from_millis(50)))
             .unwrap_or(Duration::from_secs(30))
-            .clamp(Duration::from_secs(1), Duration::from_secs(30))
-            .min(next_probe.saturating_duration_since(now));
+            .min(next_probe.saturating_duration_since(now))
+            .max(Duration::from_millis(50));
         tokio::select! {
             _ = cancellation.cancelled() => return false,
             _ = tokio::time::sleep(delay.min(deadline - now)) => {}
@@ -192,6 +201,37 @@ pub(crate) async fn wait_for_recovery(
             }
         }
     }
+}
+
+fn next_future_exhausted_reset(
+    execution_auth: &ExecutionAuth,
+    after: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
+    execution_auth
+        .account_pool()
+        .map(|pool| pool.snapshots())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|snapshot| !snapshot.profile.disabled)
+        .filter_map(|snapshot| match snapshot.availability {
+            codex_login::AccountAvailability::Exhausted { resets_at } => resets_at
+                .into_iter()
+                .chain(snapshot.backend_resets_at)
+                .chain(
+                    snapshot
+                        .rate_limits
+                        .primary
+                        .iter()
+                        .chain(snapshot.rate_limits.secondary.iter())
+                        .filter_map(|window| window.resets_at),
+                )
+                .filter(|reset| *reset > after)
+                .min(),
+            codex_login::AccountAvailability::Available
+            | codex_login::AccountAvailability::AuthenticationUnavailable { .. }
+            | codex_login::AccountAvailability::Disabled => None,
+        })
+        .min()
 }
 
 #[cfg(test)]

@@ -86,6 +86,9 @@ pub(crate) enum TerminalTitleItem {
     Reasoning,
     /// Latest checklist task progress from `update_plan` (if available).
     TaskProgress,
+    /// Active multi-account pool profile (omitted when pool is inactive).
+    #[strum(to_string = "account-pool", serialize = "account")]
+    AccountPool,
 }
 
 impl TerminalTitleItem {
@@ -136,6 +139,9 @@ impl TerminalTitleItem {
             TerminalTitleItem::TaskProgress => {
                 "Latest task progress from update_plan (omitted until available)"
             }
+            TerminalTitleItem::AccountPool => {
+                "Active account-pool profile and ready count (omitted when pool is inactive)"
+            }
         }
     }
 
@@ -172,6 +178,7 @@ impl TerminalTitleItem {
             }
             TerminalTitleItem::Reasoning => Some(StatusSurfacePreviewItem::Reasoning),
             TerminalTitleItem::TaskProgress => Some(StatusSurfacePreviewItem::TaskProgress),
+            TerminalTitleItem::AccountPool => Some(StatusSurfacePreviewItem::AccountPool),
         }
     }
 

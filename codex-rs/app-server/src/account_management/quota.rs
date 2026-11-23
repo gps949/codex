@@ -182,43 +182,52 @@ impl AccountManager {
                 });
             }
         }
+        let shared_pool = if pending.is_empty() {
+            None
+        } else {
+            self.execution_pool().await?
+        };
         let mut jobs = futures::stream::iter(pending)
-            .map(|mut permit| async move {
-                let result = tokio::time::timeout(
-                    Duration::from_secs(10),
-                    self.refresh_profile(&permit.key.0, &permit.key.1),
-                )
-                .await;
-                let (outcome, message, count) = match result {
-                    Ok(Ok((report, count))) => (report.outcome, report.message, count),
-                    Ok(Err(error)) => (QuotaRefreshOutcome::Failed, error.to_string(), None),
-                    Err(_) => (
-                        QuotaRefreshOutcome::Failed,
-                        "Quota check timed out; cached values were retained. Refresh to retry."
-                            .into(),
-                        None,
-                    ),
-                };
-                // This existing wire field describes the request, not window completeness or
-                // backend permission. Keep partial observations separate from request errors.
-                let succeeded = outcome != QuotaRefreshOutcome::Failed;
-                let mut statuses = self
-                    .refreshes
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(status) = statuses.get_mut(&permit.key) {
-                    status.in_progress = false;
-                    status.succeeded = succeeded;
-                    status.message = message.clone();
-                    if succeeded && (count.is_some() || outcome != QuotaRefreshOutcome::Incomplete)
-                    {
-                        status.reset_credit_count = count;
+            .map(|mut permit| {
+                let shared_pool = shared_pool.clone();
+                async move {
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        self.refresh_profile(&permit.key.0, &permit.key.1, shared_pool.as_deref()),
+                    )
+                    .await;
+                    let (outcome, message, count) = match result {
+                        Ok(Ok((report, count))) => (report.outcome, report.message, count),
+                        Ok(Err(error)) => (QuotaRefreshOutcome::Failed, error.to_string(), None),
+                        Err(_) => (
+                            QuotaRefreshOutcome::Failed,
+                            "Quota check timed out; cached values were retained. Refresh to retry."
+                                .into(),
+                            None,
+                        ),
+                    };
+                    // This existing wire field describes the request, not window completeness or
+                    // backend permission. Keep partial observations separate from request errors.
+                    let succeeded = outcome != QuotaRefreshOutcome::Failed;
+                    let mut statuses = self
+                        .refreshes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(status) = statuses.get_mut(&permit.key) {
+                        status.in_progress = false;
+                        status.succeeded = succeeded;
+                        status.message = message.clone();
+                        if succeeded
+                            && (count.is_some() || outcome != QuotaRefreshOutcome::Incomplete)
+                        {
+                            status.reset_credit_count = count;
+                        }
                     }
+                    permit.completed = true;
+                    drop(statuses);
+                    drop(permit);
+                    (outcome, message)
                 }
-                permit.completed = true;
-                drop(statuses);
-                drop(permit);
-                (outcome, message)
             })
             .buffer_unordered(4);
         let mut updated = 0;
@@ -252,6 +261,7 @@ impl AccountManager {
         &self,
         id: &str,
         expected_identity: &str,
+        shared_pool: Option<&codex_login::AccountPool>,
     ) -> anyhow::Result<(QuotaRefreshReport, Option<u64>)> {
         let profile = self.profile(id)?;
         anyhow::ensure!(
@@ -264,9 +274,13 @@ impl AccountManager {
             "Account identity changed before quota refresh; retry for the current account"
         );
         let store = AccountRuntimeStateStore::new(self.config.codex_home.to_path_buf());
-        let pool = self.execution_pool().await?;
+        let owned_pool = if shared_pool.is_none() {
+            self.execution_pool().await?
+        } else {
+            None
+        };
+        let pool = shared_pool.or(owned_pool.as_deref());
         let probe = pool
-            .as_ref()
             .map(|pool| store.capture_quota_probe(pool, &profile.profile.id, &auth))
             .transpose()?
             .flatten();
@@ -297,7 +311,7 @@ impl AccountManager {
             .rate_limit_reset_credits
             .as_ref()
             .and_then(|credits| credits.available_count.try_into().ok());
-        let recovered = if let (Some(pool), Some(probe)) = (pool.as_ref(), probe) {
+        let recovered = if let (Some(pool), Some(probe)) = (pool, probe) {
             store.reconcile_quota_probe(
                 pool,
                 probe,
@@ -312,7 +326,7 @@ impl AccountManager {
             false
         };
         if recovered
-            && let Some(pool) = pool.as_ref()
+            && let Some(pool) = pool
             && let Some(_spending) = store.try_lock_reset_credit()?
         {
             let state = store.load()?;

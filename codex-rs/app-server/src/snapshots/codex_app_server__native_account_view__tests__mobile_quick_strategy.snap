@@ -9,6 +9,9 @@ Use the lowest priority number first
 By reset time
 Current · Start idle windows, then prefer the soonest reset
 
+By remaining quota
+Prefer the most remaining headroom across 5h and weekly limits
+
 Back
 
 

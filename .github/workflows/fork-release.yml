@@ -92,24 +92,39 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     env:
-      # Large optimized Rust crates can exhaust a standard runner when built together.
-      CARGO_BUILD_JOBS: "1"
+      # Library rlibs compile in parallel (compile_jobs); final ThinLTO binary links
+      # use link_jobs so multiple whole-program ThinLTO links never OOM standard runners.
+      CARGO_BUILD_JOBS: ${{ matrix.compile_jobs }}
       # Release archives strip debug data and exclude PDBs; avoid generating it first.
       CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: clang
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
             runner: macos-15
+            compile_jobs: "3"
+            link_jobs: "1"
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
+            compile_jobs: "4"
+            link_jobs: "2"
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
+            compile_jobs: "4"
+            link_jobs: "2"
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
+            compile_jobs: "4"
+            link_jobs: "1"
           - target: aarch64-pc-windows-msvc
             runner: windows-11-arm
+            compile_jobs: "4"
+            link_jobs: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -129,8 +144,8 @@ jobs:
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
-        # libcap-dev is required by the bwrap sandbox helper.
-        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config libcap-dev
+        # libcap-dev is required by the bwrap sandbox helper; clang + lld speed up ThinLTO linking.
+        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config libcap-dev clang lld
 
       # The rusty_v8 version-resolution script needs tomllib (Python 3.11+);
       # the ubuntu-22.04 runner ships 3.10, so install a modern Python first.
@@ -157,7 +172,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs -> ${{ env.CARGO_TARGET_DIR }}
-          shared-key: fork-release-v8-native-${{ matrix.target }}
+          shared-key: fork-release-v8-native-v2-${{ matrix.target }}
           cache-workspace-crates: false
 
       - name: Restore verified V8 native archive after Cargo cache
@@ -207,17 +222,26 @@ jobs:
             strip --strip-debug --strip-unneeded "$bwrap_path"
             export CODEX_BWRAP_SHA256="$(sha256sum "$bwrap_path" | awk '{print $1}')"
           fi
-          # One invocation resolves features once; separate per-package builds
-          # recompile shared dependencies and exceeded the job timeout on Windows.
+          # Keep the exact same -p package set across both stages so Cargo feature
+          # unification is identical: Stage 1 compiles all .rlib crates across all
+          # cores without ThinLTO linking, and Stage 2 links the ThinLTO binaries
+          # within the runner's RAM budget (avoiding concurrent ThinLTO OOMs).
+          pkgs=(codex-cli codex-code-mode-host codex-exec-server-cli codex-responses-api-proxy)
           bins=(codex codex-code-mode-host codex-exec-server codex-responses-api-proxy)
           if [[ "${{ matrix.target }}" == *windows* ]]; then
+            pkgs+=(codex-windows-sandbox codex-windows-sandbox-service)
             bins+=(codex-windows-sandbox-setup codex-command-runner codex-windows-sandbox-service)
           fi
+          pkg_args=()
+          for pkg in "${pkgs[@]}"; do
+            pkg_args+=(-p "$pkg")
+          done
           build_args=()
           for bin in "${bins[@]}"; do
             build_args+=(--bin "$bin")
           done
-          bash ../.github/scripts/run-fork-ci-command.sh release cargo build --release --target ${{ matrix.target }} "${build_args[@]}"
+          bash ../.github/scripts/run-fork-ci-command.sh release-libs cargo build --release --target ${{ matrix.target }} "${pkg_args[@]}" --lib
+          CARGO_BUILD_JOBS="${{ matrix.link_jobs }}" bash ../.github/scripts/run-fork-ci-command.sh release cargo build --release --target ${{ matrix.target }} "${pkg_args[@]}" "${build_args[@]}"
 
       # Upstream release builds keep `strip = false` so debug info can be archived
       # into separate symbols packages, then strips the shipped binaries. The fork

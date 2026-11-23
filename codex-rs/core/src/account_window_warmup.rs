@@ -18,10 +18,15 @@
 //! other processes so unsuccessful standbys do not starve later candidates or
 //! consume quota repeatedly while the backend is still publishing usage.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -78,13 +83,25 @@ const GET_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 /// declaring NOOP so lagging GETs do not produce false "warmup retry" loops.
 const GET_VERIFY_DELAYS_SECS: &[u64] = &[0, 1, 2, 4, 8];
 const URGENT_WARMUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const STANDBY_QUOTA_STALE_AFTER_MINUTES: i64 = 10;
+const STANDBY_QUOTA_REFRESH_DEBOUNCE: Duration = Duration::from_secs(5 * 60);
 /// Give quota probes a moment to land, then start warming — do not wait a full interval.
 pub(crate) const INITIAL_WARMUP_SETTLE: Duration = Duration::from_secs(30);
+
+static STANDBY_QUOTA_REFRESH_ATTEMPTS: LazyLock<
+    Mutex<HashMap<(PathBuf, AccountProfileId), Instant>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Use the process originator (same header as interactive turns). A made-up warmup
 /// originator is not first-party and can be rejected independently of ChatGPT bearer auth.
 fn warmup_originator() -> String {
     codex_login::default_client::originator().value
+}
+
+fn urgent_active_usage_percent(preemptive_switch_percent: Option<f64>) -> Option<f64> {
+    preemptive_switch_percent
+        .filter(|percent| percent.is_finite())
+        .map(|percent| (percent - 15.0).max(75.0))
 }
 
 /// Spawns the periodic standby-window warmup loop. The caller owns the handle and may abort it.
@@ -99,9 +116,18 @@ pub(crate) fn spawn_window_warmup_task(
         let mut last_pass = None;
         loop {
             let config = config_rx.borrow_and_update().clone();
-            let sleep_for = if pool.needs_urgent_window_warmup(
+            let urgent_threshold = urgent_active_usage_percent(
                 config.account_pool.effective_preemptive_switch_percent(),
-            ) {
+            );
+            let needs_urgent_pass = pool.needs_urgent_window_warmup(urgent_threshold)
+                || !pool
+                    .stale_standby_quota_refresh_candidates(
+                        chrono::Duration::minutes(STANDBY_QUOTA_STALE_AFTER_MINUTES),
+                        urgent_threshold.unwrap_or(80.0),
+                        /*max_candidates*/ 1,
+                    )
+                    .is_empty();
+            let sleep_for = if needs_urgent_pass {
                 URGENT_WARMUP_INTERVAL.min(config.account_pool.effective_window_warmup_interval())
             } else {
                 config.account_pool.effective_window_warmup_interval()
@@ -161,6 +187,7 @@ pub(crate) async fn run_warmup_pass(pool: &AccountPool, config: &Config) -> anyh
     }
     // Import shared observations without changing the foreground execution selection.
     store.apply_window_warmup_to_pool(pool)?;
+    refresh_stale_standby_quotas(pool, config, &store).await;
     let mut profile_id = None;
     for candidate in pool.window_warmup_candidates() {
         if profile_allows_generation(pool, config, &candidate)? {
@@ -294,6 +321,118 @@ pub(crate) async fn run_warmup_pass(pool: &AccountPool, config: &Config) -> anyh
         }
     }
     result.map(|_| ())
+}
+
+async fn refresh_stale_standby_quotas(
+    pool: &AccountPool,
+    config: &Config,
+    store: &AccountRuntimeStateStore,
+) {
+    let urgent_threshold =
+        urgent_active_usage_percent(config.account_pool.effective_preemptive_switch_percent())
+            .unwrap_or(80.0);
+    let warmup_candidates = pool.window_warmup_candidates();
+    let candidates: Vec<AccountProfileId> = pool
+        .stale_standby_quota_refresh_candidates(
+            chrono::Duration::minutes(STANDBY_QUOTA_STALE_AFTER_MINUTES),
+            urgent_threshold,
+            /*max_candidates*/ 2,
+        )
+        .into_iter()
+        .filter(|id| !warmup_candidates.contains(id))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let managers: HashMap<_, _> = pool.auth_managers().into_iter().collect();
+    let home = config.codex_home.to_path_buf();
+    for profile_id in candidates {
+        if codex_login::AccountPoolRuntime::is_home_suspended(&config.codex_home) {
+            return;
+        }
+        {
+            let mut attempts = STANDBY_QUOTA_REFRESH_ATTEMPTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = Instant::now();
+            attempts.retain(|_, ts| now.saturating_duration_since(*ts) < Duration::from_secs(3600));
+            let key = (home.clone(), profile_id.clone());
+            if attempts.get(&key).is_some_and(|last| {
+                now.saturating_duration_since(*last) < STANDBY_QUOTA_REFRESH_DEBOUNCE
+            }) {
+                continue;
+            }
+            attempts.insert(key, now);
+        }
+        let Some(manager) = managers.get(&profile_id) else {
+            continue;
+        };
+        manager.reload().await;
+        let Some((auth, mut factory)) = manager
+            .auth_with_http_client_factory()
+            .await
+            .filter(|(auth, _)| auth.is_chatgpt_auth())
+        else {
+            continue;
+        };
+        let mut base_url = config.chatgpt_base_url.clone();
+        if let Ok(Some(clients)) = manager.maintenance_clients(&auth).await {
+            factory = clients.http_client_factory;
+            base_url = clients.chatgpt_base_url;
+        }
+        let probe = store
+            .capture_quota_probe(pool, &profile_id, &auth)
+            .ok()
+            .flatten();
+        let client = BackendClient::from_auth(base_url, &auth, factory);
+        let observed_at = Utc::now();
+        let Ok(Ok(observed)) = tokio::time::timeout(
+            GET_REFRESH_TIMEOUT,
+            client.get_rate_limits_with_reset_credits(),
+        )
+        .await
+        else {
+            continue;
+        };
+        manager.reload().await;
+        if !manager
+            .auth_cached()
+            .as_ref()
+            .is_some_and(|current| quota::same_warmup_identity(&auth, current))
+        {
+            continue;
+        }
+        if let Some(probe) = probe {
+            let _ = store.reconcile_quota_probe(
+                pool,
+                probe,
+                codex_login::AccountQuotaEvidence {
+                    rate_limits: &observed.rate_limits,
+                    ordinary_usage_allowed: observed.ordinary_usage_allowed,
+                    account_id: observed.account_id.as_deref(),
+                    user_id: observed.user_id.as_deref(),
+                },
+            );
+        }
+        if let Some(snapshot) = observed
+            .rate_limits
+            .iter()
+            .find(|snapshot| snapshot.limit_id.as_deref().is_none_or(|id| id == "codex"))
+        {
+            let limits = AccountRateLimits {
+                observed_at: Some(observed_at),
+                ..quota::convert_rate_limits(snapshot)
+            };
+            if pool.update_rate_limits(&profile_id, limits).is_ok()
+                && let Some(updated) = pool
+                    .snapshots()
+                    .into_iter()
+                    .find(|item| item.profile.id == profile_id)
+            {
+                let _ = store.record_rate_limits(&profile_id, updated.rate_limits);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -149,6 +149,8 @@ impl ChatWidget {
             status_account_display,
             remote_connection: None,
             account_pool_identity: None,
+            account_pool_enabled: false,
+            account_pool_accounts: Vec::new(),
             statusline_feature_enabled: false,
             statusline_read: None,
             statusline_disconnected: false,

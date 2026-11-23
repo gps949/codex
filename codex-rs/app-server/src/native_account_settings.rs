@@ -20,31 +20,42 @@ pub(super) fn setting_change(
     };
     let (key, value, description) = match index {
         0 => {
-            let next = match settings.effective_rotation_strategy() {
+            let current = settings.effective_rotation_strategy();
+            let next = match current {
                 codex_config::AccountPoolRotationStrategy::FillFirst => {
                     codex_config::AccountPoolRotationStrategy::EarliestReset
                 }
                 codex_config::AccountPoolRotationStrategy::EarliestReset => {
+                    codex_config::AccountPoolRotationStrategy::LeastUsed
+                }
+                codex_config::AccountPoolRotationStrategy::LeastUsed => {
                     codex_config::AccountPoolRotationStrategy::FillFirst
                 }
+            };
+            let description = match (current, next) {
+                (
+                    codex_config::AccountPoolRotationStrategy::FillFirst,
+                    codex_config::AccountPoolRotationStrategy::EarliestReset,
+                ) => language.text(
+                    "Rotation: fill first → earliest reset",
+                    "轮换：顺序用完 → 最早重置优先",
+                ),
+                (
+                    codex_config::AccountPoolRotationStrategy::EarliestReset,
+                    codex_config::AccountPoolRotationStrategy::LeastUsed,
+                ) => language.text(
+                    "Rotation: earliest reset → least used",
+                    "轮换：最早重置优先 → 剩余额度优先",
+                ),
+                _ => language.text(
+                    "Rotation: least used → fill first",
+                    "轮换：剩余额度优先 → 顺序用完",
+                ),
             };
             (
                 "rotation_strategy",
                 serde_json::to_value(next)?,
-                language
-                    .text(
-                        if next == codex_config::AccountPoolRotationStrategy::EarliestReset {
-                            "Rotation: fill first → earliest reset"
-                        } else {
-                            "Rotation: earliest reset → fill first"
-                        },
-                        if next == codex_config::AccountPoolRotationStrategy::EarliestReset {
-                            "轮换：顺序用完 → 最早重置优先"
-                        } else {
-                            "轮换：最早重置优先 → 顺序用完"
-                        },
-                    )
-                    .into(),
+                description.into(),
             )
         }
         1 => (

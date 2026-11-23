@@ -641,17 +641,20 @@ enum AccountSubcommand {
 
     /// List configured account profiles and their cached status.
     #[command(
-        after_help = "Quota values are cached observations; this command does not query the backend.\n\
-            Refresh from mobile /account or the accountPool/read API.\n\n\
+        after_help = "Quota values are cached by default; pass --refresh (-r) or run `codex account refresh` to query live quota.\n\n\
             USED is the used quota percentage. UPDATED is the oldest window's sample age, not a reset countdown.\n\
             'stale' means a cached reset has passed; current usage requires refresh.\n\
             LOGIN only checks stored credentials. POOL and retry deadlines are local scheduling state.\n\n\
             Terminal output adapts to the window width; redirected output preserves TSV columns.\n\
             Pass --show-profile for full IDs, --details for each window's timestamps and resets.\n\
             Use a unique account label or full profile ID to select an account.\n\n\
-            Examples:\n  codex account list\n  codex account list --format json\n  codex account list --show-profile --format tsv"
+            Examples:\n  codex account list\n  codex account list --refresh\n  codex account list --format json\n  codex account list --show-profile --format tsv"
     )]
     List {
+        /// Refresh live quota from the backend for ready enabled profiles before rendering.
+        #[arg(long, short = 'r')]
+        refresh: bool,
+
         /// Include the full local profile ID (acct-…).
         #[arg(long = "show-profile")]
         show_profile: bool,
@@ -725,6 +728,42 @@ enum AccountSubcommand {
         force: bool,
     },
 
+    /// Return to automatic multi-account scheduling using the configured rotation strategy.
+    #[command(
+        after_help = "Clears any manual account pin or manual API-key override, resumes a suspended\n\
+            account pool, and selects the next eligible subscription account.\n\n\
+            Examples:\n  codex account auto\n  codex account auto --force"
+    )]
+    Auto {
+        /// Also probe a quota-cooled account whose observed reset window is already due.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Refresh live quota observations from the backend and print the updated pool view.
+    #[command(
+        after_help = "Without arguments, refreshes all ready enabled subscription profiles.\n\
+            Pass one or more profile IDs or unique labels to refresh specific accounts.\n\n\
+            Examples:\n  codex account refresh\n  codex account refresh \"Work Pro\"\n  codex account refresh --format json"
+    )]
+    Refresh {
+        /// Optional profile IDs or unique labels to refresh (defaults to all ready enabled profiles).
+        #[arg(value_name = "ID_OR_LABEL")]
+        profiles: Vec<String>,
+
+        /// Include the full local profile ID (acct-…).
+        #[arg(long = "show-profile")]
+        show_profile: bool,
+
+        /// Output format: readable tables on terminals, TSV when redirected.
+        #[arg(long, value_enum, default_value_t = account_cmd::AccountOutputFormat::Auto)]
+        format: account_cmd::AccountOutputFormat,
+
+        /// Include masked identity, cache timestamps, resets, and warmup details in tables.
+        #[arg(long)]
+        details: bool,
+    },
+
     /// Remove an account profile from the pool.
     Remove {
         /// Exact profile ID or unique label to remove.
@@ -738,17 +777,21 @@ enum AccountSubcommand {
 
     /// Show cached multi-account scheduler and quota observations.
     #[command(
-        after_help = "Quota values are cached; this command does not refresh the backend.\n\
+        after_help = "Quota values are cached by default; pass --refresh (-r) or run `codex account refresh` to query live quota.\n\
             USED is the used quota percentage. UPDATED is the oldest window's sample age, not a reset countdown.\n\
             'stale' means a cached reset has passed; current usage requires refresh.\n\
             LOGIN only checks stored credentials. POOL and retry deadlines are local scheduling state.\n\n\
             Terminal output adapts to the window width; redirected output preserves TSV columns.\n\
             Pass --show-profile for full IDs, --details for each window's timestamps and resets.\n\
             Use a unique account label or full profile ID to select an account.\n\n\
-            Examples:\n  codex account pool\n  codex account status --details\n  codex account pool --format json"
+            Examples:\n  codex account pool\n  codex account pool --refresh\n  codex account status --details\n  codex account pool --format json"
     )]
     #[command(visible_alias = "status")]
     Pool {
+        /// Refresh live quota from the backend for ready enabled profiles before rendering.
+        #[arg(long, short = 'r')]
+        refresh: bool,
+
         /// Include the full local profile ID (acct-…).
         #[arg(long = "show-profile")]
         show_profile: bool,
@@ -772,7 +815,7 @@ enum AccountConfigSubcommand {
     /// Print `[account_pool]` settings from config.toml.
     Show,
 
-    /// Set automatic account selection strategy (`fill_first` or `earliest_reset`).
+    /// Set automatic account selection strategy (`fill_first`, `earliest_reset`, or `least_used`).
     SetRotationStrategy {
         /// Rotation strategy name.
         strategy: String,
@@ -2047,12 +2090,14 @@ async fn dispatch_cli(
                     .await;
                 }
                 AccountSubcommand::List {
+                    refresh,
                     show_profile,
                     format,
                     details,
                 } => {
                     account_cmd::run_account_list(
                         account_cli.config_overrides,
+                        refresh,
                         account_cmd::AccountOutputOptions {
                             show_profile,
                             format,
@@ -2114,6 +2159,26 @@ async fn dispatch_cli(
                     account_cmd::run_account_use(account_cli.config_overrides, profile_id, force)
                         .await;
                 }
+                AccountSubcommand::Auto { force } => {
+                    account_cmd::run_account_auto(account_cli.config_overrides, force).await;
+                }
+                AccountSubcommand::Refresh {
+                    profiles,
+                    show_profile,
+                    format,
+                    details,
+                } => {
+                    account_cmd::run_account_refresh(
+                        account_cli.config_overrides,
+                        profiles,
+                        account_cmd::AccountOutputOptions {
+                            show_profile,
+                            format,
+                            details,
+                        },
+                    )
+                    .await;
+                }
                 AccountSubcommand::Remove {
                     profile_id,
                     keep_credentials,
@@ -2126,12 +2191,14 @@ async fn dispatch_cli(
                     .await;
                 }
                 AccountSubcommand::Pool {
+                    refresh,
                     show_profile,
                     format,
                     details,
                 } => {
                     account_cmd::run_account_pool(
                         account_cli.config_overrides,
+                        refresh,
                         account_cmd::AccountOutputOptions {
                             show_profile,
                             format,

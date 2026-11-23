@@ -21,9 +21,21 @@ use crate::account_config::format_rotation_strategy;
 pub(super) async fn run_account_view(
     cli_config_overrides: CliConfigOverrides,
     view: AccountView,
-    mut options: AccountOutputOptions,
+    refresh: bool,
+    options: AccountOutputOptions,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
+    if refresh {
+        super::refresh_quota_for_cli(&config, /*selectors*/ None).await;
+    }
+    render_account_view_and_exit(&config, view, options)
+}
+
+pub(super) fn render_account_view_and_exit(
+    config: &codex_core::config::Config,
+    view: AccountView,
+    mut options: AccountOutputOptions,
+) -> ! {
     let mut records =
         match AccountProfileStore::new(config.codex_home.to_path_buf()).load_profile_records() {
             Ok(records) => records,

@@ -157,3 +157,78 @@ async fn preemptive_parking_retains_quota_until_all_crossed_windows_reset() -> a
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mid_turn_tool_step_boundary_preemptively_switches_accounts() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let plan_arguments = json!({
+        "explanation": "Step 1 crosses the 95% threshold",
+        "plan": [{"step": "Run tool", "status": "completed"}],
+    });
+    let reset_ts = (chrono::Utc::now() + chrono::Duration::hours(2))
+        .timestamp()
+        .to_string();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer access-primary",
+        ))
+        .respond_with(
+            responses::sse_response(responses::sse(vec![
+                responses::ev_response_created("step-1"),
+                responses::ev_function_call("call-1", "update_plan", &plan_arguments.to_string()),
+                responses::ev_completed("step-1"),
+            ]))
+            .insert_header("x-codex-primary-used-percent", "97.0")
+            .insert_header("x-codex-primary-window-minutes", "300")
+            .insert_header("x-codex-primary-reset-at", reset_ts.as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer access-backup",
+        ))
+        .respond_with(responses::sse_response(responses::sse(vec![
+            responses::ev_response_created("step-2"),
+            responses::ev_assistant_message("msg-2", "finished on backup without hitting 429"),
+            responses::ev_completed("step-2"),
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.update_plan_enabled = true;
+            config.account_pool.window_warmup = Some(false);
+        })
+        .with_pre_build_hook(super::account_failover::write_account_pool_fixture);
+    let fixture = builder.build_with_auto_env(&server).await?;
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "run multi-step turn and rotate cleanly between steps".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    let mut switch_warnings = Vec::new();
+    loop {
+        match fixture.codex.next_event().await?.msg {
+            EventMsg::Warning(warning) if warning.message.contains("Switched to Codex account") => {
+                switch_warnings.push(warning.message);
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(switch_warnings.len(), 1, "{switch_warnings:?}");
+    assert!(switch_warnings[0].contains("97%"), "{switch_warnings:?}");
+    Ok(())
+}
