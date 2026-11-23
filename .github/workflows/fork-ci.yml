@@ -116,7 +116,7 @@ jobs:
           # Cache workspace crates too so warm runs skip recompiling untouched codex-* crates.
           cache-all-crates: "true"
           shared-key: fork-ci-lld-allcrates-v2
-          cache-on-failure: false
+          cache-on-failure: true
 
       - name: Install system dependencies
         if: steps.changes.outputs.rust_needed == 'true'

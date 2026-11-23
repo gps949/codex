@@ -456,6 +456,7 @@ async fn account_pool_manual_reset_binds_business_seat(
         )
         .await??;
         expected.active_profile_id = Some(selected);
+        expected.manual_selection = true;
         expected.selection_revision += 1;
         expected
             .profiles

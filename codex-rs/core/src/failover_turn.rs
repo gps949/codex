@@ -217,7 +217,9 @@ pub(crate) fn recovery_continuation_message(execution_auth: &ExecutionAuth) -> S
         .and_then(|pool| pool.lease().ok().map(|lease| lease.notice_label()))
     {
         Some(label) => {
-            format!("Codex account {label} became available; the turn continues automatically.")
+            format!(
+                "Codex account {label} became available for retry; the turn continues automatically."
+            )
         }
         None => "A Codex account became available for retry. The turn continues automatically."
             .to_string(),
